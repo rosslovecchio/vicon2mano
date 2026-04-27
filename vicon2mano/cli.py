@@ -14,7 +14,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("input", help=".c3d or .csv Vicon file")
     parser.add_argument("output", help="output .npz path")
-    parser.add_argument("--mano-dir", default="data/mano", help="MANO model directory")
+    parser.add_argument("--mano-dir", default="../clean_kinematics/mano_v1_2/models", help="MANO model directory")
     parser.add_argument("--side", choices=["right", "left"], default="right")
     parser.add_argument("--no-pca", action="store_true", help="optimise full 45-dim pose")
     parser.add_argument("--n-pca", type=int, default=6)

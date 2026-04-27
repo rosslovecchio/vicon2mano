@@ -39,7 +39,7 @@ from .correspondence import hungarian_assignment, label_seed, sequence_assignmen
 
 @dataclass
 class FitConfig:
-    mano_model_path: str = "data/mano"   # directory with MANO_RIGHT.pkl
+    mano_model_path: str = "../clean_kinematics/mano_v1_2/models"  # directory with MANO_RIGHT.pkl
     hand_side: str = "right"             # "right" | "left"
 
     # optimisation

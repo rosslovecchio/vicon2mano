@@ -20,13 +20,9 @@ The optimisation follows a two-stage strategy inspired by SMPLify / Total Captur
 pip install -e ".[dev]"
 ```
 
-You must download the MANO model weights separately (requires registration):
-
-```
-https://mano.is.tue.mpg.de/
-```
-
-Place the unpacked files under `data/mano/` (or pass `--mano-dir`).
+MANO model weights are expected at `../clean_kinematics/mano_v1_2/models/`
+(i.e. the sibling `clean_kinematics` repo — `MANO_RIGHT.pkl` and `MANO_LEFT.pkl`).
+Pass `--mano-dir` to override.
 
 ## Usage
 
@@ -78,20 +74,23 @@ save_npz(result, "output.npz")
 
 ## Vicon marker label hints
 
-If your markers use Vicon Nexus naming, correspondences are auto-detected.
-Common patterns recognised (prefix `R`/`L` is stripped):
+Correspondences are auto-detected from label strings.  The primary naming
+convention (from `clean_kinematics/marker_map.json`) is:
 
-| Vicon label fragment | MANO joint   |
-|----------------------|--------------|
-| `WRB`, `WRA`, `WRI`  | wrist        |
-| `THB1` … `THB4`      | thumb MCP→tip|
-| `IDX1` … `IDX4`      | index MCP→tip|
-| `MID1` … `MID4`      | middle MCP→tip|
-| `RNG1` … `RNG4`      | ring MCP→tip |
-| `LIT1` … `LIT4`      | pinky MCP→tip|
+| Vicon label | MANO joint  | Notes                         |
+|-------------|-------------|-------------------------------|
+| `Palm2`     | wrist       | palm dorsum marker            |
+| `Thumb1-3`  | thumb MCP→DIP | fingertip not observed      |
+| `Index1-3`  | index MCP→DIP |                             |
+| `Middle1-3` | middle MCP→DIP|                             |
+| `Ring1-3`   | ring MCP→DIP|                             |
+| `Pinky1-3`  | pinky MCP→DIP|                             |
 
-The 22nd marker (often a palm/dorsum marker) is silently ignored if it cannot
-be matched within the z-score threshold.
+Unmatched markers (`Forearm1-4`, `Palm1`, `Palm3`, `lm22`) are ignored
+automatically — they fall outside the z-score threshold in the Hungarian step.
+
+The 5 fingertip joints are unobserved; the optimiser regularises them via the
+pose prior.
 
 ## References
 

@@ -34,29 +34,37 @@ MANO_JOINT_NAMES = [
     "pinky_mcp",  "pinky_pip",  "pinky_dip",  "pinky_tip",
 ]  # 21 entries
 
-# Keyword fragments that hint at each MANO joint — used for label-based seeding
+# Keyword fragments that hint at each MANO joint — used for label-based seeding.
+#
+# Primary naming (from marker_map.json in clean_kinematics):
+#   Palm2 → wrist proxy, Index1-3, Middle1-3, Pinky1-3, Ring1-3, Thumb1-3
+# Secondary naming (Nexus Rx prefixed, e.g. RIDX1):
+#   RWRB/WRA/WRI, RTHB1-4, RIDX1-4, RMID1-4, RRNG1-4, RLIT1-4
+#
+# MANO has 16 internal joints + 5 fingertip joints = 21 total.
+# The Vicon setup covers the 16 internal joints; fingertips are unobserved.
 _LABEL_HINTS: dict[str, list[str]] = {
-    "wrist":      ["wrist", "wrb", "wra", "wri"],
-    "thumb_mcp":  ["thb1", "thumb1", "thmcp"],
-    "thumb_pip":  ["thb2", "thumb2", "thpip"],
-    "thumb_dip":  ["thb3", "thumb3", "thdip"],
-    "thumb_tip":  ["thb4", "thumb4", "thtip", "thtop"],
-    "index_mcp":  ["idx1", "index1", "indmcp", "ind1"],
-    "index_pip":  ["idx2", "index2", "indpip", "ind2"],
-    "index_dip":  ["idx3", "index3", "inddip", "ind3"],
-    "index_tip":  ["idx4", "index4", "indtip", "ind4"],
-    "middle_mcp": ["mid1", "middle1", "midmcp"],
-    "middle_pip": ["mid2", "middle2", "midpip"],
-    "middle_dip": ["mid3", "middle3", "middip"],
-    "middle_tip": ["mid4", "middle4", "midtip"],
-    "ring_mcp":   ["rng1", "ring1",   "rngmcp"],
-    "ring_pip":   ["rng2", "ring2",   "rngpip"],
-    "ring_dip":   ["rng3", "ring3",   "rngdip"],
-    "ring_tip":   ["rng4", "ring4",   "rngtip"],
-    "pinky_mcp":  ["pnk1", "pinky1",  "litmcp", "lit1"],
-    "pinky_pip":  ["pnk2", "pinky2",  "litpip", "lit2"],
-    "pinky_dip":  ["pnk3", "pinky3",  "litdip", "lit3"],
-    "pinky_tip":  ["pnk4", "pinky4",  "littip", "lit4"],
+    "wrist":      ["palm2", "wrist", "wrb", "wra", "wri"],
+    "thumb_mcp":  ["thumb1", "thb1", "thmcp"],
+    "thumb_pip":  ["thumb2", "thb2", "thpip"],
+    "thumb_dip":  ["thumb3", "thb3", "thdip"],
+    "thumb_tip":  ["thumb4", "thb4", "thtip"],
+    "index_mcp":  ["index1", "idx1", "ind1", "indmcp"],
+    "index_pip":  ["index2", "idx2", "ind2", "indpip"],
+    "index_dip":  ["index3", "idx3", "ind3", "inddip"],
+    "index_tip":  ["index4", "idx4", "ind4", "indtip"],
+    "middle_mcp": ["middle1", "mid1", "midmcp"],
+    "middle_pip": ["middle2", "mid2", "midpip"],
+    "middle_dip": ["middle3", "mid3", "middip"],
+    "middle_tip": ["middle4", "mid4", "midtip"],
+    "ring_mcp":   ["ring1",   "rng1", "rngmcp"],
+    "ring_pip":   ["ring2",   "rng2", "rngpip"],
+    "ring_dip":   ["ring3",   "rng3", "rngdip"],
+    "ring_tip":   ["ring4",   "rng4", "rngtip"],
+    "pinky_mcp":  ["pinky1",  "pnk1", "lit1",  "litmcp"],
+    "pinky_pip":  ["pinky2",  "pnk2", "lit2",  "litpip"],
+    "pinky_dip":  ["pinky3",  "pnk3", "lit3",  "litdip"],
+    "pinky_tip":  ["pinky4",  "pnk4", "lit4",  "littip"],
 }
 
 
