@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "vicon2mano"
+version = "0.1.0"
+description = "Fit MANO hand model parameters to Vicon 3D marker data"
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "smplx>=0.1.28",      # provides mano model loader
+    "trimesh>=3.20",
+    "tqdm>=4.0",
+    "c3d>=0.3",           # read .c3d Vicon files
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "ruff"]
+
+[project.scripts]
+vicon2mano = "vicon2mano.cli:main"
+
+[tool.ruff]
+line-length = 100
