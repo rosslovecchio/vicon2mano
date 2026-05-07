@@ -1,0 +1,51 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Train Labeler",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scripts/train_labeler.py",
+            "python": "/home/codex/repos/vicon2mano/.viconvenv/bin/python",
+            "console": "integratedTerminal",
+            "args": [
+                "train",
+                "--real-data",
+                "/home/codex/repos/clean_kinematics/data/Px3/Hands_only1_labeled.csv",
+                "--out-weights",
+                "vicon2mano/weights/deep_labeler.pt",
+                "--epochs",
+                "20",
+                "--batch-size",
+                "16",
+                "--num-workers",
+                "4",
+                "--max-samples",
+                "500"
+            ]
+        },
+        // [train] done.  Best val loss: 0.01332  Weights → vicon2mano/weights/deep_labeler.pt
+        {
+            "name": "Python: Eval Labeler",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scripts/eval_labeler.py",
+            "python": "/home/codex/repos/vicon2mano/.viconvenv/bin/python",
+            "console": "integratedTerminal",
+            "args": [
+                "--weights",
+                "vicon2mano/weights/deep_labeler.pt",
+                "--real-data",
+                "/home/codex/repos/clean_kinematics/data/Px3/Hands_only1_labeled.csv",
+                "--mano-dir",
+                "/home/codex/repos/mano_v1_2/models",
+                "--out-dir",
+                "vicon2mano/eval/deep_labeler"
+            ]
+
+        }
+    ]
+}

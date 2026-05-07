@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=61", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "vicon2mano"
@@ -18,7 +18,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "ruff"]
+dev   = ["pytest", "pytest-cov", "ruff"]
+train = ["h5py>=3.8", "pandas>=1.5", "matplotlib>=3.7"]
 
 [project.scripts]
 vicon2mano = "vicon2mano.cli:main"

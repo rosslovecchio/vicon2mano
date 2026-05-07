@@ -34,7 +34,7 @@ try:
 except ImportError:
     _SMPLX_AVAILABLE = False
 
-from .correspondence import hungarian_assignment, label_seed, sequence_assignment
+from .correspondence import MANO_JOINT_NAMES, get_assignment
 
 
 @dataclass
@@ -81,8 +81,9 @@ class MANOFitter:
         # markers: (T, 22, 3) in mm
     """
 
-    def __init__(self, config: FitConfig | None = None):
+    def __init__(self, config: FitConfig | None = None, *, labeler=None):
         self.cfg = config or FitConfig()
+        self.labeler = labeler  # Optional[DeepLabeler]; None → Hungarian fallback
         if not _SMPLX_AVAILABLE:
             raise ImportError(
                 "smplx is required: pip install smplx\n"
@@ -113,26 +114,19 @@ class MANOFitter:
         T, N, _ = markers.shape
         markers_m = markers.astype(np.float32) * self.cfg.marker_scale  # → metres
 
-        # ---------- stage 0: coarse correspondences via mean pose ----------
+        # ---------- stage 0: coarse correspondences ----------
         with torch.no_grad():
             init_joints = self._forward_np(
                 np.zeros((T, 3)), np.zeros((T, 45)), np.zeros(10)
             )  # (T, 21, 3)
 
-        if marker_labels is not None:
-            seed = label_seed(marker_labels)
-        else:
-            seed = None
-
-        if seed and len(seed) >= 15:
-            # Build assignment array from label hints
-            assign = np.full(21, -1, dtype=int)
-            from .correspondence import MANO_JOINT_NAMES
-            for j_idx, jname in enumerate(MANO_JOINT_NAMES):
-                if jname in seed:
-                    assign[j_idx] = seed[jname]
-        else:
-            assign = sequence_assignment(markers_m, init_joints)
+        assign = get_assignment(
+            markers_m,
+            init_joints,
+            labeler=self.labeler,
+            per_frame=False,
+            marker_labels=marker_labels,
+        )
 
         if verbose:
             matched = (assign >= 0).sum()

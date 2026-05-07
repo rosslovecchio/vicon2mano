@@ -1,0 +1,19 @@
+Metadata-Version: 2.4
+Name: vicon2mano
+Version: 0.1.0
+Summary: Fit MANO hand model parameters to Vicon 3D marker data
+Requires-Python: >=3.9
+Requires-Dist: torch>=2.0
+Requires-Dist: numpy>=1.24
+Requires-Dist: scipy>=1.10
+Requires-Dist: smplx>=0.1.28
+Requires-Dist: trimesh>=3.20
+Requires-Dist: tqdm>=4.0
+Requires-Dist: c3d>=0.3
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+Provides-Extra: train
+Requires-Dist: h5py>=3.8; extra == "train"
+Requires-Dist: pandas>=1.5; extra == "train"

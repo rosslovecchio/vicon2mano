@@ -105,7 +105,10 @@ def hungarian_assignment(
 
     assign = np.full(len(mano_joints), -1, dtype=int)
     dists = cost[row_ind, col_ind]
-    thresh = dists.mean() + z_thresh * dists.std()
+    # Add a small absolute floor so that near-zero matched distances
+    # (e.g. when markers == joints up to floating-point noise) are not
+    # spuriously rejected by a near-zero threshold.
+    thresh = dists.mean() + z_thresh * dists.std() + 1e-6
     for r, c, d in zip(row_ind, col_ind, dists):
         if d <= thresh:
             assign[r] = c
@@ -132,3 +135,93 @@ def sequence_assignment(
         ])
         return assigns
     return hungarian_assignment(markers_seq.mean(0), mano_joints_seq.mean(0))
+
+
+# ---------------------------------------------------------------------------
+# Unified assignment entry point
+# ---------------------------------------------------------------------------
+
+def get_assignment(
+    markers_seq: np.ndarray,
+    mano_joints_seq: np.ndarray,
+    *,
+    labeler=None,
+    per_frame: bool = False,
+    marker_labels: list[str] | None = None,
+) -> np.ndarray:
+    """Return a marker↔joint assignment, trying strategies in priority order.
+
+    Priority:
+    1. DeepLabeler (if *labeler* is provided and succeeds).
+    2. Label-seed heuristic (if *marker_labels* are provided and ≥15 match).
+    3. Hungarian assignment on the mean pose (fallback).
+
+    Args:
+        markers_seq:     (T, N, 3) marker positions in metres.
+        mano_joints_seq: (T, 21, 3) MANO joint positions in metres (used only
+                         for the Hungarian fallback).
+        labeler:         Optional DeepLabeler instance.  Pass None to skip.
+        per_frame:       When True and the labeler is used, return (T, 21)
+                         per-frame assignments.  When False (default), collapse
+                         to a single (21,) assignment via majority vote.
+        marker_labels:   Optional list of N label strings (Vicon naming).
+                         Used for the label-seed path.
+
+    Returns:
+        (21,) int array (or (T, 21) when per_frame=True and labeler is used).
+        Unmatched joints have value -1.
+    """
+    import warnings
+
+    # ------------------------------------------------------------------
+    # Path 1: deep labeler
+    # ------------------------------------------------------------------
+    if labeler is not None:
+        try:
+            assign_seq = labeler.label_sequence(markers_seq)  # (T, 21)
+            if per_frame:
+                return assign_seq
+            return _majority_vote(assign_seq, n_markers=markers_seq.shape[1])
+        except Exception as exc:
+            warnings.warn(
+                f"DeepLabeler failed ({exc}); falling back to label-seed / Hungarian.",
+                stacklevel=2,
+            )
+
+    # ------------------------------------------------------------------
+    # Path 2: label-seed heuristic
+    # ------------------------------------------------------------------
+    if marker_labels is not None:
+        seed = label_seed(marker_labels)
+        if seed is not None and len(seed) >= 15:
+            assign = np.full(len(MANO_JOINT_NAMES), -1, dtype=int)
+            for j_idx, jname in enumerate(MANO_JOINT_NAMES):
+                if jname in seed:
+                    assign[j_idx] = seed[jname]
+            return assign
+
+    # ------------------------------------------------------------------
+    # Path 3: Hungarian on mean pose
+    # ------------------------------------------------------------------
+    return sequence_assignment(markers_seq, mano_joints_seq, per_frame=per_frame)
+
+
+def _majority_vote(assign_seq: np.ndarray, n_markers: int) -> np.ndarray:
+    """Collapse (T, 21) per-frame assignments to a single (21,) assignment.
+
+    For each joint, picks the most-frequent non-(-1) marker index across all
+    frames.  If every frame gave -1 for a joint, that joint stays -1.
+    """
+    T, J = assign_seq.shape
+    result = np.full(J, -1, dtype=int)
+    for j in range(J):
+        col = assign_seq[:, j]
+        valid = col[col >= 0]
+        if len(valid) == 0:
+            continue
+        # Guard against index >= n_markers
+        valid = valid[valid < n_markers]
+        if len(valid) == 0:
+            continue
+        result[j] = int(np.bincount(valid, minlength=n_markers).argmax())
+    return result

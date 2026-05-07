@@ -22,6 +22,15 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--iters-pose", type=int, default=200)
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--obj-dir", default=None, help="also export per-frame .obj meshes")
+    parser.add_argument(
+        "--labeler-weights",
+        default=None,
+        help=(
+            "Path to deep_labeler.pt weights for CNN-based marker labeling. "
+            "If omitted, the default location vicon2mano/weights/deep_labeler.pt "
+            "is tried automatically; falls back to Hungarian assignment if not found."
+        ),
+    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -50,7 +59,21 @@ def main(argv: list[str] | None = None) -> None:
     else:
         sys.exit(f"Unsupported input format: {ext}")
 
-    fitter = MANOFitter(cfg)
+    # Try to load the deep labeler; fall back gracefully if weights are absent.
+    labeler = None
+    from .deep_labeler import DeepLabeler, DEFAULT_WEIGHTS_PATH
+    weights_path = args.labeler_weights or DEFAULT_WEIGHTS_PATH
+    try:
+        labeler = DeepLabeler(weights_path=weights_path, device=None)
+        if not args.quiet:
+            print(f"[vicon2mano] Deep labeler loaded from {weights_path}")
+    except FileNotFoundError:
+        if args.labeler_weights is not None:
+            # User explicitly requested weights that don't exist — hard error.
+            sys.exit(f"Error: labeler weights not found at {args.labeler_weights}")
+        # Default path absent — silently fall back to Hungarian.
+
+    fitter = MANOFitter(cfg, labeler=labeler)
     result = fitter.fit(markers, labels, verbose=not args.quiet)
 
     save_npz(result, args.output)

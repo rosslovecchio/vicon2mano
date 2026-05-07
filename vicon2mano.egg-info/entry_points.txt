@@ -1,0 +1,2 @@
+[console_scripts]
+vicon2mano = vicon2mano.cli:main
