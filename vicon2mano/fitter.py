@@ -29,6 +29,16 @@ import torch
 import torch.nn as nn
 
 try:
+    import inspect
+    import numpy as _np
+    if not hasattr(inspect, "getargspec"):
+        inspect.getargspec = inspect.getfullargspec
+    # chumpy (a smplx dependency) uses removed numpy type aliases
+    _np_compat = {"int": int, "float": float, "bool": bool, "complex": complex,
+                  "object": object, "str": str, "unicode": str}
+    for _attr, _builtin in _np_compat.items():
+        if not hasattr(_np, _attr):
+            setattr(_np, _attr, _builtin)
     import smplx
     _SMPLX_AVAILABLE = True
 except ImportError:
@@ -166,6 +176,15 @@ class MANOFitter:
 
     def _load_model(self):
         model_path = Path(self.cfg.mano_model_path)
+        # smplx.create accepts either a .pkl file or a parent dir containing
+        # a mano/ subdirectory.  If the user points directly at the directory
+        # holding MANO_RIGHT.pkl / MANO_LEFT.pkl, resolve to the file.
+        if model_path.is_dir() and not (model_path / "mano").exists():
+            side_str = "RIGHT" if self.cfg.hand_side == "right" else "LEFT"
+            pkl = model_path / f"MANO_{side_str}.pkl"
+            if not pkl.exists():
+                raise FileNotFoundError(f"MANO weights not found at {pkl}")
+            model_path = pkl
         return smplx.create(
             str(model_path),
             model_type="mano",

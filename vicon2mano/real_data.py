@@ -77,6 +77,9 @@ class RealDataConfig:
     # Unit conversion: CSV stores mm, MANO works in metres.
     marker_scale: float = 1e-3
 
+    # Which hand to extract from wide-format CSVs ("left" or "right").
+    side: str = "left"
+
     # Augmentation — keep mild; real data already has natural occlusions.
     dropout_max: int = 3     # drop up to this many markers per frame
     ghost_max: int = 2       # add up to this many ghost markers
@@ -158,11 +161,12 @@ def _load_csv(
     csv_path: str | Path,
     cfg: RealDataConfig,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Parse the labeled CSV and return a list of (markers_m, joint_pos) tuples.
+    """Parse a Vicon CSV and return (markers_m, joint_pos) tuples.
 
-    Only frames with at least cfg.min_joints observed MANO joints are kept.
-    Frames are returned in ascending frame-index order (preserving temporal
-    order for the train/val split).
+    Supports two formats, auto-detected from column names:
+    - Long format: columns ``frame, marker, x_mm, y_mm, z_mm``
+    - Wide format: Vicon Nexus export with columns ``_Frame, MarkerName_X, _Y, _Z, …``
+                   (one row per frame, all markers as column triplets)
     """
     try:
         import pandas as pd
@@ -173,6 +177,16 @@ def _load_csv(
         ) from exc
 
     df = pd.read_csv(csv_path)
+    if "_Frame" in df.columns:
+        return _load_wide_csv(df, cfg)
+    return _load_long_csv(df, cfg)
+
+
+def _load_long_csv(
+    df,
+    cfg: RealDataConfig,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Parse long-format CSV (frame, marker, x_mm, y_mm, z_mm)."""
     required = {"frame", "marker", "x_mm", "y_mm", "z_mm"}
     if not required.issubset(df.columns):
         raise ValueError(
@@ -182,14 +196,71 @@ def _load_csv(
     scale = cfg.marker_scale
     frames: list[tuple[np.ndarray, np.ndarray]] = []
 
-    for frame_id, group in df.groupby("frame", sort=True):
+    for _frame_id, group in df.groupby("frame", sort=True):
         marker_names = group["marker"].tolist()
         positions_m = group[["x_mm", "y_mm", "z_mm"]].to_numpy(np.float32) * scale
 
-        # Build (21, 3) joint position array; NaN where unobserved.
         joint_pos = np.full((21, 3), np.nan, dtype=np.float32)
         n_observed = 0
         for name, pos in zip(marker_names, positions_m):
+            if name in MARKER_TO_MANO:
+                joint_pos[MARKER_TO_MANO[name]] = pos
+                n_observed += 1
+
+        if n_observed < cfg.min_joints:
+            continue
+
+        frames.append((positions_m, joint_pos))
+
+    return frames
+
+
+def _load_wide_csv(
+    df,
+    cfg: RealDataConfig,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Parse wide-format Vicon Nexus CSV.
+
+    Column layout: ``_Frame, _Sub Frame, MarkerName_X, _Y, _Z, …``
+    Marker names contain ``_Left`` or ``_Right``; cfg.side selects which hand.
+    The suffix is stripped before looking up MARKER_TO_MANO.
+    """
+    suffix = f"_{cfg.side.capitalize()}"   # "_Left" or "_Right"
+    all_cols = list(df.columns)
+
+    # Find (name, x_idx, y_idx, z_idx) for each marker on the requested side
+    triplets: list[tuple[str, int, int, int]] = []
+    for i, col in enumerate(all_cols):
+        if col.endswith("_X") and suffix in col:
+            bare = col.replace("_X", "").replace(suffix, "")  # e.g. "Palm2"
+            triplets.append((bare, i, i + 1, i + 2))
+
+    if not triplets:
+        raise ValueError(
+            f"No '{suffix}' markers found in wide CSV. "
+            f"Available columns: {all_cols[:20]}"
+        )
+
+    scale = cfg.marker_scale
+    frames: list[tuple[np.ndarray, np.ndarray]] = []
+
+    for _, row in df.iterrows():
+        positions: list[np.ndarray] = []
+        names: list[str] = []
+        for bare, xi, yi, zi in triplets:
+            x, y, z = row.iloc[xi], row.iloc[yi], row.iloc[zi]
+            if not (np.isnan(x) or np.isnan(y) or np.isnan(z)):
+                positions.append([float(x), float(y), float(z)])
+                names.append(bare)
+
+        if not positions:
+            continue
+
+        positions_m = np.array(positions, dtype=np.float32) * scale
+
+        joint_pos = np.full((21, 3), np.nan, dtype=np.float32)
+        n_observed = 0
+        for name, pos in zip(names, positions_m):
             if name in MARKER_TO_MANO:
                 joint_pos[MARKER_TO_MANO[name]] = pos
                 n_observed += 1

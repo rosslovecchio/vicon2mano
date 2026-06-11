@@ -14,7 +14,7 @@
             "args": [
                 "train",
                 "--real-data",
-                "/home/codex/repos/clean_kinematics/data/Px3/Hands_only1_labeled.csv",
+                "data/Pxh8/Hands_only_Left/trajectories_synced.csv",
                 "--out-weights",
                 "vicon2mano/weights/deep_labeler.pt",
                 "--epochs",
@@ -39,7 +39,7 @@
                 "--weights",
                 "vicon2mano/weights/deep_labeler.pt",
                 "--real-data",
-                "/home/codex/repos/clean_kinematics/data/Px3/Hands_only1_labeled.csv",
+                "data/Pxh8/Hands_only_Left/trajectories_synced.csv",
                 "--mano-dir",
                 "/home/codex/repos/mano_v1_2/models",
                 "--out-dir",

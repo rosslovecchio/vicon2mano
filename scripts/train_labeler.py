@@ -81,8 +81,8 @@ def _train(args):
     print("[train] loading dataset …", flush=True)
     if args.real_data:
         from vicon2mano.real_data import RealDataConfig, make_real_dataset
-        cfg = RealDataConfig(val_frac=args.val_frac)
-        print(f"[train] parsing CSV: {args.real_data}", flush=True)
+        cfg = RealDataConfig(val_frac=args.val_frac, side=args.side)
+        print(f"[train] parsing CSV: {args.real_data}  side={args.side}", flush=True)
         train_ds = make_real_dataset(args.real_data, split="train", cfg=cfg)
         val_ds = make_real_dataset(args.real_data, split="val", cfg=cfg)
         print(f"[train] real data: {args.real_data}", flush=True)
@@ -305,6 +305,8 @@ def _build_parser() -> argparse.ArgumentParser:
     trn.add_argument("--val-frac", type=float, default=0.02)
     trn.add_argument("--max-samples", type=int, default=None,
                      help="Cap training+val to this many frames (useful for quick smoke-tests).")
+    trn.add_argument("--side", default="left", choices=["left", "right"],
+                     help="Which hand to load from wide-format CSVs (default: left).")
     trn.add_argument("--no-amp", dest="amp", action="store_false", default=True,
                      help="Disable automatic mixed precision (AMP).")
 
