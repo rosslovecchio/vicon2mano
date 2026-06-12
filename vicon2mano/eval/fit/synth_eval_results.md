@@ -7,41 +7,56 @@ Each condition: ≥2 synthetic subjects × 1000 frames, smooth keyframed grasps
 
 ## Error budget (controlled ablation)
 
-| Condition | Pose space (GT) | Skin offset | Noise | Tip markers | Angle MAE | Joint pos err | Median corr |
-|---|---|---|---|---|---|---|---|
-| Realistic           | PCA-15 | 8 mm | 1 mm | no  | **9.8°**  | 8.1 mm | 0.55 |
-| Perfect markers     | PCA-15 | 0    | 0    | no  | 9.1°      | 6.6 mm | 0.62 |
-| + matched pose space| PCA-6  | 0    | 0    | no  | 6.6°      | 4.1 mm | 0.87 |
-| + fingertip markers | PCA-6  | 0    | 0    | yes | **4.7°**  | 2.7 mm | 0.96 |
+| # | Condition | GT pose | Fit pose | Offset | Noise | Tips | Angle MAE | Joint err | Median corr |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | Realistic              | PCA-15 | PCA-6  | 8 mm | 1 mm | no  | **9.8°** | 8.1 mm | 0.55 |
+| 2 | Realistic, richer fit  | PCA-15 | PCA-12 | 8 mm | 1 mm | no  | 9.5°     | 7.2 mm | 0.60 |
+| 3 | Perfect markers        | PCA-15 | PCA-6  | 0    | 0    | no  | 9.1°     | 6.6 mm | 0.62 |
+| 4 | Perfect, richer fit    | PCA-15 | PCA-12 | 0    | 0    | no  | 8.5°     | 5.6 mm | 0.67 |
+| 5 | Truth in fit subspace  | PCA-6  | PCA-6  | 0    | 0    | no  | 6.6°     | 4.1 mm | 0.87 |
+| 6 | + fingertip markers    | PCA-6  | PCA-6  | 0    | 0    | yes | **4.7°** | 2.7 mm | 0.96 |
 
-Reading the rows top-to-bottom isolates each error source:
+Reading the contrasts isolates each error source:
 
-- **Marker realism (offset+noise): ~0.7°.** Negligible — the fit is not
-  limited by skin-mount offset or capture noise.
-- **Pose-space model mismatch (PCA-6 fit vs richer truth): ~2.5°** and the
-  biggest single hit to correlation (0.62→0.87). Raising `n_pca_comps`
-  toward 10–15 is the highest-leverage accuracy lever.
-- **Sparse-protocol identifiability (no fingertip marker): ~1.9°**, almost
-  entirely on distal (PIP/DIP) joints — adding a tip marker lifts DIP
+- **Marker realism (offset+noise): ~0.7°** (row 1 vs 3). Negligible — the fit
+  is not limited by skin-mount offset or capture noise.
+- **Fitter pose order (PCA-6 → PCA-12): only ~0.3–0.6°** (row 1 vs 2, row 3
+  vs 4). *Surprisingly small.* Extra pose DOF does not rescue accuracy:
+  with realistic markers the added freedom partly absorbs the skin offset,
+  and with clean markers the unrecovered truth lives in pose directions that
+  3 near-collinear markers per finger cannot observe regardless of model
+  order. **Do not over-parameterize** — n_pca_comps≈6 is a reasonable
+  default; the PCA-order curve is nearly flat.
+- **Truth living outside the fit's pose subspace: ~2.5°** (row 3 vs 5).
+  Real finger poses are not confined to a low-dim PCA subspace; this gap is
+  intrinsic to using a truncated hand prior and is *not* closed by raising
+  the order (see above).
+- **Sparse-protocol identifiability (no fingertip marker): ~1.9°** (row 5 vs
+  6), almost entirely on distal (PIP/DIP) joints — a tip marker lifts DIP
   correlation ~0.68→0.91. 3 near-collinear markers per finger constrain
   in-plane flexion but under-determine the distal segment whose endpoint
   (the tip) is unmarked.
 
 ## Takeaways for a methods paper
 
-1. The dominant error is **model expressiveness (PCA truncation)**, not data
-   quality — a clean, defensible result and an obvious improvement axis.
-2. **Protocol design matters**: distal-joint fidelity is limited by the
-   missing fingertip marker, independent of the algorithm. This is a
-   protocol-level finding usable as a contribution in its own right.
+1. **Protocol design dominates the controllable error.** Adding one
+   fingertip marker per finger is the single most effective change (−1.9°,
+   distal corr 0.68→0.91); raising model order is not (−0.5°). This is the
+   headline, actionable, algorithm-independent finding.
+2. **The PCA-order curve is nearly flat** — a useful negative result that
+   pre-empts "did you just need more components?" and argues against
+   over-parameterizing against noisy markers.
 3. Proximal joints (MCP) are recovered well (corr 0.87–0.97) under every
-   condition — sparse-marker MANO fitting is already reliable there.
+   condition — sparse-marker MANO fitting is already reliable there; the
+   open problem is distal joints, and it is a *protocol* problem.
 
 ## Reproduce
 
 ```bash
-.viconvenv/bin/python scripts/eval_synth_fit.py --n-seq 3 --n-frames 1000          # realistic
-.viconvenv/bin/python scripts/eval_synth_fit.py --offset-mm 0 --noise-mm 0          # perfect markers
-.viconvenv/bin/python scripts/eval_synth_fit.py --offset-mm 0 --noise-mm 0 --gt-pca 6        # + matched pose
-.viconvenv/bin/python scripts/eval_synth_fit.py --offset-mm 0 --noise-mm 0 --gt-pca 6 --tips # + tip markers
+.viconvenv/bin/python scripts/eval_synth_fit.py --n-seq 3 --n-frames 1000                      # row 1
+.viconvenv/bin/python scripts/eval_synth_fit.py --n-seq 3 --n-frames 1000 --fit-pca 12         # row 2
+.viconvenv/bin/python scripts/eval_synth_fit.py --offset-mm 0 --noise-mm 0                      # row 3
+.viconvenv/bin/python scripts/eval_synth_fit.py --offset-mm 0 --noise-mm 0 --fit-pca 12         # row 4
+.viconvenv/bin/python scripts/eval_synth_fit.py --offset-mm 0 --noise-mm 0 --gt-pca 6           # row 5
+.viconvenv/bin/python scripts/eval_synth_fit.py --offset-mm 0 --noise-mm 0 --gt-pca 6 --tips    # row 6
 ```
