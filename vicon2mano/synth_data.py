@@ -216,7 +216,15 @@ def generate_dataset(cfg: SynthConfig | None = None) -> None:
     rng = np.random.default_rng(cfg.seed)
 
     # Load MANO on CPU (inference only; no GPU needed for generation)
+    # smplx.create wants either a .pkl file or a parent dir with a mano/
+    # subdirectory; resolve a plain models dir to the side-specific .pkl.
     model_path = Path(cfg.mano_model_path)
+    if model_path.is_dir() and not (model_path / "mano").exists():
+        side_str = "RIGHT" if cfg.hand_side == "right" else "LEFT"
+        pkl = model_path / f"MANO_{side_str}.pkl"
+        if not pkl.exists():
+            raise FileNotFoundError(f"MANO weights not found at {pkl}")
+        model_path = pkl
     mano = smplx.create(
         str(model_path),
         model_type="mano",
@@ -228,13 +236,14 @@ def generate_dataset(cfg: SynthConfig | None = None) -> None:
 
     n = cfg.n_samples
     bs = cfg.mano_batch_size
+    chunk = min(cfg.chunk_size, n)  # h5py chunks must not exceed data shape
 
     with h5py.File(output_path, "w") as f:
         ds_markers = f.create_dataset(
             "marker_positions",
             shape=(n, MAX_MARKERS, 3),
             dtype="float32",
-            chunks=(cfg.chunk_size, MAX_MARKERS, 3),
+            chunks=(chunk, MAX_MARKERS, 3),
             compression="gzip",
             compression_opts=4,
         )
@@ -242,13 +251,13 @@ def generate_dataset(cfg: SynthConfig | None = None) -> None:
             "marker_counts",
             shape=(n,),
             dtype="int32",
-            chunks=(cfg.chunk_size,),
+            chunks=(chunk,),
         )
         ds_joints = f.create_dataset(
             "joint_positions",
             shape=(n, 21, 3),
             dtype="float32",
-            chunks=(cfg.chunk_size, 21, 3),
+            chunks=(chunk, 21, 3),
             compression="gzip",
             compression_opts=4,
         )
@@ -284,13 +293,16 @@ def generate_dataset(cfg: SynthConfig | None = None) -> None:
                     )
 
                 import torch as _torch
+                from .fitter import mano_output_to_joints21
                 with _torch.no_grad():
                     out = mano(
                         global_orient=_torch.tensor(global_orient),
                         hand_pose=_torch.tensor(hand_pose),
                         betas=_torch.tensor(betas),
                     )
-                joints_batch = out.joints[:batch, :21].cpu().numpy()  # (batch, 21, 3)
+                joints_batch = (
+                    mano_output_to_joints21(out)[:batch].cpu().numpy()
+                )  # (batch, 21, 3) repo joint order incl. fingertip vertices
 
                 for i in range(batch):
                     padded, n_markers = augment_markers(joints_batch[i], rng, cfg)

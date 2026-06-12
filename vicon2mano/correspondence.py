@@ -20,6 +20,9 @@ works when Vicon labels follow a consistent naming convention
 
 from __future__ import annotations
 
+import re
+import warnings
+
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
@@ -68,17 +71,44 @@ _LABEL_HINTS: dict[str, list[str]] = {
 }
 
 
-def label_seed(marker_labels: list[str]) -> dict[str, int] | None:
+def _normalise_label(label: str) -> str:
+    """Canonicalise a Vicon label for hint matching.
+
+    Lowercases, drops side designators, and strips non-alphanumerics so
+    that e.g. "Index_Left1" → "index1" and "RIDX2" → "ridx2".
+    """
+    s = label.lower().replace("left", "").replace("right", "")
+    return re.sub(r"[^a-z0-9]", "", s)
+
+
+def label_seed(
+    marker_labels: list[str],
+    *,
+    side: str | None = None,
+) -> dict[str, int] | None:
     """Try to seed correspondences from marker label strings.
+
+    Args:
+        marker_labels: raw Vicon label strings.
+        side:          "left" or "right".  When given, labels naming the
+                       opposite side (e.g. "Index_Right1" while fitting the
+                       left hand) are excluded — needed for two-hand exports.
 
     Returns a dict {joint_name: marker_index} for each joint that could be
     matched, or None if fewer than 10 joints were resolved (too uncertain).
     """
-    labels_lower = [l.lower() for l in marker_labels]
+    opposite = {"left": "right", "right": "left"}.get(side or "")
+    labels_norm: list[str | None] = []
+    for l in marker_labels:
+        if opposite and opposite in l.lower():
+            labels_norm.append(None)
+        else:
+            labels_norm.append(_normalise_label(l))
+
     assignment: dict[str, int] = {}
     for joint, hints in _LABEL_HINTS.items():
-        for idx, lbl in enumerate(labels_lower):
-            if any(h in lbl for h in hints):
+        for idx, lbl in enumerate(labels_norm):
+            if lbl is not None and any(h in lbl for h in hints):
                 assignment[joint] = idx
                 break
     return assignment if len(assignment) >= 10 else None
@@ -93,7 +123,18 @@ def hungarian_assignment(
     """Return index array `assign` of length J.
 
     assign[j] = index into markers (or -1 if no confident match).
+
+    Markers with non-finite coordinates (Vicon gaps) are excluded; returned
+    indices always refer to the original markers array.
     """
+    assign = np.full(len(mano_joints), -1, dtype=int)
+
+    finite = np.isfinite(markers).all(axis=1)
+    orig_idx = np.flatnonzero(finite)
+    if len(orig_idx) == 0:
+        return assign
+    markers = markers[finite]
+
     # Normalise both to zero-mean unit-variance
     m = markers - markers.mean(0)
     m /= np.linalg.norm(m) + 1e-8
@@ -103,7 +144,6 @@ def hungarian_assignment(
     cost = np.linalg.norm(m[None, :, :] - j[:, None, :], axis=-1)  # (J, N)
     row_ind, col_ind = linear_sum_assignment(cost)
 
-    assign = np.full(len(mano_joints), -1, dtype=int)
     dists = cost[row_ind, col_ind]
     # Add a small absolute floor so that near-zero matched distances
     # (e.g. when markers == joints up to floating-point noise) are not
@@ -111,7 +151,7 @@ def hungarian_assignment(
     thresh = dists.mean() + z_thresh * dists.std() + 1e-6
     for r, c, d in zip(row_ind, col_ind, dists):
         if d <= thresh:
-            assign[r] = c
+            assign[r] = orig_idx[c]
     return assign
 
 
@@ -134,7 +174,12 @@ def sequence_assignment(
             for t in range(T)
         ])
         return assigns
-    return hungarian_assignment(markers_seq.mean(0), mano_joints_seq.mean(0))
+    # nanmean tolerates per-frame Vicon gaps; markers missing in every frame
+    # come out all-NaN and are dropped inside hungarian_assignment.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        markers_mean = np.nanmean(markers_seq, axis=0)
+    return hungarian_assignment(markers_mean, mano_joints_seq.mean(0))
 
 
 # ---------------------------------------------------------------------------
@@ -148,12 +193,14 @@ def get_assignment(
     labeler=None,
     per_frame: bool = False,
     marker_labels: list[str] | None = None,
+    side: str | None = None,
 ) -> np.ndarray:
     """Return a marker↔joint assignment, trying strategies in priority order.
 
     Priority:
-    1. DeepLabeler (if *labeler* is provided and succeeds).
-    2. Label-seed heuristic (if *marker_labels* are provided and ≥15 match).
+    1. Label-seed heuristic (if *marker_labels* are provided and ≥15 match).
+       Trusted Vicon labels beat any learned predictor.
+    2. DeepLabeler (if *labeler* is provided and succeeds).
     3. Hungarian assignment on the mean pose (fallback).
 
     Args:
@@ -161,20 +208,34 @@ def get_assignment(
         mano_joints_seq: (T, 21, 3) MANO joint positions in metres (used only
                          for the Hungarian fallback).
         labeler:         Optional DeepLabeler instance.  Pass None to skip.
-        per_frame:       When True and the labeler is used, return (T, 21)
-                         per-frame assignments.  When False (default), collapse
-                         to a single (21,) assignment via majority vote.
+        per_frame:       When True, return (T, 21) per-frame assignments.
+                         When False (default), return a single (21,)
+                         assignment (majority vote for the labeler path).
         marker_labels:   Optional list of N label strings (Vicon naming).
                          Used for the label-seed path.
+        side:            "left"/"right" — excludes opposite-side labels when
+                         the export contains both hands.
 
     Returns:
-        (21,) int array (or (T, 21) when per_frame=True and labeler is used).
+        (21,) int array (or (T, 21) when per_frame=True).
         Unmatched joints have value -1.
     """
-    import warnings
+    # ------------------------------------------------------------------
+    # Path 1: label-seed heuristic — explicit labels are the most reliable
+    # ------------------------------------------------------------------
+    if marker_labels is not None:
+        seed = label_seed(marker_labels, side=side)
+        if seed is not None and len(seed) >= 15:
+            assign = np.full(len(MANO_JOINT_NAMES), -1, dtype=int)
+            for j_idx, jname in enumerate(MANO_JOINT_NAMES):
+                if jname in seed:
+                    assign[j_idx] = seed[jname]
+            if per_frame:
+                return np.tile(assign[None, :], (markers_seq.shape[0], 1))
+            return assign
 
     # ------------------------------------------------------------------
-    # Path 1: deep labeler
+    # Path 2: deep labeler
     # ------------------------------------------------------------------
     if labeler is not None:
         try:
@@ -184,21 +245,9 @@ def get_assignment(
             return _majority_vote(assign_seq, n_markers=markers_seq.shape[1])
         except Exception as exc:
             warnings.warn(
-                f"DeepLabeler failed ({exc}); falling back to label-seed / Hungarian.",
+                f"DeepLabeler failed ({exc}); falling back to Hungarian.",
                 stacklevel=2,
             )
-
-    # ------------------------------------------------------------------
-    # Path 2: label-seed heuristic
-    # ------------------------------------------------------------------
-    if marker_labels is not None:
-        seed = label_seed(marker_labels)
-        if seed is not None and len(seed) >= 15:
-            assign = np.full(len(MANO_JOINT_NAMES), -1, dtype=int)
-            for j_idx, jname in enumerate(MANO_JOINT_NAMES):
-                if jname in seed:
-                    assign[j_idx] = seed[jname]
-            return assign
 
     # ------------------------------------------------------------------
     # Path 3: Hungarian on mean pose

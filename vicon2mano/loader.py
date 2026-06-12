@@ -34,8 +34,15 @@ def load_c3d(path: str) -> tuple[np.ndarray, list[str], float]:
 def load_csv(path: str, *, mm: bool = True) -> tuple[np.ndarray, list[str]]:
     """Read a Vicon-exported CSV (Nexus format).
 
-    Expected column layout (after the two header rows):
+    Two layouts are auto-detected:
+
+    Two-row header (device names + axis labels):
         Frame, Sub Frame, Marker0_X, Marker0_Y, Marker0_Z, Marker1_X, ...
+
+    Single-row wide header (trajectories export):
+        _Frame, _Sub Frame, Marker0_X, _Y, _Z, Marker1_X, _Y, _Z, ...
+
+    Missing coordinates (blank cells) become NaN.
 
     Args:
         path: path to CSV file
@@ -50,9 +57,26 @@ def load_csv(path: str, *, mm: bool = True) -> tuple[np.ndarray, list[str]]:
     with open(path, newline="") as fh:
         rows = list(csv.reader(fh))
 
-    # Nexus exports: row 0 = device names (repeated 3×), row 1 = axis labels
-    # Find the header row that contains axis labels (X/Y/Z)
-    header_row = next(i for i, r in enumerate(rows) if any(c.strip() in ("X", "Y", "Z") for c in r))
+    # Wide format: a single header row with "<Marker>_X" cells
+    wide_idx = next(
+        (i for i, r in enumerate(rows[:20])
+         if any(c.strip().endswith("_X") and len(c.strip()) > 2 for c in r)),
+        None,
+    )
+    if wide_idx is not None:
+        return _parse_wide_rows(rows, wide_idx, mm=mm)
+
+    # Two-row format: find the axis-label row (cells X/Y/Z)
+    try:
+        header_row = next(
+            i for i, r in enumerate(rows)
+            if any(c.strip() in ("X", "Y", "Z") for c in r)
+        )
+    except StopIteration:
+        raise ValueError(
+            f"Unrecognised CSV layout in {path}: no '<Marker>_X' header cells "
+            "and no X/Y/Z axis-label row found."
+        ) from None
     name_row = rows[header_row - 1]
 
     # Build label list from the name row (every 3 columns after Frame/SubFrame)
@@ -70,6 +94,46 @@ def load_csv(path: str, *, mm: bool = True) -> tuple[np.ndarray, list[str]]:
         vals = [float(v) if v.strip() else np.nan for v in row[col_start:]]
         xyz = np.array(vals, dtype=np.float32).reshape(-1, 3)
         frames.append(xyz)
+
+    markers = np.stack(frames, axis=0)  # (T, N, 3)
+    if not mm:
+        markers *= 1000.0
+    return markers, labels
+
+
+def _parse_wide_rows(
+    rows: list[list[str]],
+    header_idx: int,
+    *,
+    mm: bool,
+) -> tuple[np.ndarray, list[str]]:
+    """Parse the single-header wide layout (Marker_X, _Y, _Z triplets)."""
+    header = rows[header_idx]
+    cols = [
+        (c.strip()[:-2], j)
+        for j, c in enumerate(header)
+        if c.strip().endswith("_X") and len(c.strip()) > 2
+    ]
+    labels = [name for name, _ in cols]
+
+    frames = []
+    for row in rows[header_idx + 1:]:
+        if not row or not row[0].strip().lstrip("-").isdigit():
+            continue
+        frame = np.full((len(cols), 3), np.nan, dtype=np.float32)
+        for k, (_, j) in enumerate(cols):
+            for axis in range(3):
+                if j + axis < len(row):
+                    v = row[j + axis].strip()
+                    if v:
+                        try:
+                            frame[k, axis] = float(v)
+                        except ValueError:
+                            pass
+        frames.append(frame)
+
+    if not frames:
+        raise ValueError("Wide CSV contained no data rows.")
 
     markers = np.stack(frames, axis=0)  # (T, N, 3)
     if not mm:

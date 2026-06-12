@@ -19,8 +19,22 @@ import pytest
 from vicon2mano.correspondence import (
     MANO_JOINT_NAMES,
     _majority_vote,
+    _normalise_label,
     get_assignment,
+    hungarian_assignment,
+    label_seed,
 )
+
+# clean_kinematics-style labels with a side infix (16 MANO-mappable markers)
+_SIDED_LABELS = [
+    "Forearm_Left1", "Forearm_Left2", "Forearm_Left3", "Forearm_Left4",
+    "Palm_Left1", "Palm_Left2", "Palm_Left3",
+    "Thumb_Left1", "Thumb_Left2", "Thumb_Left3",
+    "Index_Left1", "Index_Left2", "Index_Left3",
+    "Middle_Left1", "Middle_Left2", "Middle_Left3",
+    "Ring_Left1", "Ring_Left2", "Ring_Left3",
+    "Pinky_Left1", "Pinky_Left2", "Pinky_Left3",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +158,74 @@ class TestGetAssignmentWithLabeler:
 
         N = markers.shape[1]
         assert np.all((assign == -1) | ((assign >= 0) & (assign < N)))
+
+
+# ---------------------------------------------------------------------------
+# Label normalisation and priority
+# ---------------------------------------------------------------------------
+
+class TestLabelNormalisation:
+    def test_side_infix_stripped(self):
+        assert _normalise_label("Index_Left1") == "index1"
+        assert _normalise_label("Palm_Right2") == "palm2"
+
+    def test_plain_labels_unchanged(self):
+        assert _normalise_label("RIDX2") == "ridx2"
+        assert _normalise_label("Thumb1") == "thumb1"
+
+    def test_label_seed_resolves_sided_labels(self):
+        seed = label_seed(_SIDED_LABELS)
+        assert seed is not None
+        assert len(seed) == 16  # all non-fingertip joints
+        assert seed["wrist"] == _SIDED_LABELS.index("Palm_Left2")
+        assert seed["index_mcp"] == _SIDED_LABELS.index("Index_Left1")
+
+
+class TestLabelSeedPriority:
+    def test_seed_beats_labeler(self):
+        """With ≥15 recognised labels, the seed wins over the deep labeler."""
+        T, N = 3, len(_SIDED_LABELS)
+        rng = np.random.default_rng(1)
+        markers = rng.uniform(-0.15, 0.15, (T, N, 3)).astype(np.float32)
+        joints = rng.uniform(-0.15, 0.15, (T, 21, 3)).astype(np.float32)
+        labeler = _FakeLabeler(fixed_assign=np.zeros(21, dtype=int))
+
+        assign = get_assignment(
+            markers, joints, labeler=labeler, marker_labels=_SIDED_LABELS
+        )
+        # labeler would have set everything to 0; the seed maps wrist → Palm2
+        assert assign[MANO_JOINT_NAMES.index("wrist")] == _SIDED_LABELS.index("Palm_Left2")
+        # unobserved fingertips stay -1 (labeler would have claimed them)
+        assert assign[MANO_JOINT_NAMES.index("thumb_tip")] == -1
+
+    def test_seed_per_frame_is_tiled(self):
+        T, N = 4, len(_SIDED_LABELS)
+        rng = np.random.default_rng(2)
+        markers = rng.uniform(-0.15, 0.15, (T, N, 3)).astype(np.float32)
+        joints = rng.uniform(-0.15, 0.15, (T, 21, 3)).astype(np.float32)
+
+        assign = get_assignment(
+            markers, joints, marker_labels=_SIDED_LABELS, per_frame=True
+        )
+        assert assign.shape == (T, 21)
+        assert np.array_equal(assign[0], assign[-1])
+
+
+class TestHungarianNaN:
+    def test_nan_markers_excluded_indices_preserved(self):
+        rng = np.random.default_rng(3)
+        joints = rng.uniform(-0.1, 0.1, (21, 3)).astype(np.float32)
+        markers = joints.copy()           # perfect correspondence
+        markers[5] = np.nan               # marker 5 is a Vicon gap
+        assign = hungarian_assignment(markers, joints)
+        assert assign[5] != 5 or assign[5] == -1  # joint 5 cannot get the NaN marker
+        valid = assign[assign >= 0]
+        assert 5 not in valid
+
+    def test_all_nan_returns_all_minus1(self):
+        joints = np.zeros((21, 3), dtype=np.float32)
+        markers = np.full((10, 3), np.nan, dtype=np.float32)
+        assert np.all(hungarian_assignment(markers, joints) == -1)
 
 
 # ---------------------------------------------------------------------------

@@ -302,16 +302,23 @@ class DeepLabeler:
     def label_frame(self, markers: np.ndarray) -> np.ndarray:
         """Label a single frame.
 
+        Markers with non-finite coordinates (Vicon gaps) are ignored;
+        returned indices refer to the original markers array.
+
         Args:
             markers: (N, 3) marker positions in metres.
 
         Returns:
             assign: (21,) int; assign[j] = marker index or -1.
         """
-        grid, centroid = voxelise_with_centroid(markers)
+        clean, orig_idx = _finite_markers(markers)
+        if len(clean) == 0:
+            return np.full(K_JOINTS, -1, dtype=int)
+        grid, centroid = voxelise_with_centroid(clean)
         with torch.no_grad():
             logits = self.model(grid.unsqueeze(0).to(self.device))  # (1, 21, res, res, res)
-        return assign_from_heatmaps(logits[0].cpu(), markers, centroid)
+        assign = assign_from_heatmaps(logits[0].cpu(), clean, centroid)
+        return _remap_assignment(assign, orig_idx)
 
     def label_sequence(
         self,
@@ -334,19 +341,47 @@ class DeepLabeler:
 
         grids: list[torch.Tensor] = []
         centroids: list[np.ndarray] = []
+        cleans: list[np.ndarray] = []
+        orig_idxs: list[np.ndarray] = []
+        frame_ids: list[int] = []
         for t in range(T):
-            g, c = voxelise_with_centroid(markers_seq[t])
+            clean, orig_idx = _finite_markers(markers_seq[t])
+            if len(clean) == 0:
+                continue  # fully occluded frame stays all -1
+            g, c = voxelise_with_centroid(clean)
             grids.append(g)
             centroids.append(c)
+            cleans.append(clean)
+            orig_idxs.append(orig_idx)
+            frame_ids.append(t)
 
         with torch.no_grad():
-            for start in range(0, T, batch_size):
-                end = min(start + batch_size, T)
+            for start in range(0, len(grids), batch_size):
+                end = min(start + batch_size, len(grids))
                 batch = torch.stack(grids[start:end]).to(self.device)  # (B, 1, res, res, res)
                 logits = self.model(batch)                              # (B, 21, res, res, res)
-                for i, t in enumerate(range(start, end)):
-                    result[t] = assign_from_heatmaps(
-                        logits[i].cpu(), markers_seq[t], centroids[t]
+                for i, k in enumerate(range(start, end)):
+                    assign = assign_from_heatmaps(
+                        logits[i].cpu(), cleans[k], centroids[k]
                     )
+                    result[frame_ids[k]] = _remap_assignment(assign, orig_idxs[k])
 
         return result
+
+
+def _finite_markers(markers: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Drop rows with non-finite coordinates.
+
+    Returns (clean_markers, original_indices)."""
+    markers = np.asarray(markers, dtype=np.float32)
+    finite = np.isfinite(markers).all(axis=1)
+    orig_idx = np.flatnonzero(finite)
+    return markers[finite], orig_idx
+
+
+def _remap_assignment(assign: np.ndarray, orig_idx: np.ndarray) -> np.ndarray:
+    """Translate indices into a filtered marker array back to original indices."""
+    out = np.full_like(assign, -1)
+    valid = assign >= 0
+    out[valid] = orig_idx[assign[valid]]
+    return out

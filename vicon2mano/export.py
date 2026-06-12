@@ -15,6 +15,7 @@ def save_npz(result: FitResult, path: str) -> None:
         path,
         global_orient=result.global_orient,
         hand_pose=result.hand_pose,
+        transl=result.transl,
         betas=result.betas,
         joints=result.joints,
         assignment=result.assignment,
@@ -42,6 +43,7 @@ def to_dict(result: FitResult) -> dict:
     return {
         "global_orient": result.global_orient.tolist(),
         "hand_pose": result.hand_pose.tolist(),
+        "transl": result.transl.tolist(),
         "betas": result.betas.tolist(),
         "joints": result.joints.tolist(),
         "assignment": result.assignment.tolist(),

@@ -1,1 +1,13 @@
 .viconvenv/
+__pycache__/
+*.pyc
+
+# Generated fit outputs / large data
+*.npz
+data/**/*.csv
+
+# Generated media (regenerate with scripts/animate_fit.py)
+*.gif
+*.mp4
+vicon2mano/eval/fit/*.html
+vicon2mano/eval/fit/finger_angles.csv
