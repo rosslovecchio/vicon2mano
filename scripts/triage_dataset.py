@@ -31,7 +31,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vicon2mano.correspondence import _LABEL_HINTS, _normalise_label
-from vicon2mano.loader import load_c3d, load_csv
+from vicon2mano.loader import load_c3d, load_csv, load_h5_trajectory
 
 # ─── Tier thresholds (tunable) ────────────────────────────────────────────────
 # A recording is rated per hand-side it contains. Tiers key on *well-observed*
@@ -99,6 +99,11 @@ def _load(path: Path):
 def analyse(path: Path) -> list[dict]:
     """Return one record per hand-side present in the file (≥1)."""
     markers, labels, rate = _load(path)            # (T, N, 3) mm
+    return analyse_loaded(str(path), markers, labels, rate)
+
+
+def analyse_loaded(source: str, markers, labels, rate) -> list[dict]:
+    """Per-hand-side QA records for an already-loaded recording."""
     T, N, _ = markers.shape
     finite = np.isfinite(markers).all(axis=-1)     # (T, N)
 
@@ -132,7 +137,7 @@ def analyse(path: Path) -> list[dict]:
             presence = worst = 0.0
 
         records.append({
-            "file": str(path),
+            "file": source,
             "side": side_label,
             "n_frames": T,
             "n_markers": N,
@@ -148,39 +153,61 @@ def analyse(path: Path) -> list[dict]:
     return records
 
 
+def _error_row(source: str, e: Exception) -> dict:
+    return {
+        "file": source, "side": "", "n_frames": 0, "n_markers": 0,
+        "overall_presence": 0.0, "labels_recognized": 0,
+        "joints_observed": 0, "observed_presence_median": 0.0,
+        "matched_presence_worst": 0.0, "rate_hz": "", "tier": "error",
+        "error": f"{type(e).__name__}: {e}",
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--data-dir", required=True, help="directory to scan (recursive)")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--data-dir", help="directory of CSV/C3D files to scan")
+    src.add_argument("--h5", help="consolidated HDF5 (scans every participant/session)")
     ap.add_argument("--pattern", nargs="+", default=["*.csv", "*.c3d"],
-                    help="glob patterns for recordings")
+                    help="glob patterns for recordings (--data-dir mode)")
     ap.add_argument("--out-dir", default="vicon2mano/eval/triage")
     args = ap.parse_args()
 
-    data_dir = Path(args.data_dir)
     out_dir = Path(args.out_dir).resolve()
-    files = sorted({
-        p for pat in args.pattern for p in data_dir.rglob(pat)
-        if out_dir not in p.resolve().parents     # don't scan our own output
-    })
-    if not files:
-        print(f"[triage] no files matching {args.pattern} under {data_dir}")
-        return
-    print(f"[triage] scanning {len(files)} files under {data_dir}")
-
     rows = []
-    for p in files:
-        try:
-            rows.extend(analyse(p))
-        except Exception as e:                     # never let one bad file abort the scan
-            print(f"  ! {p.name}: {e}")
-            rows.append({
-                "file": str(p), "side": "", "n_frames": 0, "n_markers": 0,
-                "overall_presence": 0.0, "labels_recognized": 0,
-                "joints_observed": 0, "observed_presence_median": 0.0,
-                "matched_presence_worst": 0.0, "rate_hz": "", "tier": "error",
-                "error": f"{type(e).__name__}: {e}",
-            })
-            traceback.print_exc(limit=1)
+
+    if args.h5:
+        import h5py
+        with h5py.File(args.h5, "r") as f:
+            tasks = [(px, sess) for px in sorted(f.keys())
+                     for sess in sorted(f[px].keys())]
+        print(f"[triage] scanning {len(tasks)} (participant, session) datasets "
+              f"in {args.h5}")
+        for px, sess in tasks:
+            source = f"{px}/{sess}"
+            try:
+                markers, labels, rate = load_h5_trajectory(args.h5, px, sess)
+                rows.extend(analyse_loaded(source, markers, labels, rate))
+            except Exception as e:
+                print(f"  ! {source}: {e}")
+                rows.append(_error_row(source, e))
+    else:
+        data_dir = Path(args.data_dir)
+        files = sorted({
+            p for pat in args.pattern for p in data_dir.rglob(pat)
+            if out_dir not in p.resolve().parents     # don't scan our own output
+        })
+        if not files:
+            print(f"[triage] no files matching {args.pattern} under {data_dir}")
+            return
+        print(f"[triage] scanning {len(files)} files under {data_dir}")
+        for p in files:
+            try:
+                rows.extend(analyse(p))
+            except Exception as e:                 # never let one bad file abort the scan
+                print(f"  ! {p.name}: {e}")
+                rows.append(_error_row(str(p), e))
+                traceback.print_exc(limit=1)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     fields = ["file", "side", "n_frames", "n_markers", "overall_presence",
@@ -206,7 +233,8 @@ def main():
     # console summary
     from collections import Counter
     tiers = Counter(r["tier"] for r in rows)
-    print(f"\n[triage] {len(rows)} (file, side) records from {len(files)} files")
+    n_sources = len({r["file"] for r in rows})
+    print(f"\n[triage] {len(rows)} (recording, side) records from {n_sources} recordings")
     for t in ["clean", "usable", "degraded", "unsalvageable", "error"]:
         if tiers.get(t):
             print(f"  {t:14s} {tiers[t]}")

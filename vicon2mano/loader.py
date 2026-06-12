@@ -8,6 +8,47 @@ from __future__ import annotations
 import numpy as np
 
 
+def load_h5_trajectory(
+    h5_path: str,
+    participant: str,
+    session: str,
+) -> tuple[np.ndarray, list[str], float | None]:
+    """Read one (participant, session) trajectory from the consolidated HDF5.
+
+    The file groups datasets as ``/<participant>/<session>``; each dataset is
+    a 2-D table whose column names live in ``dset.attrs["columns"]`` (the wide
+    Nexus layout: ``Time_s, _Frame, _Sub Frame, <Marker>_X, _Y, _Z, ...``).
+
+    Returns:
+        markers: (T, N, 3) float32 in millimetres
+        labels:  list of N marker names
+        rate_hz: capture rate from the ``Time_s`` column, or None
+    """
+    import h5py
+
+    with h5py.File(h5_path, "r") as f:
+        dset = f[participant][session]
+        data = np.asarray(dset[:], dtype=np.float64)
+        columns = [c.decode() if isinstance(c, (bytes, bytearray)) else str(c)
+                   for c in dset.attrs["columns"]]
+
+    # Each "<name>_X" column is followed by its Y and Z columns.
+    labels, cols = [], []
+    for i, c in enumerate(columns):
+        if c.endswith("_X"):
+            labels.append(c[:-2])
+            cols.append(i)
+    markers = np.stack([data[:, i:i + 3] for i in cols], axis=1).astype(np.float32)
+
+    rate = None
+    if columns and columns[0].lower().startswith("time"):
+        t = data[:, 0]
+        dt = np.median(np.diff(t))
+        if dt > 0:
+            rate = float(round(1.0 / dt, 3))
+    return markers, labels, rate
+
+
 def load_c3d(path: str) -> tuple[np.ndarray, list[str], float]:
     """Read a Vicon .c3d file.
 

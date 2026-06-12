@@ -86,13 +86,44 @@ not just an application of MANO.
 3. **#1 learned pose prior** — biggest accuracy lever, more research risk.
 4. **#5 validation** once the pipeline runs on the cohort.
 
+## Dataset (as scanned 2026-06-12)
+
+`data/all_trajectories_synced.h5` (6.5 GB). 32 participants (Px* patients,
+Pxh* controls), 255 sessions, 17 task types (Apraxia imitation / intransitive
+/ objects / transitive, HOI, Hands_only_Left/Right, Static, NHP). Same
+44-marker two-hand wide layout as `data/Pxh8`, units mm, `Time_s` column gives
+the rate. Read via `vicon2mano.loader.load_h5_trajectory(h5, participant,
+session)`; helper class in `data/h5_trajectory_reader.py`.
+
+Triage (`scripts/triage_dataset.py --h5 …`, results in
+`vicon2mano/eval/triage/`), rating each hand-side of each session:
+
+| tier | (recording, side) records |
+|---|---|
+| clean | 385 |
+| usable | 55 |
+| degraded | 5 |
+| unsalvageable | 23 |
+
+- **203/255 recordings (80 %) have ≥1 clean hand** → a large reference set
+  spanning all task types (40+ clean per major type). This is the
+  supervision pool for #1–#4.
+- Unsalvageable cases concentrate in whole-body Apraxia tasks (hands leave
+  the capture volume / occlude); the idle hand in single-hand tasks is the
+  other main source.
+- Rate: 254 sessions at 200 Hz, **14 reported at 2000 Hz** — likely a `Time_s`
+  unit inconsistency; confirm before using those for any rate-dependent step.
+- ~33 records have side-less labels ("unknown" side) → candidates for the
+  relabeling step (`scripts/relabel_markers.py`).
+
 ## Open decisions / dependencies
 
-- Data not yet on this machine; format assumed to match the wide-Nexus CSV
-  of `data/Pxh8` (triage adapts if labels/layout differ — it audits the label
-  vocabulary across all files).
-- Compute: ~25–40 min/fit on the 4 GB GPU × (38 × recordings × hands) is
-  potentially days. Triage gates out unsalvageable files before fitting;
-  batch scheduling likely needed.
+- Relabeling unlabeled clouds: `scripts/relabel_markers.py` validated —
+  single-hand 22/22, two-hand 44/44 (`--two-hands`, chirality-safe via
+  spatial clustering); positions preserved exactly. Use a clean recording as
+  template.
+- Compute: ~25–40 min/fit on the 4 GB GPU × (≈200 fittable recordings × hands)
+  is days of wall-clock. Triage gates out unsalvageable sessions first; batch
+  scheduling needed.
 - Labeler decision (mature it via #2, or drop it and rely on label-seed +
   Hungarian) should be settled early — see the warning in `CLAUDE.md`.

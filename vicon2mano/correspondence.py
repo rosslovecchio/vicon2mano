@@ -255,6 +255,167 @@ def get_assignment(
     return sequence_assignment(markers_seq, mano_joints_seq, per_frame=per_frame)
 
 
+def _distance_descriptor(
+    markers: np.ndarray,   # (T, N, 3)
+    *,
+    stride: int = 20,
+    normalize: bool = True,
+) -> np.ndarray:
+    """Rigid-motion-invariant per-marker signature.
+
+    For each marker, the sorted vector of its mean distances to every other
+    marker (averaged over frames). Invariant to global rotation/translation;
+    with ``normalize`` the whole descriptor is divided by its mean so it is
+    also scale-invariant (matches hands of different size). NaN-safe: each
+    pairwise mean ignores frames where either marker is missing.
+
+    Returns (N, N) — row i is marker i's sorted distance signature.
+    """
+    sample = markers[::stride]                       # (F, N, 3)
+    d = np.linalg.norm(sample[:, :, None, :] - sample[:, None, :, :], axis=-1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        mean_d = np.nanmean(d, axis=0)               # (N, N); NaN if never co-present
+    mean_d = np.nan_to_num(mean_d, nan=0.0)
+    sig = np.sort(mean_d, axis=1)
+    if normalize and sig.mean() > 0:
+        sig = sig / sig.mean()
+    return sig
+
+
+def relabel_by_template(
+    markers: np.ndarray,            # (T, N, 3) unlabeled, complete cloud
+    template_markers: np.ndarray,   # (Tt, M, 3) labeled reference
+    template_labels: list[str],     # length M
+    *,
+    stride: int = 20,
+    normalize: bool = True,
+) -> tuple[list[str], np.ndarray]:
+    """Assign template labels to an unlabeled marker cloud by geometry only.
+
+    Matches each of the N input markers to one of the M template markers via
+    a rigid-/scale-invariant distance descriptor and the Hungarian algorithm,
+    then copies that template marker's label across. Marker *positions are
+    never modified* — this only names columns.
+
+    Works when the input cloud is complete and shares the template's marker
+    protocol (same physical marker set), even across different poses, hand
+    sizes, and column orderings.
+
+    Limitation — chirality: pairwise-distance descriptors are reflection-
+    invariant, so a left and right hand (near mirror images) have nearly
+    identical signatures. On a two-hand cloud the matcher therefore swaps
+    markers between hands (validated: 22/22 single-hand, 16/44 two-hand).
+    Separate the cloud into per-hand clusters and relabel each against a
+    single-hand template; resolve which cluster is which from its spatial
+    side. ``relabel_two_hands`` does this.
+
+    Returns:
+        new_labels: length-N list; input marker i gets ``new_labels[i]``.
+                    If N > M, surplus markers get ``"Unlabeled_<i>"``.
+        cost:       length-N array of the match cost per marker (lower = more
+                    confident; large values flag ambiguous/foreign markers).
+    """
+    sig_in = _distance_descriptor(markers, stride=stride, normalize=normalize)
+    sig_tm = _distance_descriptor(template_markers, stride=stride,
+                                  normalize=normalize)
+    N, M = sig_in.shape[0], sig_tm.shape[0]
+    # descriptors must share length to compare; pad the shorter row dim
+    width = max(N, M)
+    a = np.zeros((N, width)); a[:, :N] = sig_in
+    b = np.zeros((M, width)); b[:, :M] = sig_tm
+    cost = np.linalg.norm(a[:, None, :] - b[None, :, :], axis=-1)   # (N, M)
+
+    row, col = linear_sum_assignment(cost)           # match min(N, M) markers
+    new_labels = [f"Unlabeled_{i}" for i in range(N)]
+    out_cost = np.full(N, np.inf)
+    for i, j in zip(row, col):
+        new_labels[i] = template_labels[j]
+        out_cost[i] = cost[i, j]
+    return new_labels, out_cost
+
+
+def _cluster_two(points: np.ndarray, n_iter: int = 25) -> np.ndarray:
+    """Dependency-free 2-means on (N, 3) points → boolean mask (cluster 0/1).
+
+    Seeded with the two most-distant points, so the two spatially-separated
+    hands fall into different clusters."""
+    d = np.linalg.norm(points[:, None] - points[None, :], axis=-1)
+    i, j = np.unravel_index(np.argmax(d), d.shape)
+    c = np.stack([points[i], points[j]])
+    mask = np.zeros(len(points), dtype=int)
+    for _ in range(n_iter):
+        dist = np.linalg.norm(points[:, None] - c[None], axis=-1)  # (N, 2)
+        new = dist.argmin(1)
+        if np.array_equal(new, mask):
+            break
+        mask = new
+        for k in (0, 1):
+            if (mask == k).any():
+                c[k] = points[mask == k].mean(0)
+    return mask.astype(bool)
+
+
+def _hand_side(label: str) -> str | None:
+    l = label.lower()
+    return "left" if "left" in l else ("right" if "right" in l else None)
+
+
+def relabel_two_hands(
+    markers: np.ndarray,            # (T, N, 3) unlabeled two-hand cloud
+    template_markers: np.ndarray,   # (Tt, M, 3) labeled two-hand reference
+    template_labels: list[str],     # length M, with left/right designators
+    *,
+    stride: int = 20,
+) -> tuple[list[str], np.ndarray]:
+    """Relabel a complete two-hand cloud, chirality-safe.
+
+    Splits both clouds into two hands (template by its label sides; input by
+    spatial 2-means), matches each input cluster to the template hand it best
+    fits by descriptor cost, then relabels each hand with the single-hand
+    :func:`relabel_by_template` (where the distance descriptor is unambiguous).
+    Positions are never modified.
+
+    Returns ``(new_labels, cost)`` like :func:`relabel_by_template`.
+    """
+    # split template by its labels
+    sides = {s: [i for i, l in enumerate(template_labels) if _hand_side(l) == s]
+             for s in ("left", "right")}
+    if not (sides["left"] and sides["right"]):
+        # not actually two-handed → fall back to the plain matcher
+        return relabel_by_template(markers, template_markers, template_labels,
+                                   stride=stride)
+
+    mean_pos = np.nanmean(markers, axis=0)               # (N, 3)
+    cl = _cluster_two(np.nan_to_num(mean_pos))
+    clusters = {0: np.flatnonzero(~cl), 1: np.flatnonzero(cl)}
+
+    def side_match(idx, side_idx):
+        return relabel_by_template(
+            markers[:, idx], template_markers[:, side_idx],
+            [template_labels[i] for i in side_idx], stride=stride)
+
+    # try both cluster→side pairings, keep the lower total cost
+    best = None
+    for assign in ({0: "left", 1: "right"}, {0: "right", 1: "left"}):
+        total, parts = 0.0, {}
+        for cidx, side in assign.items():
+            lbls, c = side_match(clusters[cidx], sides[side])
+            parts[cidx] = (lbls, c)
+            total += np.nansum(c[np.isfinite(c)])
+        if best is None or total < best[0]:
+            best = (total, parts)
+
+    N = markers.shape[1]
+    new_labels = [f"Unlabeled_{i}" for i in range(N)]
+    cost = np.full(N, np.inf)
+    for cidx, (lbls, c) in best[1].items():
+        for local, orig in enumerate(clusters[cidx]):
+            new_labels[orig] = lbls[local]
+            cost[orig] = c[local]
+    return new_labels, cost
+
+
 def _majority_vote(assign_seq: np.ndarray, n_markers: int) -> np.ndarray:
     """Collapse (T, 21) per-frame assignments to a single (21,) assignment.
 

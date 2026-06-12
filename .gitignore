@@ -4,6 +4,7 @@ __pycache__/
 
 # Generated fit outputs / large data
 *.npz
+*.h5
 data/**/*.csv
 
 # Model weights (large binaries; distribute out-of-band or via LFS)
