@@ -6,6 +6,9 @@ __pycache__/
 *.npz
 data/**/*.csv
 
+# Model weights (large binaries; distribute out-of-band or via LFS)
+*.pt
+
 # Generated media (regenerate with scripts/animate_fit.py)
 *.gif
 *.mp4
