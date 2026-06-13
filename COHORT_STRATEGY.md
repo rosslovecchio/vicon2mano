@@ -127,3 +127,16 @@ Triage (`scripts/triage_dataset.py --h5 …`, results in
   scheduling needed.
 - Labeler decision (mature it via #2, or drop it and rely on label-seed +
   Hungarian) should be settled early — see the warning in `CLAUDE.md`.
+
+## Label-swap detection in "clean" recordings
+
+Triage rates a recording clean on marker *presence*, but some clean
+recordings still carry label **swaps** (two markers' names exchanged) that
+corrupt joint angles. `scripts/detect_swaps.py` detects these with two
+complementary geometric signals (consensus distance-descriptor swap-test +
+bone-length confirmation), ranking each detection high/medium confidence.
+Validated at 88% recall on injected swaps; on the clean single-hand sets,
+confirmed finger swaps are rare and most flags are low-impact forearm markers.
+Full method, validation, and findings: `vicon2mano/eval/swaps/README.md`.
+Feeds leverage point #2 — clean recordings only become reliable labeler
+supervision once their own swaps are caught.
