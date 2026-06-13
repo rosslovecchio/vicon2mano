@@ -1,0 +1,7 @@
+recording,label_a,label_b,confidence,descriptor_gain
+Px11/Hands_only_Right,Forearm_Right3,Forearm_Right4,medium,0.95
+Px12/Hands_only_Right,Forearm_Right3,Forearm_Right4,medium,0.716
+Px19/Hands_only_Right,Forearm_Right3,Forearm_Right4,medium,0.984
+Px20/Hands_only_Right,Forearm_Right2,Forearm_Right3,medium,0.621
+Pxh11/Hands_only_Right,Forearm_Right3,Forearm_Right4,medium,0.986
+Pxh9/Hands_only_Right,Forearm_Right1,Forearm_Right2,medium,0.738
