@@ -7,23 +7,27 @@ on one finger). The markers are all present and correctly *named for the set*,
 just attached to the wrong physical points, so presence-based triage misses
 them. Left undetected they corrupt the joint angles.
 
-Two complementary geometric signals (validated on injected swaps):
+Detection focuses on **finger markers** (forearm markers are excluded: they
+sit near-symmetrically on a rigid plate, are ambiguous to swap, and do not
+affect finger joint angles). Three geometric/kinematic signals:
 
-1. **Descriptor swap-test (primary).** A consensus per-label distance
-   descriptor is built from many clean recordings (median over recordings ->
-   robust to the occasional swapped one). For each anatomically plausible
-   pair (i, j) we test whether assigning marker i to label j and j to label i
-   fits the consensus better than the current labelling, by more than a
-   margin. Catches both cross-finger and same-finger swaps (~88% recall).
-2. **Bone-length confirmation (precision).** Whether swapping also brings the
-   affected within-finger bone lengths closer to canonical. This is decisive
-   for cross-finger swaps but blind to same-finger ones, so it is used to
-   RANK confidence, not as a veto:
-       high   = descriptor + bone-length agree
-       medium = descriptor only (review before trusting)
+1. **Descriptor swap-test (primary).** Consensus per-label distance
+   descriptor (median over many clean recordings -> robust to the occasional
+   swapped one); for each plausible pair, does exchanging the two labels fit
+   the consensus better than the current labelling by > margin. Catches both
+   cross- and same-finger swaps (~88% recall).
+2. **Bone-length confirmation.** Does the swap bring within-finger bone
+   lengths closer to canonical. Decisive for cross-finger swaps.
+3. **Motion confirmation.** Independent (kinematic) check. Cross-finger: a
+   marker's speed time-series should correlate with its labelled finger's
+   other markers; if it instead matches the swap partner's finger, the swap
+   is confirmed. Same-finger: motion amplitude grows distally (DIP > PIP >
+   MCP), so a violated ordering that the swap repairs confirms it.
 
-With ``--fix`` only high-confidence swaps are corrected by default (labels
-exchanged; **positions never change**); ``--fix-medium`` includes the rest.
+Confidence: **high** if bone-length OR motion confirms the descriptor flag;
+**medium** if descriptor only (review before trusting). With ``--fix`` only
+high-confidence swaps are applied (positions never change); ``--fix-medium``
+includes the rest.
 
 Usage
 -----
@@ -36,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import sys
 from pathlib import Path
 
@@ -52,7 +57,6 @@ FINGERS = ["Thumb", "Index", "Middle", "Ring", "Pinky"]
 # --- data access --------------------------------------------------------------
 
 def side_markers(markers, labels, side):
-    """Subset to one hand-side (or all, for side-less single-hand left)."""
     if side in ("left", "right"):
         idx = [i for i, l in enumerate(labels) if side in l.lower()]
     else:
@@ -67,10 +71,28 @@ def list_recordings(h5, session_type):
                 for s in sorted(f[px].keys()) if session_type in s]
 
 
+def _finger_of(label):
+    """Finger name for a label, or None (forearm / palm / wrist)."""
+    n = _normalise_label(label)
+    for fg in FINGERS:
+        if n.startswith(fg.lower()):
+            return fg
+    return None
+
+
+def _rank_in_finger(label):
+    """Trailing index 1/2/3 (MCP/PIP/DIP) within a finger, else None."""
+    m = re.search(r"(\d+)$", _normalise_label(label))
+    return int(m.group(1)) if m else None
+
+
+def _is_finger_marker(label):
+    return _finger_of(label) is not None
+
+
 # --- canonical model ----------------------------------------------------------
 
 def build_consensus(h5, recordings, side, stride, ref_labels=None):
-    """Median per-label distance descriptor + canonical bone lengths."""
     sigs, bones, used = [], [], []
     labels_ref = ref_labels
     for rec in recordings:
@@ -82,9 +104,7 @@ def build_consensus(h5, recordings, side, stride, ref_labels=None):
         mk, ll = side_markers(m, l, side)
         if labels_ref is None:
             labels_ref = ll
-        if ll != labels_ref:
-            continue
-        if np.isfinite(mk).all(axis=-1).mean() < 0.9:
+        if ll != labels_ref or np.isfinite(mk).all(axis=-1).mean() < 0.9:
             continue
         sigs.append(_distance_descriptor(mk, stride=stride))
         bones.append(_bone_lengths(mk, labels_ref))
@@ -107,7 +127,6 @@ def _finger_chain(labels, finger):
 
 
 def _bone_lengths(markers, labels):
-    """Mean within-finger bone lengths [thumb12, thumb23, index12, ...]."""
     vals = []
     for fg in FINGERS:
         c = _finger_chain(labels, fg)
@@ -121,17 +140,20 @@ def _bone_lengths(markers, labels):
     return np.array(vals)
 
 
-def plausible_pairs(canon, k=4):
-    """Anatomically plausible confusions: each label's k nearest by descriptor."""
+def plausible_pairs(canon, labels, k=4):
+    """k nearest labels by descriptor, restricted to finger markers."""
     cc = np.linalg.norm(canon[:, None, :] - canon[None, :, :], axis=-1)
+    finger = [i for i, l in enumerate(labels) if _is_finger_marker(l)]
+    fset = set(finger)
     pairs = set()
-    for i in range(len(canon)):
-        for j in np.argsort(cc[i])[1:k + 1]:
+    for i in finger:
+        order = [j for j in np.argsort(cc[i]) if int(j) in fset and int(j) != i]
+        for j in order[:k]:
             pairs.add(tuple(sorted((i, int(j)))))
     return sorted(pairs)
 
 
-# --- detection ----------------------------------------------------------------
+# --- signals ------------------------------------------------------------------
 
 def _swapped(markers, i, j):
     sw = markers.copy()
@@ -140,30 +162,73 @@ def _swapped(markers, i, j):
 
 
 def _bone_error(markers, labels, bone_canon):
-    b = _bone_lengths(markers, labels)
-    return float(np.nansum(np.abs(b - bone_canon)))
+    return float(np.nansum(np.abs(_bone_lengths(markers, labels) - bone_canon)))
+
+
+def _speeds(markers, stride=10):
+    """Per-marker speed time-series (T', N), NaN where undefined."""
+    s = markers[::stride]
+    v = np.linalg.norm(np.diff(s, axis=0), axis=-1)     # (T'-1, N)
+    return v
+
+
+def _corr(a, b):
+    m = np.isfinite(a) & np.isfinite(b)
+    if m.sum() < 10:
+        return 0.0
+    a, b = a[m], b[m]
+    if a.std() < 1e-9 or b.std() < 1e-9:
+        return 0.0
+    return float(np.corrcoef(a, b)[0, 1])
+
+
+def _motion_confirms(markers, labels, i, j, speeds):
+    """Independent kinematic confirmation that i,j are swapped."""
+    fi, fj = _finger_of(labels[i]), _finger_of(labels[j])
+    if fi is None or fj is None:
+        return False
+    if fi != fj:
+        # cross-finger: speed should match own finger's other markers
+        def mate(idx, fg, excl):
+            ids = [k for k, l in enumerate(labels)
+                   if _finger_of(l) == fg and k != excl]
+            if not ids:
+                return None
+            return np.nanmean(speeds[:, ids], axis=1)
+        mi, mj = mate(i, fi, i), mate(j, fj, j)
+        if mi is None or mj is None:
+            return False
+        cur = _corr(speeds[:, i], mi) + _corr(speeds[:, j], mj)
+        swp = _corr(speeds[:, i], mj) + _corr(speeds[:, j], mi)
+        return swp > cur + 0.05
+    # same-finger: distal markers move more (bigger arc); ordering must hold
+    ri, rj = _rank_in_finger(labels[i]), _rank_in_finger(labels[j])
+    if ri is None or rj is None:
+        return False
+    amp_i = np.nanmean(speeds[:, i])
+    amp_j = np.nanmean(speeds[:, j])
+    # expected: higher rank (more distal) -> larger amplitude
+    # current labelling violated, swap repairs it
+    expected_now = (amp_i < amp_j) == (ri < rj)
+    return not expected_now and abs(amp_i - amp_j) > 0.05 * max(amp_i, amp_j, 1e-9)
 
 
 def _resolve_conflicts(flags):
-    """A marker can be in at most one accepted swap — keep the strongest gain."""
     flags = sorted(flags, key=lambda f: -f[2])
     used, kept = set(), []
     for f in flags:
-        i, j = f[0], f[1]
-        if i in used or j in used:
+        if f[0] in used or f[1] in used:
             continue
-        used |= {i, j}
+        used |= {f[0], f[1]}
         kept.append(f)
     return kept
 
 
 def detect_swaps(markers, labels, canon, bone_canon, pairs, *, stride, margin):
-    """Return [(i, j, gain, confidence)] swaps.
-
-    Descriptor gain > margin flags a candidate (primary signal). Confidence is
-    'high' when swapping also reduces bone-length error vs canonical (the
-    independent confirmation), else 'medium'."""
+    """Return [(i, j, gain, confidence)] swaps; confidence high if bone OR
+    motion confirms the descriptor flag, else medium."""
     sig = _distance_descriptor(markers, stride=stride)
+    speeds = _speeds(markers)
     flags = []
     for i, j in pairs:
         cur = np.linalg.norm(sig[i] - canon[i]) + np.linalg.norm(sig[j] - canon[j])
@@ -171,29 +236,28 @@ def detect_swaps(markers, labels, canon, bone_canon, pairs, *, stride, margin):
         gain = cur - swp
         if gain <= margin:
             continue
-        bone_confirms = _bone_error(markers, labels, bone_canon) > \
+        bone_ok = _bone_error(markers, labels, bone_canon) > \
             _bone_error(_swapped(markers, i, j), labels, bone_canon)
-        flags.append((i, j, float(gain), "high" if bone_confirms else "medium"))
+        motion_ok = _motion_confirms(markers, labels, i, j, speeds)
+        conf = "high" if (bone_ok or motion_ok) else "medium"
+        flags.append((i, j, float(gain), conf))
     return _resolve_conflicts(flags)
 
 
 # --- validation harness -------------------------------------------------------
 
 def validate(h5, recordings, side, stride, margin, canon, bone_canon, labels_ref):
-    """Inject one known swap per held-out recording; report recall + precision."""
-    pairs = plausible_pairs(canon)
+    pairs = plausible_pairs(canon, labels_ref)
     rng = np.random.default_rng(0)
-    tp = fn = trials = asis = 0
-    high = 0
+    tp = fn = trials = asis = high = 0
     for rec in recordings:
         px, sess = rec.split("/")
         m, l, _ = load_h5_trajectory(h5, px, sess)
         mk, ll = side_markers(m, l, side)
         if ll != labels_ref or np.isfinite(mk).all(axis=-1).mean() < 0.9:
             continue
-        base = detect_swaps(mk, ll, canon, bone_canon, pairs, stride=stride, margin=margin)
-        base_pairs = {(a, b) for a, b, *_ in base}
-        asis += len(base)
+        asis += len(detect_swaps(mk, ll, canon, bone_canon, pairs,
+                                 stride=stride, margin=margin))
         i, j = pairs[rng.integers(len(pairs))]
         got = detect_swaps(_swapped(mk, i, j), ll, canon, bone_canon, pairs,
                            stride=stride, margin=margin)
@@ -201,12 +265,11 @@ def validate(h5, recordings, side, stride, margin, canon, bone_canon, labels_ref
         trials += 1
         if hit:
             tp += 1
-            if hit[3] == "high":
-                high += 1
+            high += hit[3] == "high"
         else:
             fn += 1
-    print(f"\n[validate] {trials} injected-swap trials  "
-          f"recall={tp/max(1,trials):.0%} (TP={tp} FN={fn}; {high} high-confidence)  "
+    print(f"\n[validate] {trials} injected-swap trials  recall={tp/max(1,trials):.0%} "
+          f"(TP={tp} FN={fn}; {high} reached high-confidence)  "
           f"detections on as-is recordings={asis}")
 
 
@@ -238,12 +301,12 @@ def main():
 
     recs = list_recordings(args.h5, args.session_type)
     print(f"[detect_swaps] {len(recs)} '{args.session_type}' recordings; "
-          f"building consensus from up to {args.n_consensus}")
+          f"consensus from up to {args.n_consensus}")
     labels_ref, canon, bone_canon, used = build_consensus(
         args.h5, recs[:args.n_consensus], args.side, args.stride)
-    pairs = plausible_pairs(canon)
+    pairs = plausible_pairs(canon, labels_ref)
     print(f"[detect_swaps] consensus from {len(used)} recordings, "
-          f"{len(labels_ref)} markers, {len(pairs)} plausible pairs")
+          f"{len(labels_ref)} markers, {len(pairs)} plausible finger pairs")
 
     if args.validate:
         holdout = [r for r in recs if r not in used][:12]
@@ -267,8 +330,7 @@ def main():
         n_scanned += 1
         flags = detect_swaps(mk, ll, canon, bone_canon, pairs,
                              stride=args.stride, margin=args.margin)
-        fixed_labels = list(l)
-        applied = False
+        fixed_labels, applied = list(l), False
         for i, j, g, conf in flags:
             key = tuple(sorted((ll[i], ll[j])))
             pair_counts[key] = pair_counts.get(key, 0) + 1
