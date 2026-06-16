@@ -1,0 +1,6 @@
+recording,label_a,label_b,confidence,descriptor_gain
+Px13/Apraxia_intransitive,Thumb_Left1,Thumb_Left3,high,0.349
+Pxh17/Apraxia_transitive,Ring_Left2,Pinky_Left3,high,0.468
+Pxh6/Apraxia_intransitive,Thumb_Left1,Thumb_Left3,high,0.451
+Pxh6/Apraxia_objects,Thumb_Left1,Thumb_Left3,high,0.474
+Pxh6/Apraxia_transitive,Thumb_Left1,Thumb_Left3,high,0.423

@@ -287,6 +287,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--h5", required=True)
     ap.add_argument("--session-type", required=True)
+    ap.add_argument("--consensus-session-type", default=None,
+                    help="build the consensus from this session type "
+                         "instead (e.g. Hands_only_Left — cleanest); "
+                         "defaults to --session-type")
     ap.add_argument("--side", default="left", choices=["left", "right", "all"])
     ap.add_argument("--stride", type=int, default=60)
     ap.add_argument("--margin", type=float, default=0.25)
@@ -300,16 +304,19 @@ def main():
     args = ap.parse_args()
 
     recs = list_recordings(args.h5, args.session_type)
-    print(f"[detect_swaps] {len(recs)} '{args.session_type}' recordings; "
-          f"consensus from up to {args.n_consensus}")
+    cons_type = args.consensus_session_type or args.session_type
+    cons_recs = list_recordings(args.h5, cons_type)
+    print(f"[detect_swaps] scanning {len(recs)} '{args.session_type}'; "
+          f"consensus from up to {args.n_consensus} '{cons_type}'")
     labels_ref, canon, bone_canon, used = build_consensus(
-        args.h5, recs[:args.n_consensus], args.side, args.stride)
+        args.h5, cons_recs[:args.n_consensus], args.side, args.stride)
     pairs = plausible_pairs(canon, labels_ref)
     print(f"[detect_swaps] consensus from {len(used)} recordings, "
           f"{len(labels_ref)} markers, {len(pairs)} plausible finger pairs")
 
     if args.validate:
-        holdout = [r for r in recs if r not in used][:12]
+        holdout = [r for r in recs if r not in used][:12] \
+            if cons_type == args.session_type else recs[:12]
         validate(args.h5, holdout, args.side, args.stride, args.margin,
                  canon, bone_canon, labels_ref)
         return

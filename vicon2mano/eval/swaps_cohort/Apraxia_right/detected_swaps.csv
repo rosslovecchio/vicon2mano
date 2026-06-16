@@ -1,0 +1,7 @@
+recording,label_a,label_b,confidence,descriptor_gain
+Px11/Apraxia_Imitation,Index_Right3,Ring_Right3,medium,0.355
+Px11/Apraxia_objects,Thumb_Right2,Thumb_Right3,medium,0.591
+Px17/Apraxia_transitive,Index_Right2,Ring_Right3,medium,0.403
+Px21/Apraxia_objects,Thumb_Right1,Thumb_Right2,medium,0.275
+Px21/Apraxia_transitive,Thumb_Right1,Thumb_Right2,medium,0.3
+Px21/Apraxia_transitive,Thumb_Right3,Pinky_Right3,medium,0.259

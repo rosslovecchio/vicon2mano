@@ -1,0 +1,5 @@
+recording,label_a,label_b,confidence,descriptor_gain
+Px11/HOI_Left,Thumb_Right2,Pinky_Right2,medium,0.359
+Px13/HOI,Index_Right2,Middle_Right3,medium,0.666
+Px13/HOI,Ring_Right2,Pinky_Right3,medium,0.515
+Px13/HOI,Index_Right1,Pinky_Right2,medium,0.447
