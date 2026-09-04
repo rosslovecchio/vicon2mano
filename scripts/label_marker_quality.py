@@ -422,6 +422,42 @@ def _pairwise_bad_anchor_tiebreak(
     return bad
 
 
+def _rolling_local_reference(
+    markers: np.ndarray,           # (T, N, 3)
+    pairs: list[tuple[int, int]],
+    window: int,
+) -> dict[tuple[int, int], tuple[np.ndarray, np.ndarray]]:
+    """Per-pair LOCAL median/MAD over a centered rolling window of nearby
+    frames, instead of a single global reference built from a handful of
+    (possibly far-away-in-time) ``ref_frames``.
+
+    Markers sitting on skin, not a rigid plate, legitimately drift several
+    mm over the course of a long recording as the limb rotates and muscle
+    moves underneath — comparing every frame in a 35,000-frame trial
+    against 2-3 spot-checked snapshots from elsewhere in the trial makes
+    that ordinary drift indistinguishable from a real error. Comparing
+    each frame to its own recent neighbourhood instead treats slow,
+    smooth drift as the expected baseline, and reserves flagging for
+    *abrupt* deviations from it — which is what an actual tracking error
+    or occlusion-fill jump looks like.
+
+    Returns ``{(i, j): (local_med, local_mad)}``, each ``(T,)``, NaN where
+    the window had no valid samples at all (e.g. right at a long gap).
+    """
+    import pandas as pd  # local import: only needed by this experimental path
+
+    T = markers.shape[0]
+    min_periods = max(5, window // 10)
+    out: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+    for i, j in pairs:
+        d = np.linalg.norm(markers[:, i] - markers[:, j], axis=-1)
+        s = pd.Series(d)
+        local_med = s.rolling(window, center=True, min_periods=min_periods).median()
+        local_mad = (s - local_med).abs().rolling(window, center=True, min_periods=min_periods).median()
+        out[(i, j)] = (local_med.to_numpy(), local_mad.to_numpy())
+    return out
+
+
 def label_quality_cascade(
     markers: np.ndarray,           # (T, N, 3) mm
     labels: list[str],
@@ -431,6 +467,7 @@ def label_quality_cascade(
     forearm_tol_mad: float = 4.0,
     forearm_tol_mm: float = 2.5,
     forearm_max_bad: int = 2,
+    forearm_window: int = 301,
     anchor_tol_mad: float = 1.0,
     anchor_tol_mm: float = 5.0,
     palm_min_present: int = 2,
@@ -451,12 +488,25 @@ def label_quality_cascade(
     downstream of it to "incorrect" rather than leaving it independently
     checkable:
 
-    1. **Forearm gate.** A Forearm marker is "bad" that frame if it's
-       missing, or any of its pairwise distances to another present Forearm
-       marker deviates from the rigid-plate reference (this has nothing to
-       do with hand pose). If ``forearm_max_bad`` or more of the Forearm
-       markers are bad (default: 2 of 4), the whole frame fails the gate.
-       A frame that passes has each Forearm marker individually marked
+    1. **Forearm gate.** The Forearm markers sit on skin, not a rigid
+       plate — their mutual distances legitimately drift several mm over a
+       long recording as the forearm rotates and the muscle underneath
+       moves, so instead of comparing every frame to a handful of
+       possibly-far-away-in-time ``ref_frames`` (indistinguishable from a
+       real error at that scale), each pairwise distance is compared to
+       its own *local* median/MAD over a ``forearm_window``-frame centered
+       rolling window (see ``_rolling_local_reference``) — slow drift is
+       absorbed into the local baseline, and only an *abrupt* deviation
+       from a marker's own recent neighbourhood gets flagged. (Note: a
+       pairwise-distance check structurally can't catch two Forearm
+       markers swapping labels with each other, since swapping doesn't
+       change the distance between them — that job falls to the temporal
+       speed check below instead, which cares about *identity/motion*
+       plausibility, not raw geometry.) A Forearm marker is "bad" that
+       frame if it's missing, or any such local deviation involves it. If
+       ``forearm_max_bad`` or more of the Forearm markers are bad
+       (default: 2 of 4), the whole frame fails the gate. A frame that
+       passes has each Forearm marker individually marked
        "correct"/"incorrect" per its own bad flag.
     2. **Palm gate**, only evaluated in frames that passed stage 1. The
        "Palm group" is the 3 Palm-plate markers *plus* Thumb1, folded in as
@@ -570,10 +620,25 @@ def label_quality_cascade(
     all_bones = infer_bones(labels)  # for visualisation / return value only
     bone_ref, speeds = build_reference(markers, ref_frames, all_bones, extra_markers=static_markers)
 
-    # ---- stage 1: forearm gate ----
+    # ---- stage 1: forearm gate (local rolling reference — see docstring) ----
     if forearm_idxs:
-        forearm_bad_marker = ~present[:, forearm_idxs] | _pairwise_bad(
-            markers, present, bone_ref, forearm_idxs, forearm_tol_mad, forearm_tol_mm)
+        forearm_pairs = [(i, j) for k, i in enumerate(forearm_idxs) for j in forearm_idxs[k + 1:]]
+        forearm_local_ref = _rolling_local_reference(markers, forearm_pairs, forearm_window)
+        forearm_bad_marker = ~present[:, forearm_idxs]
+        idx_pos = {idx: k for k, idx in enumerate(forearm_idxs)}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            for (i, j), (local_med, local_mad) in forearm_local_ref.items():
+                d = np.linalg.norm(markers[:, i] - markers[:, j], axis=-1)
+                mad_floor = np.nan_to_num(local_mad, nan=0.0)
+                mad_floor[mad_floor == 0] = 1.0  # avoid zero-width tolerance
+                tol = np.maximum(forearm_tol_mad * mad_floor, forearm_tol_mm)
+                bad_pair = (
+                    present[:, i] & present[:, j]
+                    & (~np.isfinite(d) | ~np.isfinite(local_med) | (np.abs(d - local_med) > tol))
+                )
+                forearm_bad_marker[bad_pair, idx_pos[i]] = True
+                forearm_bad_marker[bad_pair, idx_pos[j]] = True
         forearm_gate_ok = forearm_bad_marker.sum(axis=1) < forearm_max_bad
     else:
         forearm_bad_marker = np.zeros((T, 0), dtype=bool)
@@ -808,6 +873,7 @@ def debug_frame_cascade(
     forearm_tol_mad: float = 4.0,
     forearm_tol_mm: float = 2.5,
     forearm_max_bad: int = 2,
+    forearm_window: int = 301,
     anchor_tol_mad: float = 1.0,
     anchor_tol_mm: float = 5.0,
     palm_min_present: int = 2,
@@ -855,15 +921,45 @@ def debug_frame_cascade(
 
     print(f"===== Frame {t} cascade trace =====")
 
-    # ---- stage 1: forearm ----
+    # ---- stage 1: forearm (local rolling reference — skin, not a rigid plate) ----
     print(f"\n-- Stage 1: Forearm gate (fails if >= {forearm_max_bad} of "
-          f"{len(forearm_idxs)} markers bad) --")
+          f"{len(forearm_idxs)} markers bad; local {forearm_window}-frame rolling "
+          f"reference, not the global ref_frames) --")
     forearm_pairs = [(i, j) for k, i in enumerate(forearm_idxs) for j in forearm_idxs[k + 1:]]
-    for i, j in forearm_pairs:
-        print(_pair_line(i, j, forearm_tol_mad, forearm_tol_mm))
-    forearm_bad_marker = ~present[:, forearm_idxs] | _pairwise_bad(
-        markers, present, bone_ref, forearm_idxs, forearm_tol_mad, forearm_tol_mm) if forearm_idxs \
-        else np.zeros((T, 0), dtype=bool)
+    forearm_local_ref = _rolling_local_reference(markers, forearm_pairs, forearm_window) if forearm_idxs else {}
+    # Vectorized over all T frames (not just t) — forearm_gate_ok_all is
+    # needed at every ref_frames index below to build the anchor reference,
+    # not only at the one frame we're printing.
+    forearm_bad_marker = ~present[:, forearm_idxs] if forearm_idxs else np.zeros((T, 0), dtype=bool)
+    idx_pos = {idx: k for k, idx in enumerate(forearm_idxs)}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        for i, j in forearm_pairs:
+            local_med, local_mad = forearm_local_ref[(i, j)]
+            d = np.linalg.norm(markers[:, i] - markers[:, j], axis=-1)
+            mad_floor = np.nan_to_num(local_mad, nan=0.0)
+            mad_floor[mad_floor == 0] = 1.0
+            tol = np.maximum(forearm_tol_mad * mad_floor, forearm_tol_mm)
+            bad_pair = (
+                present[:, i] & present[:, j]
+                & (~np.isfinite(d) | ~np.isfinite(local_med) | (np.abs(d - local_med) > tol))
+            )
+            forearm_bad_marker[bad_pair, idx_pos[i]] = True
+            forearm_bad_marker[bad_pair, idx_pos[j]] = True
+
+            # Print just frame t's numbers.
+            med_t, mad_t = local_med[t], local_mad[t]
+            if not np.isfinite(med_t):
+                print(f"    {labels[i]} <-> {labels[j]}: NO LOCAL REFERENCE "
+                      f"(too few valid frames in the {forearm_window}-frame window here)")
+                continue
+            tol_t = tol[t]
+            both_present = present[t, i] and present[t, j]
+            verdict = "OK" if not bad_pair[t] else "BAD"
+            if not both_present:
+                verdict += " (but not scored — a marker is missing this frame)"
+            print(f"    {labels[i]} <-> {labels[j]}: d={d[t]:.1f}mm  local_ref={med_t:.1f}±{mad_t:.2f}mm  "
+                  f"tol=±{tol_t:.1f}mm  -> {verdict}")
     forearm_gate_ok_all = forearm_bad_marker.sum(axis=1) < forearm_max_bad if forearm_idxs else np.zeros(T, bool)
     n_bad = int(forearm_bad_marker[t].sum()) if forearm_idxs else 0
     for k, idx in enumerate(forearm_idxs):
