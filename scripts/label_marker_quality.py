@@ -440,7 +440,7 @@ def label_quality_cascade(
     bone_tol_mm: float = 7.5,
     speed_tol_mad: float = 4.0,
     speed_tol_mm: float = 12.5,
-    sticky_tol_mm: float = 1.5,
+    sticky_tol_mm: float = 4.0,
 ) -> tuple[np.ndarray, list[tuple[int, int, str]]]:
     """Cascading trust-chain marker quality check.
 
@@ -458,33 +458,45 @@ def label_quality_cascade(
        markers are bad (default: 2 of 4), the whole frame fails the gate.
        A frame that passes has each Forearm marker individually marked
        "correct"/"incorrect" per its own bad flag.
-    2. **Palm gate**, only evaluated in frames that passed stage 1. A Palm
-       marker is "anchor-ok" if its distance to the Forearm centroid is
-       within tolerance. A Palm marker is "bone-length-ok" if present and
-       every pairwise distance to another present Palm marker (the Palm
-       plate is rigid too) is within tolerance — except when a pairwise
-       distance fails and the *other* marker in that pair is anchor-ok
-       while this one isn't: a rigid-plate pair can't tell you which of
-       the two moved, but the anchor check can, so only the anchor-bad
-       one is blamed and the anchor-ok one is exonerated for that pair
-       (if both are anchor-ok or both anchor-bad, there's no way to tell
-       them apart and both are blamed, same as a plain pairwise check).
-       The gate requires at least ``palm_min_present`` Palm markers
-       present, at least ``palm_min_bonelength_ok`` bone-length-ok, and at
-       least ``palm_min_anchor_ok`` anchor-ok — otherwise the whole frame
-       fails. A Palm marker counts as individually "correct" (for stage 3)
-       only if present AND bone-length-ok AND anchor-ok.
+    2. **Palm gate**, only evaluated in frames that passed stage 1. The
+       "Palm group" is the 3 Palm-plate markers *plus* Thumb1, folded in as
+       a de facto 4th member — it sits close enough to the palm to usefully
+       anchor off it, and the extra vote means a single occluded/bad Palm
+       marker doesn't as easily starve the gate below its required
+       minimum (fewer whole-frame vetoes, at the cost of Thumb1 itself
+       being resolved here instead of via its own finger-base check in
+       stage 3). A Palm-group marker is "anchor-ok" if its distance to the
+       Forearm centroid is within tolerance. It's "bone-length-ok" if
+       present and every pairwise distance to another present Palm-group
+       marker (the physical Palm plate is rigid, and Thumb1's distance to
+       each Palm marker is treated the same way here) is within tolerance
+       — except when a pairwise distance fails and the *other* marker in
+       that pair is anchor-ok while this one isn't: a rigid pairing can't
+       tell you which of the two moved, but the anchor check can, so only
+       the anchor-bad one is blamed and the anchor-ok one is exonerated for
+       that pair (if both are anchor-ok or both anchor-bad, there's no way
+       to tell them apart and both are blamed, same as a plain pairwise
+       check). The gate requires at least ``palm_min_present`` Palm-group
+       markers present, at least ``palm_min_bonelength_ok`` bone-length-ok,
+       and at least ``palm_min_anchor_ok`` anchor-ok — otherwise the whole
+       frame fails. A Palm-group marker counts as individually "correct"
+       (for stage 3) only if present AND bone-length-ok AND anchor-ok.
     3. **Finger chain**, only evaluated in frames that passed stages 1-2.
-       Each finger's first marker is checked against every Palm marker that
-       came out individually "correct" in stage 2, plus the Forearm
-       centroid; if there is no individually-correct Palm marker to compare
-       against, or any of those reference distances is out of tolerance, it
-       is "incorrect". Each subsequent marker on the finger is checked
-       against the *previous* marker's actual position, but is only
-       eligible to be "correct" if the previous marker was itself
-       "correct" — one broken link marks everything further out on that
-       finger "incorrect" too, even if its own consecutive distance happens
-       to look fine.
+       Thumb1 was already resolved in stage 2 as part of the Palm group, so
+       the thumb's chain starts directly from its stage-2 status. Every
+       other finger's first marker is checked against every Palm-group
+       marker it actually has a bone to (the 3 physical Palm markers —
+       Thumb1 has no bone to another finger's base, so it's excluded from
+       this specific check rather than letting its correctness count
+       without ever being geometrically compared) that came out
+       individually "correct" in stage 2, plus the Forearm centroid; if
+       there is no such correct, bonded marker to compare against, or any
+       of those reference distances is out of tolerance, it is "incorrect".
+       Each subsequent marker on the finger is checked against the
+       *previous* marker's actual position, but is only eligible to be
+       "correct" if the previous marker was itself "correct" — one broken
+       link marks everything further out on that finger "incorrect" too,
+       even if its own consecutive distance happens to look fine.
     4. **Gate veto.** A frame that failed the forearm gate (step 1) has
        *every* present marker in it — Forearm included — forced to
        "incorrect", since an untrustworthy plate means nothing in the
@@ -538,7 +550,19 @@ def label_quality_cascade(
     T, N, _ = markers.shape
     fingers, plates = _group_markers(labels)
     forearm_idxs = sorted(plates.get("forearm", {}).values())
+
+    # Thumb1 sits close enough to the palm plate to usefully anchor off it
+    # too — folding it in as a de facto 4th palm marker gives the stage-2
+    # quorum an extra vote, so a single occluded/bad Palm marker doesn't as
+    # easily starve the gate below its required minimum. (It's still the
+    # base of the thumb's own finger chain in stage 3, just resolved here
+    # instead of there.)
+    thumb_digits = fingers.get("thumb")
+    thumb_first_idx = thumb_digits[min(thumb_digits)] if thumb_digits else None
     palm_idxs = sorted(plates.get("palm", {}).values())
+    if thumb_first_idx is not None:
+        palm_idxs = sorted(palm_idxs + [thumb_first_idx])
+    palm_group_set = {thumb_first_idx} if thumb_first_idx is not None else set()
 
     present = np.isfinite(markers).all(axis=-1)                # (T, N)
     status = np.where(present, 2, 0).astype(np.int8)
@@ -629,27 +653,41 @@ def label_quality_cascade(
             ordered = sorted(digits)
             first_idx = digits[ordered[0]]
 
-            # Finger-base marker: must be within tolerance of *every*
-            # individually-correct Palm marker, plus the Forearm centroid.
-            # No individually-correct Palm marker to compare against means
-            # it can't be confirmed, so it's marked incorrect (no fallback).
-            n_correct_palm = palm_marker_ok.sum(axis=1) if palm_idxs else np.zeros(T, dtype=int)
-            chain_ok = gate_ok & (n_correct_palm > 0) & anchor_ok[first_idx]
-            for k, palm_idx in enumerate(palm_idxs):
-                med, mad = bone_ref.get((palm_idx, first_idx), (None, None))
-                if med is None:
-                    continue
-                d = np.linalg.norm(markers[:, palm_idx] - markers[:, first_idx], axis=-1)
-                tol = max(bone_tol_mad * mad, bone_tol_mm)
-                pair_ok = np.isfinite(d) & (np.abs(d - med) <= tol)
-                # Only this pair's failure matters where that Palm marker is
-                # actually one of the "correct" ones being compared against.
-                chain_ok &= ~palm_marker_ok[:, k] | pair_ok
+            if first_idx in palm_group_set:
+                # Thumb1 was already folded into the palm group and fully
+                # resolved in stage 2 — reuse that status instead of
+                # re-deriving it here (it has no bones to the *other*
+                # fingers' base markers, so the check below wouldn't have
+                # anything meaningful to compare it against anyway).
+                prev_idx, prev_ok = first_idx, status[:, first_idx] == 2
+            else:
+                # Finger-base marker: must be within tolerance of every
+                # individually-correct Palm-group marker it actually has a
+                # bone to (Thumb1, folded into the palm group, has no bone
+                # to another finger's base — restrict to markers that do,
+                # so its correctness can't silently inflate the count
+                # without ever being checked against). No individually-
+                # correct, bonded marker to compare against means it can't
+                # be confirmed, so it's marked incorrect (no fallback).
+                relevant = [k for k, palm_idx in enumerate(palm_idxs)
+                            if bone_ref.get((palm_idx, first_idx)) is not None]
+                n_correct_palm = palm_marker_ok[:, relevant].sum(axis=1) if relevant else np.zeros(T, dtype=int)
+                chain_ok = gate_ok & (n_correct_palm > 0) & anchor_ok[first_idx]
+                for k in relevant:
+                    palm_idx = palm_idxs[k]
+                    med, mad = bone_ref[(palm_idx, first_idx)]
+                    d = np.linalg.norm(markers[:, palm_idx] - markers[:, first_idx], axis=-1)
+                    tol = max(bone_tol_mad * mad, bone_tol_mm)
+                    pair_ok = np.isfinite(d) & (np.abs(d - med) <= tol)
+                    # Only this pair's failure matters where that Palm-group
+                    # marker is actually one of the "correct" ones being
+                    # compared against.
+                    chain_ok &= ~palm_marker_ok[:, k] | pair_ok
 
-            bad = present[:, first_idx] & ~chain_ok
-            status[bad, first_idx] = 1
+                bad = present[:, first_idx] & ~chain_ok
+                status[bad, first_idx] = 1
 
-            prev_idx, prev_ok = first_idx, chain_ok
+                prev_idx, prev_ok = first_idx, chain_ok
             for d in ordered[1:]:
                 cur_idx = digits[d]
                 med, mad = bone_ref.get((prev_idx, cur_idx), (None, None))
@@ -789,7 +827,13 @@ def debug_frame_cascade(
     T, N, _ = markers.shape
     fingers, plates = _group_markers(labels)
     forearm_idxs = sorted(plates.get("forearm", {}).values())
+
+    thumb_digits = fingers.get("thumb")
+    thumb_first_idx = thumb_digits[min(thumb_digits)] if thumb_digits else None
     palm_idxs = sorted(plates.get("palm", {}).values())
+    if thumb_first_idx is not None:
+        palm_idxs = sorted(palm_idxs + [thumb_first_idx])
+
     present = np.isfinite(markers).all(axis=-1)
 
     all_bones = infer_bones(labels)
@@ -885,7 +929,8 @@ def debug_frame_cascade(
             print(f"    {labels[idx]}: d={dist:.1f}mm  ref={med:.1f}±{mad:.2f}mm "
                   f"(n={n_ref})  tol=±{tol:.1f}mm  -> {'OK' if ok else 'BAD'}")
 
-    print("  Palm-Palm pairwise (rigidity), with anchor-based tie-break on failures:")
+    print("  Palm-group pairwise (rigidity; Thumb1 is folded in as a 4th member), "
+          "with anchor-based tie-break on failures:")
     palm_pairs = [(i, j) for k, i in enumerate(palm_idxs) for j in palm_idxs[k + 1:]]
     for i, j in palm_pairs:
         print(_pair_line(i, j, bone_tol_mad, bone_tol_mm))
