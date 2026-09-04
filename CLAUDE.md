@@ -198,3 +198,62 @@ full 104–146 mm dip-wrist range; residuals unchanged or better.
 `scripts/export_finger_angles.py` exports per-frame MCP/PIP/DIP flexion
 angles (degrees, bone-to-bone, 0° = straight) for any number of fitted
 hands to CSV.
+
+## Work completed 2026-09-04 (marker-quality cascade for raw Vicon exports)
+
+New `scripts/label_marker_quality.py` — separate from the MANO-fitting
+pipeline above. It labels every marker in every frame of a *raw* Vicon CSV
+as `correct` / `incorrect` / `missing`, so bad frames/markers can be
+screened out before fitting. `visualize_data.ipynb` / `visualize_data.py`
+drive it interactively (load real recordings, plot % correct over time,
+animate a trial with markers colored by the verdict, and step through the
+reasoning for one specific frame).
+
+**How the check works, in plain terms** — a chain of trust, most-rigid
+part of the hand first, each step only trusting what the step before it
+already confirmed:
+
+1. **Forearm plate.** 4 markers screwed to a rigid plate, so the distances
+   between them should never change. If 2 or more look wrong, nothing else
+   this frame can be trusted either (see "veto" below).
+2. **Palm plate.** Same rigidity idea for the 3 palm markers, plus each
+   one's distance back to the forearm's center. Needs a majority (2 of 3)
+   agreeing on presence, plate-rigidity, and forearm distance, or the
+   frame's palm/fingers are all thrown out.
+3. **Fingers**, one joint at a time out from the palm. Each joint is
+   checked against the one before it; a bad link poisons everything
+   further out on that same finger.
+4. **Reference frames are trusted absolutely.** A handful of frames get
+   manually eyeballed as "definitely good" ahead of time
+   (`manual_frames.csv`) and are pinned as correct no matter what the
+   automatic checks say about them.
+5. **Stickiness.** A marker that barely moved from a frame right next to
+   it (before or after) that was already confirmed correct gets to stay
+   correct too, even if the checks above would have flagged it — a marker
+   that hasn't physically moved can't have suddenly become a different,
+   swapped marker.
+
+**Tuned deliberately toward "flag it" over "wave it through"** — a good
+frame wrongly marked bad just gets thrown away (annoying but safe); a bad
+frame wrongly marked good silently corrupts a downstream MANO fit. All the
+distance tolerances were tightened with that in mind.
+
+**Two real bugs found and fixed by using this tool on real data:**
+- `manual_frames.csv` frame numbers are the ones Vicon Nexus shows on
+  screen, which count from 1 — but the loaded data array counts from 0.
+  Every reference frame was silently off by one, quietly using the wrong
+  frame's data as "ground truth" everywhere. Fixed in
+  `load_ref_ranges_csv`/`parse_frame_spec`.
+- A same-plate marker swap (e.g. `Palm2` and `Palm3` physically trading
+  labels) is invisible to a pure rigidity check — the plate's own
+  distances look fine either way, since swapping two labels on a rigid
+  body doesn't change the distances between them. Only the asymmetric
+  "distance back to the forearm" check can catch it, so that check now
+  breaks ties between two rigidity-linked markers by asking which one's
+  forearm-distance is actually off, rather than blaming both by default.
+
+`label_marker_quality.debug_frame_cascade(markers, labels, ref_frames, t)`
+prints the full step-by-step reasoning for one frame/timestep — which
+distances it checked, what they were compared against, and exactly where
+in the chain a marker was accepted or thrown out. Reach for it whenever a
+frame's verdict looks surprising.
