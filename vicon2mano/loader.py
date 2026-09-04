@@ -139,6 +139,10 @@ def load_csv(path: str, *, mm: bool = True) -> tuple[np.ndarray, list[str]]:
     markers = np.stack(frames, axis=0)  # (T, N, 3)
     if not mm:
         markers *= 1000.0
+    # A trailing comma in the name row can produce one extra spurious label
+    # (an empty string with no corresponding X/Y/Z triplet in the data rows)
+    # beyond the number of marker columns actually present. Trust the data.
+    labels = labels[: markers.shape[1]]
     return markers, labels
 
 

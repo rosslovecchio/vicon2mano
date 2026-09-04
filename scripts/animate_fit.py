@@ -126,13 +126,19 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
           width:95vw; max-width:900px; }}
   input[type=range] {{ flex:1; }}
   button {{ font-size:16px; padding:4px 14px; }}
+  #goto {{ width:70px; font-size:14px; }}
 </style></head><body>
 <img id="view">
 <div id="bar">
   <button id="btn" onclick="toggle()">&#9208;</button>
+  <button id="prev" onclick="step(-1)" title="previous frame">&#9198;</button>
+  <button id="next" onclick="step(1)" title="next frame">&#9197;</button>
   <input id="slider" type="range" min="0" max="{nmax}" value="0"
          oninput="seek(this.value)">
   <span id="lbl"></span>
+  <input id="goto" type="number" min="1" max="{nframes}" placeholder="go to #"
+         onkeydown="if(event.key==='Enter') gotoFrame(this.value)">
+  <button onclick="gotoFrame(document.getElementById('goto').value)">Go</button>
 </div>
 <script>
 const frames = [{frames}];
@@ -142,7 +148,7 @@ const img = document.getElementById("view");
 const slider = document.getElementById("slider");
 const lbl = document.getElementById("lbl");
 function show(k) {{
-  i = k % frames.length;
+  i = ((k % frames.length) + frames.length) % frames.length;
   img.src = "data:image/jpeg;base64," + frames[i];
   slider.value = i;
   lbl.textContent = (i + 1) + "/" + frames.length;
@@ -157,6 +163,17 @@ function pause() {{
 }}
 function toggle() {{ timer ? pause() : play(); }}
 function seek(v) {{ pause(); show(+v); }}
+function step(d) {{ pause(); show(i + d); }}
+function gotoFrame(v) {{
+  const n = parseInt(v, 10);
+  if (!isNaN(n)) {{ pause(); show(n - 1); }}
+}}
+document.addEventListener("keydown", (e) => {{
+  if (document.activeElement === document.getElementById("goto")) return;
+  if (e.key === "ArrowLeft") step(-1);
+  else if (e.key === "ArrowRight") step(1);
+  else if (e.key === " ") {{ e.preventDefault(); toggle(); }}
+}});
 show(0); play();
 </script></body></html>
 """
@@ -176,6 +193,7 @@ def _write_html(fig, update, n_frames, fps, dpi, out: Path):
     print(f"[animate_fit] writing HTML player ({n_frames} frames) …")
     out.write_text(_HTML_TEMPLATE.format(
         nmax=n_frames - 1,
+        nframes=n_frames,
         fps=fps,
         frames=",".join(f'"{e}"' for e in encoded),
     ))
