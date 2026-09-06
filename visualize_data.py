@@ -10,6 +10,7 @@ cell by cell from the top.
 """
 
 # %% Setup
+import re
 import sys
 import webbrowser
 from pathlib import Path
@@ -30,8 +31,8 @@ import label_marker_quality as lmq
 DATA_ROOT = Path(r"D:\ExperimentsJune25")
 REF_CSV = DATA_ROOT / "manual_frames.csv"
 TRIAL_MAP_CSV = DATA_ROOT / "trial_filename_map.csv"
-PARTICIPANTS = ["P7",]# "P8", "P9", "P10", "P11"]
-TRIALS = ["Trial1_handsonly", "Trial1_hoi", "Trial2_handsonly", "Trial2_hoi"]
+PARTICIPANTS = ["P7",] # "P8", "P9", "P10", "P11", "P12", "P13", "P14", "P15", "P16", "P17"]
+TRIALS = ["Trial1_handsonly",]# "Trial1_hoi", "Trial2_handsonly", "Trial2_hoi"]
 
 OUT_DIR = REPO_ROOT / "scripts" / "debug_out"
 
@@ -60,6 +61,27 @@ def load_trial_filename_map(path: Path) -> dict[tuple[str, str], str]:
     return mapping
 
 
+def _classify_trial_name(name: str) -> str | None:
+    """Guess a canonical trial key ("Trial1_handsonly", ..., or "static")
+    from a filename stem or a manual_frames.csv trial label — trial number
+    "1"/"2" + "hoi"/"hand"/"only" in the text, or "static"/"staic" (a
+    recurring typo) for a calibration recording. Returns None if nothing
+    recognisable is present."""
+    low = name.lower()
+    if "static" in low or "staic" in low:
+        return "static"
+    if "1" in low or "2" in low:
+        trial_num = "1" if "1" in low else "2"
+        if "hoi" in low:
+            kind = "hoi"
+        elif "hand" in low or "only" in low:
+            kind = "handsonly"
+        else:
+            return None
+        return f"Trial{trial_num}_{kind}"
+    return None
+
+
 def find_trial_files(participant: str, participant_dir: Path,
                       overrides: dict[tuple[str, str], str] | None = None) -> dict[str, Path]:
     """Map canonical trial keys ("Trial1_handsonly", ..., and "static" for a
@@ -69,29 +91,20 @@ def find_trial_files(participant: str, participant_dir: Path,
     Filenames aren't consistent across participants (typos like
     "Trail1_HOI", underscore variants like "Trial1_hands_only", mixed
     case). ``overrides`` (from trial_filename_map.csv) is consulted first
-    for an explicit assignment; any file not listed there falls back to a
-    keyword guess (trial number "1"/"2" + "hoi"/"hand"/"only" in the name,
-    or "static" in the name for a calibration recording).
+    for an explicit assignment; any file not listed there falls back to
+    ``_classify_trial_name``'s keyword guess. Newer batches use filenames
+    with no recognisable keywords at all — add explicit rows to
+    trial_filename_map.csv for those rather than relying on the guess.
+    When two files classify to the same key, the first (filename-sorted)
+    wins and the rest are dropped with a warning.
     """
     overrides = overrides or {}
     found: dict[str, Path] = {}
     for csv_path in sorted(participant_dir.glob("*.csv")):
         key = overrides.get((participant, csv_path.name.lower()))
         if key is None:
-            # Not in the map at all (a new/unseen file) — fall back to guessing.
-            name = csv_path.stem.lower()
-            if "static" in name:
-                key = "static"
-            elif "1" in name or "2" in name:
-                trial_num = "1" if "1" in name else "2"
-                if "hoi" in name:
-                    kind = "hoi"
-                elif "hand" in name or "only" in name:
-                    kind = "handsonly"
-                else:
-                    continue
-                key = f"Trial{trial_num}_{kind}"
-            else:
+            key = _classify_trial_name(csv_path.stem)
+            if key is None:
                 continue
         elif key == "":
             continue  # explicitly marked "not a trial" in the map
@@ -101,6 +114,98 @@ def find_trial_files(participant: str, participant_dir: Path,
             continue
         found[key] = csv_path
     return found
+
+
+def load_manual_trial_sessions(path: Path) -> dict[str, dict[str, str]]:
+    """Read manual_frames.csv's own (participant, canonical trial name,
+    session/filename label) rows — this is now the authoritative source for
+    which file belongs to which trial slot, not filename keyword-guessing.
+    Column B is a standardised canonical name ("Trial 1 Hands only",
+    "Trial 1 HOI", ...), classified here with the same heuristic used for
+    filenames; column C is the actual session/filename stub to look up on
+    disk (frequently inconsistent with what the recording "should" be
+    called — e.g. a mislabelled or renamed file — so trust it over any
+    keyword guess on the real filename). A blank participant cell means
+    "same participant as the row above". Returns
+    {participant: {trial_key: session_label}}; the first row per key wins,
+    later ones (retakes, aborted takes, rows explicitly marked "extra") are
+    skipped with a warning.
+    """
+    import csv as csv_mod
+
+    sessions: dict[str, dict[str, str]] = {}
+    if not path.exists():
+        return sessions
+    current_p = ""
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        for row in csv_mod.reader(f, delimiter="\t"):
+            if not row or not any(c.strip() for c in row):
+                continue
+            row = (row + ["", "", ""])[:3]
+            p, canonical, session_label = (c.strip() for c in row)
+            if p:
+                current_p = p
+            key = _classify_trial_name(canonical)
+            if key is None or key == "static":
+                continue
+            slots = sessions.setdefault(current_p, {})
+            if key in slots:
+                print(f"[warn] manual_frames.csv: {current_p}/{canonical!r} "
+                      f"({session_label!r}) duplicates {key!r} "
+                      f"(already {slots[key]!r}) — keeping the first")
+                continue
+            slots[key] = session_label
+    return sessions
+
+
+def find_session_file(participant_dir: Path, session_label: str,
+                       target_key: str | None = None) -> Path | None:
+    """Locate the CSV file matching a manual_frames.csv session label —
+    exact (case-insensitive) filename stem match first, then normalised
+    (alnum-only) equality for minor punctuation differences, then a fuzzy
+    closest-match (``difflib``) for typos like "Staic_trial01" (log) vs
+    "Static_trial01.csv" (actual file). The fuzzy tier prints what it
+    picked so a bad guess is easy to spot and correct.
+
+    ``target_key`` (e.g. "Trial1_handsonly") guards the fuzzy tier: a
+    candidate whose *own* filename unambiguously keyword-classifies to a
+    *different* Trial1/2-handsonly/hoi key is excluded, even if it's
+    textually closer — otherwise a label like "Trial1_handsonly" can
+    fuzzy-match a similarly-spelled "Trial2_handsonly.csv" over the actual
+    typo'd "Trail1_handsonly.csv" (wrong trial number, not just a wrong
+    filename). Files that classify as "static" stay eligible even when
+    ``target_key`` is a trial slot — some participants' real trial
+    recordings are themselves typo'd as "static" (e.g. "Staic_trial01");
+    the difflib cutoff is strict enough that an unrelated static file won't
+    accidentally win a trial label it doesn't resemble.
+    """
+    import difflib
+    import re as re_mod
+
+    if not session_label:
+        return None
+    low = session_label.lower()
+    candidates = sorted(participant_dir.glob("*.csv"))
+    for csv_path in candidates:
+        if csv_path.stem.lower() == low:
+            return csv_path
+    target = re_mod.sub(r"[^a-z0-9]", "", low)
+    for csv_path in candidates:
+        if re_mod.sub(r"[^a-z0-9]", "", csv_path.stem.lower()) == target:
+            return csv_path
+    fuzzy_candidates = [
+        c for c in candidates
+        if target_key is None
+        or _classify_trial_name(c.stem) in (None, "static", target_key)
+    ]
+    stems = [c.stem for c in fuzzy_candidates]
+    close = difflib.get_close_matches(session_label, stems, n=1, cutoff=0.7)
+    if close:
+        match = next(c for c in fuzzy_candidates if c.stem == close[0])
+        print(f"[info] {participant_dir}: fuzzy-matched session label "
+              f"{session_label!r} -> {match.name!r}")
+        return match
+    return None
 
 
 def auto_reference(markers, min_frames=300):
@@ -132,10 +237,24 @@ def auto_reference(markers, min_frames=300):
 # stage by stage for a specific trial.
 results = {}
 trial_map = load_trial_filename_map(TRIAL_MAP_CSV)
+manual_sessions = load_manual_trial_sessions(REF_CSV)
 
 for participant in PARTICIPANTS:
     participant_dir = DATA_ROOT / participant / participant
-    trial_files = find_trial_files(participant, participant_dir, trial_map)
+    # manual_frames.csv is authoritative for which file belongs to which
+    # trial slot; find_trial_files' keyword guess is only a fallback for
+    # trial slots that have no row there yet (and for the extra "static"
+    # bone-length reference, which manual_frames.csv doesn't track).
+    keyword_files = find_trial_files(participant, participant_dir, trial_map)
+    sessions = manual_sessions.get(participant, {})
+    trial_files: dict[str, Path] = dict(keyword_files)
+    for trial_key, session_label in sessions.items():
+        session_path = find_session_file(participant_dir, session_label, trial_key)
+        if session_path is None:
+            print(f"[warn] {participant}/{trial_key}: manual_frames.csv session "
+                  f"{session_label!r} has no matching CSV in {participant_dir}")
+            continue
+        trial_files[trial_key] = session_path
 
     static_path = trial_files.get("static")
     static_markers_raw, static_labels = (None, None)
@@ -198,7 +317,6 @@ print(f"Saved summary plot to {summary_png}")
 plt.show()  # blocks in a plain terminal; close the window to continue
 
 # %% Animation setup (helpers)
-ANIMATE_TRIAL = ("P7", "Trial1_hoi")
 N_OUT = 1000
 
 # Original marker colors, by finger.
@@ -216,6 +334,13 @@ def marker_color(label):
         if key in low:
             return color
     return "#000000"
+
+
+def marker_digit(label):
+    """Trailing digit(s) of a marker label ("Thumb1" -> "1"), for a compact
+    on-plot annotation next to each marker dot."""
+    m = re.search(r"(\d+)$", label.strip())
+    return m.group(1) if m else ""
 
 
 def marker_trace_data(markers, status, t):
@@ -239,108 +364,7 @@ def bone_lines(frame_markers, bones):
     return xs, ys, zs
 
 
-# %% Animate one trial (interactive 3D)
-markers, labels, bones, status, pct_correct = results[ANIMATE_TRIAL]
-participant, trial = ANIMATE_TRIAL
-
-frame_idx = np.unique(np.linspace(0, markers.shape[0] - 1, N_OUT).astype(int))
-center = np.nanmean(markers, axis=(0, 1))
-half = 200  # mm
-fill_colors = [marker_color(l) for l in labels]
-
-
-def frame_title(t):
-    return f"{participant}/{trial}  frame {t}  correct {pct_correct[t]:.0f}%"
-
-
-x0, y0, z0, outline0 = marker_trace_data(markers, status, frame_idx[0])
-bx0, by0, bz0 = bone_lines(markers[frame_idx[0]], bones)
-
-# Plotly's Scatter3d marker outline (`line=`) renders as a hairline in
-# WebGL regardless of `width` — draw the status ring as a separate, larger
-# marker layer behind the fill layer instead, which is reliably visible.
-ring_trace = go.Scatter3d(
-    x=x0, y=y0, z=z0, mode="markers",
-    marker=dict(size=14, color=outline0), hoverinfo="skip", name="status",
-)
-marker_trace = go.Scatter3d(
-    x=x0, y=y0, z=z0, mode="markers",
-    marker=dict(size=6, color=fill_colors),
-    text=labels, hoverinfo="text", name="markers",
-)
-bone_trace = go.Scatter3d(
-    x=bx0, y=by0, z=bz0, mode="lines",
-    line=dict(color="lightgray", width=2), hoverinfo="skip", name="bones",
-)
-
-# Legend proxy traces: no real data, just a swatch + label per finger group
-# and per quality status, since Scatter3d doesn't expose a discrete-color
-# legend the way px does.
-finger_legend_traces = [
-    go.Scatter3d(
-        x=[None], y=[None], z=[None], mode="markers",
-        marker=dict(size=6, color=color), name=finger,
-        legendgroup="finger", legendgrouptitle=dict(text="Finger"),
-    )
-    for finger, color in FINGER_PALETTE.items()
-]
-status_legend_traces = [
-    go.Scatter3d(
-        x=[None], y=[None], z=[None], mode="markers",
-        marker=dict(size=10, color=color), name=label,
-        legendgroup="status", legendgrouptitle=dict(text="Status"),
-    )
-    for label, color in [("correct", STATUS_OUTLINE[2]), ("incorrect", STATUS_OUTLINE[1])]
-]
-
-frames = []
-for k, t in enumerate(frame_idx):
-    x, y, z, outline = marker_trace_data(markers, status, t)
-    bx, by, bz = bone_lines(markers[t], bones)
-    frames.append(go.Frame(
-        name=str(k),
-        data=[
-            go.Scatter3d(x=x, y=y, z=z, marker=dict(color=outline)),
-            go.Scatter3d(x=x, y=y, z=z, marker=dict(color=fill_colors)),
-            go.Scatter3d(x=bx, y=by, z=bz),
-        ],
-        layout=go.Layout(title=frame_title(t)),
-    ))
-
-fig = go.Figure(
-    data=[ring_trace, marker_trace, bone_trace, *finger_legend_traces, *status_legend_traces],
-    frames=frames,
-    layout=go.Layout(
-        title=frame_title(frame_idx[0]),
-        width=950, height=800,
-        legend=dict(x=1.02, y=1),
-        scene=dict(
-            xaxis=dict(range=[center[0] - half, center[0] + half], title="X (mm)"),
-            yaxis=dict(range=[center[1] - half, center[1] + half], title="Y (mm)"),
-            zaxis=dict(range=[center[2] - half, center[2] + half], title="Z (mm)"),
-            aspectmode="cube",
-        ),
-        updatemenus=[dict(
-            type="buttons", showactive=False,
-            buttons=[
-                dict(label="Play", method="animate", args=[
-                    None, {"frame": {"duration": 60, "redraw": True},
-                           "fromcurrent": True, "transition": {"duration": 0}}]),
-                dict(label="Pause", method="animate", args=[
-                    [None], {"frame": {"duration": 0}, "mode": "immediate"}]),
-            ],
-        )],
-        sliders=[dict(
-            currentvalue=dict(prefix="frame: "),
-            steps=[
-                dict(method="animate", label=str(t),
-                     args=[[str(k)], {"frame": {"duration": 0, "redraw": True}, "mode": "immediate"}])
-                for k, t in enumerate(frame_idx)
-            ],
-        )],
-    ),
-)
-
+# %% Animate one trial (interactive 3D) — helpers
 # Plotly's slider already lets you scrub to a frame, but there's no
 # single-frame step or numeric "go to frame" control — add both via a
 # post-render script that drives the same Plotly.animate() call the slider
@@ -385,11 +409,130 @@ _STEP_CONTROLS_JS = """
 })();
 """
 
-anim_html_path = OUT_DIR / f"animation_{participant}_{trial}.html"
-_div_id = "animfig"
-fig.write_html(
-    str(anim_html_path), include_plotlyjs=True, div_id=_div_id,
-    post_script=_STEP_CONTROLS_JS % {"div_id": _div_id, "n_frames": len(frame_idx)},
-)
-print(f"Saved interactive animation to {anim_html_path}")
-webbrowser.open(anim_html_path.as_uri())
+def build_animation_figure(participant, trial, markers, labels, bones, status, pct_correct):
+    """Build the interactive 3D Plotly animation figure for one trial."""
+    frame_idx = np.unique(np.linspace(0, markers.shape[0] - 1, N_OUT).astype(int))
+    center = np.nanmean(markers, axis=(0, 1))
+    half = 200  # mm
+    fill_colors = [marker_color(l) for l in labels]
+    digit_text = [marker_digit(l) for l in labels]
+    n_markers = markers.shape[1]
+
+    def frame_title(t):
+        n_present = int(np.isfinite(markers[t]).all(axis=-1).sum())
+        return (f"{participant}/{trial}  frame {t}  correct {pct_correct[t]:.0f}%  "
+                f"markers {n_present}/{n_markers}")
+
+    x0, y0, z0, outline0 = marker_trace_data(markers, status, frame_idx[0])
+    bx0, by0, bz0 = bone_lines(markers[frame_idx[0]], bones)
+
+    # Plotly's Scatter3d marker outline (`line=`) renders as a hairline in
+    # WebGL regardless of `width` — draw the status ring as a separate,
+    # larger marker layer behind the fill layer instead, which is reliably
+    # visible.
+    ring_trace = go.Scatter3d(
+        x=x0, y=y0, z=z0, mode="markers",
+        marker=dict(size=14, color=outline0), hoverinfo="skip", name="status",
+    )
+    marker_trace = go.Scatter3d(
+        x=x0, y=y0, z=z0, mode="markers+text",
+        marker=dict(size=6, color=fill_colors),
+        text=digit_text, textposition="top center",
+        textfont=dict(size=10, color="#000000"),
+        hovertext=labels, hoverinfo="text", name="markers",
+    )
+    bone_trace = go.Scatter3d(
+        x=bx0, y=by0, z=bz0, mode="lines",
+        line=dict(color="lightgray", width=2), hoverinfo="skip", name="bones",
+    )
+
+    # Legend proxy traces: no real data, just a swatch + label per finger
+    # group and per quality status, since Scatter3d doesn't expose a
+    # discrete-color legend the way px does.
+    finger_legend_traces = [
+        go.Scatter3d(
+            x=[None], y=[None], z=[None], mode="markers",
+            marker=dict(size=6, color=color), name=finger,
+            legendgroup="finger", legendgrouptitle=dict(text="Finger"),
+        )
+        for finger, color in FINGER_PALETTE.items()
+    ]
+    status_legend_traces = [
+        go.Scatter3d(
+            x=[None], y=[None], z=[None], mode="markers",
+            marker=dict(size=10, color=color), name=label,
+            legendgroup="status", legendgrouptitle=dict(text="Status"),
+        )
+        for label, color in [("correct", STATUS_OUTLINE[2]), ("incorrect", STATUS_OUTLINE[1])]
+    ]
+
+    frames = []
+    for k, t in enumerate(frame_idx):
+        x, y, z, outline = marker_trace_data(markers, status, t)
+        bx, by, bz = bone_lines(markers[t], bones)
+        frames.append(go.Frame(
+            name=str(k),
+            data=[
+                go.Scatter3d(x=x, y=y, z=z, marker=dict(color=outline)),
+                go.Scatter3d(x=x, y=y, z=z, marker=dict(color=fill_colors)),
+                go.Scatter3d(x=bx, y=by, z=bz),
+            ],
+            layout=go.Layout(title=frame_title(t)),
+        ))
+
+    fig = go.Figure(
+        data=[ring_trace, marker_trace, bone_trace, *finger_legend_traces, *status_legend_traces],
+        frames=frames,
+        layout=go.Layout(
+            title=frame_title(frame_idx[0]),
+            width=950, height=800,
+            legend=dict(x=1.02, y=1),
+            scene=dict(
+                xaxis=dict(range=[center[0] - half, center[0] + half], title="X (mm)"),
+                yaxis=dict(range=[center[1] - half, center[1] + half], title="Y (mm)"),
+                zaxis=dict(range=[center[2] - half, center[2] + half], title="Z (mm)"),
+                aspectmode="cube",
+            ),
+            updatemenus=[dict(
+                type="buttons", showactive=False,
+                buttons=[
+                    dict(label="Play", method="animate", args=[
+                        None, {"frame": {"duration": 60, "redraw": True},
+                               "fromcurrent": True, "transition": {"duration": 0}}]),
+                    dict(label="Pause", method="animate", args=[
+                        [None], {"frame": {"duration": 0}, "mode": "immediate"}]),
+                ],
+            )],
+            sliders=[dict(
+                currentvalue=dict(prefix="frame: "),
+                steps=[
+                    dict(method="animate", label=str(t),
+                         args=[[str(k)], {"frame": {"duration": 0, "redraw": True}, "mode": "immediate"}])
+                    for k, t in enumerate(frame_idx)
+                ],
+            )],
+        ),
+    )
+    return fig, len(frame_idx)
+
+
+def save_animation_html(fig, n_frames, out_path):
+    _div_id = "animfig"
+    fig.write_html(
+        str(out_path), include_plotlyjs=True, div_id=_div_id,
+        post_script=_STEP_CONTROLS_JS % {"div_id": _div_id, "n_frames": n_frames},
+    )
+    print(f"Saved interactive animation to {out_path}")
+
+
+# %% Animate every trial (interactive 3D) — one HTML file per (participant, trial)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+animation_paths = []
+for (participant, trial), (markers, labels, bones, status, pct_correct) in results.items():
+    fig, n_frames = build_animation_figure(participant, trial, markers, labels, bones, status, pct_correct)
+    anim_html_path = OUT_DIR / f"animation_{participant}_{trial}.html"
+    save_animation_html(fig, n_frames, anim_html_path)
+    animation_paths.append(anim_html_path)
+
+if animation_paths:
+    webbrowser.open(animation_paths[0].as_uri())

@@ -95,7 +95,12 @@ def load_csv(path: str, *, mm: bool = True) -> tuple[np.ndarray, list[str]]:
     """
     import csv
 
-    with open(path, newline="") as fh:
+    # encoding="latin-1": Nexus-exported CSVs are ASCII except for the
+    # occasional stray non-UTF-8 byte in a free-text note column (e.g. a
+    # smart quote), which trips the platform-default codec (cp1252 on
+    # Windows). latin-1 maps every byte 0-255 to a character, so it never
+    # raises — the numeric marker columns we actually parse are unaffected.
+    with open(path, newline="", encoding="latin-1") as fh:
         rows = list(csv.reader(fh))
 
     # Wide format: a single header row with "<Marker>_X" cells
