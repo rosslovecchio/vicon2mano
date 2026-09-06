@@ -468,6 +468,7 @@ def label_quality_cascade(
     forearm_tol_mm: float = 2.5,
     forearm_max_bad: int = 2,
     forearm_window: int = 301,
+    forearm_sanity_mm: float = 10.0,
     anchor_tol_mad: float = 1.0,
     anchor_tol_mm: float = 5.0,
     palm_min_present: int = 2,
@@ -497,8 +498,20 @@ def label_quality_cascade(
        its own *local* median/MAD over a ``forearm_window``-frame centered
        rolling window (see ``_rolling_local_reference``) — slow drift is
        absorbed into the local baseline, and only an *abrupt* deviation
-       from a marker's own recent neighbourhood gets flagged. (Note: a
-       pairwise-distance check structurally can't catch two Forearm
+       from a marker's own recent neighbourhood gets flagged. A purely
+       local baseline has a blind spot, though: a genuine tracking failure
+       that's *sustained* for longer than about half the window (a marker
+       stuck at a wrong reconstructed position, not just a one-frame
+       blip) looks just like a new, stable pose from inside the window —
+       seen on real data, where a Forearm plate distance jumped from
+       ~55mm to ~150mm in a single frame and then held there for hundreds
+       of frames, and the local median duly adopted 150mm as "normal".
+       So the local median is also sanity-checked against the *global*
+       ``ref_frames``-based reference: if it strays more than
+       ``forearm_sanity_mm`` from that fixed anchor, the local baseline
+       itself is untrusted and the pair is flagged regardless of how well
+       the current frame matches its own (drifted) local neighbourhood.
+       (Note: a pairwise-distance check structurally can't catch two Forearm
        markers swapping labels with each other, since swapping doesn't
        change the distance between them — that job falls to the temporal
        speed check below instead, which cares about *identity/motion*
@@ -633,9 +646,22 @@ def label_quality_cascade(
                 mad_floor = np.nan_to_num(local_mad, nan=0.0)
                 mad_floor[mad_floor == 0] = 1.0  # avoid zero-width tolerance
                 tol = np.maximum(forearm_tol_mad * mad_floor, forearm_tol_mm)
+
+                # Sanity-check the local baseline itself against the global,
+                # ref_frames-based reference — a local median that has
+                # drifted implausibly far from it means a sustained tracking
+                # failure got mistaken for a new "normal", not real skin
+                # drift (see docstring). Skip if there's no global reference
+                # for this pair to sanity-check against.
+                global_med, _global_mad = bone_ref.get((i, j), (None, None))
+                if global_med is not None:
+                    local_untrustworthy = np.isfinite(local_med) & (np.abs(local_med - global_med) > forearm_sanity_mm)
+                else:
+                    local_untrustworthy = np.zeros(T, dtype=bool)
+
                 bad_pair = (
                     present[:, i] & present[:, j]
-                    & (~np.isfinite(d) | ~np.isfinite(local_med) | (np.abs(d - local_med) > tol))
+                    & (~np.isfinite(d) | ~np.isfinite(local_med) | (np.abs(d - local_med) > tol) | local_untrustworthy)
                 )
                 forearm_bad_marker[bad_pair, idx_pos[i]] = True
                 forearm_bad_marker[bad_pair, idx_pos[j]] = True
@@ -874,6 +900,7 @@ def debug_frame_cascade(
     forearm_tol_mm: float = 2.5,
     forearm_max_bad: int = 2,
     forearm_window: int = 301,
+    forearm_sanity_mm: float = 10.0,
     anchor_tol_mad: float = 1.0,
     anchor_tol_mm: float = 5.0,
     palm_min_present: int = 2,
@@ -940,9 +967,16 @@ def debug_frame_cascade(
             mad_floor = np.nan_to_num(local_mad, nan=0.0)
             mad_floor[mad_floor == 0] = 1.0
             tol = np.maximum(forearm_tol_mad * mad_floor, forearm_tol_mm)
+
+            global_med, _global_mad = bone_ref.get((i, j), (None, None))
+            if global_med is not None:
+                local_untrustworthy = np.isfinite(local_med) & (np.abs(local_med - global_med) > forearm_sanity_mm)
+            else:
+                local_untrustworthy = np.zeros(T, dtype=bool)
+
             bad_pair = (
                 present[:, i] & present[:, j]
-                & (~np.isfinite(d) | ~np.isfinite(local_med) | (np.abs(d - local_med) > tol))
+                & (~np.isfinite(d) | ~np.isfinite(local_med) | (np.abs(d - local_med) > tol) | local_untrustworthy)
             )
             forearm_bad_marker[bad_pair, idx_pos[i]] = True
             forearm_bad_marker[bad_pair, idx_pos[j]] = True
@@ -958,6 +992,9 @@ def debug_frame_cascade(
             verdict = "OK" if not bad_pair[t] else "BAD"
             if not both_present:
                 verdict += " (but not scored — a marker is missing this frame)"
+            elif local_untrustworthy[t]:
+                verdict += (f" (local baseline itself is {abs(med_t - global_med):.1f}mm from the "
+                            f"global reference {global_med:.1f}mm — untrusted, sanity cap ±{forearm_sanity_mm:.1f}mm)")
             print(f"    {labels[i]} <-> {labels[j]}: d={d[t]:.1f}mm  local_ref={med_t:.1f}±{mad_t:.2f}mm  "
                   f"tol=±{tol_t:.1f}mm  -> {verdict}")
     forearm_gate_ok_all = forearm_bad_marker.sum(axis=1) < forearm_max_bad if forearm_idxs else np.zeros(T, bool)
