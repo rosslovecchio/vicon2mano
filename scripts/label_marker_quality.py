@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 """Label each marker in each frame as correct / incorrect / missing.
 
+Two implementations live here: ``label_quality`` below (used by this
+module's CLI, ``main()``) checks every bone independently against a fixed
+reference, as described next. ``label_quality_cascade`` (used by
+``visualize_data.py``/``.ipynb`` and generally the more battle-tested one
+against real data — see its own docstring and ``CLAUDE.md``'s "marker-
+quality cascade" section) instead evaluates markers in a strict dependency
+chain (forearm gates palm, palm gates each finger), with a local rolling
+reference for the skin-mounted Forearm markers, manually-verified reference
+frames trusted absolutely, and a stickiness rule that only reinstates a
+marker never actually caught by a real measured deviation.
+
 Given a handful of frames the user has manually verified as "for sure
 correct" (``--ref-frames``), this builds two references from them and checks
 every other frame against it:

@@ -3,7 +3,8 @@
 Working title: **"Recovering finger joint angles from sparse optical marker
 sets via a hand-model prior: accuracy limits and protocol implications"**
 
-Status: draft outline (2026-06-12). Numbers below are from
+Status: draft outline (2026-06-12; updated 2026-09-07 with the raw-marker
+quality-screening step, see §3/§6). Numbers below are from
 `vicon2mano/eval/fit/synth_eval_results.md`; real-data validation still TODO.
 
 ---
@@ -79,9 +80,15 @@ without damping gesture — see fitter design notes in CLAUDE.md.
 1. **Introduction** — clinical need for finger kinematics; why sparse optical
    protocols are attractive but IK-underdetermined; the model-prior idea.
 2. **Related work** — MANO, MoSh++/AMASS, SOMA, clinical hand kinematics.
-3. **Method** — two-stage MANO fit (shape, then per-frame pose+transl);
-   correspondence (label-seed → Hungarian; learned labeler optional);
-   robustness terms (joint-space acceleration prior; outlier rescue).
+3. **Method** — raw-marker quality screening (a trust-chain cascade —
+   forearm rigidity/drift, palm rigidity + forearm-anchor distance, then
+   finger chains — that labels every marker in every frame
+   correct/incorrect/missing before any fitting happens, catching
+   occlusion-fill jumps and label swaps a downstream fitter would
+   otherwise silently absorb; `scripts/label_marker_quality.py`); two-stage
+   MANO fit (shape, then per-frame pose+transl); correspondence
+   (label-seed → Hungarian; learned labeler optional); robustness terms
+   (joint-space acceleration prior; outlier rescue).
 4. **Synthetic evaluation** — generator; error-budget ablation (Table in §4);
    the tip-marker experiment.
 5. **Real-data results** — `data/Pxh8` two-hand fit; residuals; articulation
@@ -97,7 +104,11 @@ without damping gesture — see fitter design notes in CLAUDE.md.
    only and reviewers will balk for a clinical venue.
 2. **Subjects / recordings** — currently N=1 (`Pxh8`). Need ≥5–10 with
    varied hand sizes and a defined task battery (flexion/extension, grasps,
-   pinch).
+   pinch). Progress: the raw-marker quality cascade (§3) now automatically
+   screens per-frame correctness for the `P7` batch (4 trials); still need
+   to run it over the rest of the multi-participant set and hand-verify a
+   `manual_frames.csv` reference row per trial before those recordings are
+   usable ground truth for fitting.
 3. **Baseline comparison** — MoSh++ and/or SOMA on the same sparse input, or
    a direct-IK baseline, to show the prior earns its place.
 4. **PCA-order sweep** as a reported design curve (accuracy vs n_comps vs
