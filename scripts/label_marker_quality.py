@@ -575,31 +575,44 @@ def label_quality_cascade(
        build (a reference frame can otherwise fail the temporal check
        purely because the frame *before* it was bad, not because the
        reference frame itself is suspect).
-    6. **Stickiness override**, run last, overriding *everything* above. A
-       marker that was "correct" in an *adjacent* frame (before or after)
-       and has moved at most ``sticky_tol_mm`` since stays "correct" too,
-       regardless of what stages 1-4 computed — a marker that barely moved
-       can't have been swapped or relabelled, so whatever tripped the
-       checks (e.g. a neighbour's own swap corrupting a shared plate/anchor
-       reference) isn't this marker's problem. Runs forward (frame-by-frame
-       in time order) then backward (frame-by-frame in reverse), each a
-       full sweep, so a short bad stretch sandwiched between two confirmed-
-       good frames gets rescued from whichever side reaches it, not just
-       whichever comes chronologically first. A marker that goes missing
-       breaks the chain — the frame right after it reappears gets no free
-       pass, it has to earn "correct" again from the checks above first
-       (from either direction).
+    6. **Stickiness override**, run last, but — unlike every stage above —
+       it can only reinstate an *unverified* "incorrect", never overrule a
+       *verified* one. Every "incorrect" marking above is tagged internally
+       as one or the other: "verified" means some check actually measured
+       a real deviation against trustworthy data (a pairwise/anchor
+       distance genuinely out of tolerance, an implausible speed, ...);
+       "unverified" means it was marked incorrect only for lack of
+       something to confirm it against — no individually-correct anchor to
+       compare a finger-base to, an untrustworthy local Forearm reference,
+       swept up in a whole-frame gate veto with no direct evidence of its
+       own, and so on. A marker that was "correct" in an *adjacent* frame
+       (before or after) and has moved at most ``sticky_tol_mm`` since
+       stays "correct" too, but only when its current "incorrect" is
+       unverified — a marker that barely moved can't have been swapped or
+       relabelled, so an unverified incorrect isn't this marker's own
+       problem, but a verified one is real, positive evidence this
+       override must never paper over no matter how little the marker
+       moved. (Seen on real data: a persistent label swap between two
+       fingers held both physically still for hundreds of frames
+       afterward, each step individually well under tolerance — comparing
+       only to the adjacent frame without this distinction would otherwise
+       resurrect "correct" status for the entire wrong stretch. A Forearm
+       pairwise failure is a special case: it can only implicate a *pair*,
+       never say which of the two moved, so only a marker implicated in
+       *every one* of its pairs — the signature of the actual culprit — is
+       treated as verified; a marker only partly implicated stays eligible
+       for this override, same as before verified/unverified existed,
+       since here stickiness is the only available way to tell a moving
+       culprit from its stationary neighbours.)
 
-       Caveat: comparing only to the immediately adjacent frame (rather
-       than to a fixed earned anchor) lets slow drift accumulate for as
-       long as the hand holds still, each step individually under
-       tolerance, without ever being caught — seen on real data, where a
-       marker drifted ~6.6mm over 48 frames this way. That specific case
-       turned out to trace back to a different root cause (the "earned"
-       frame the run started from was itself only a marginal pass — see
-       ``debug_frame_cascade`` and check whether a marker's usual
-       corroborating partner was missing right when it was last confirmed
-       correct), so this stays the simple adjacent-frame version for now.
+       Runs forward (frame-by-frame in time order) then backward
+       (frame-by-frame in reverse), each a full sweep, so a short
+       unverified-bad stretch sandwiched between two confirmed-good frames
+       gets rescued from whichever side reaches it, not just whichever
+       comes chronologically first. A marker that goes missing breaks the
+       chain — the frame right after it reappears gets no free pass, it
+       has to earn "correct" again from the checks above first (from
+       either direction).
 
     A per-marker temporal (frame-to-frame speed) check is applied on top,
     same as ``label_quality``, before the gate veto (step 4) has final say.
@@ -630,6 +643,17 @@ def label_quality_cascade(
     present = np.isfinite(markers).all(axis=-1)                # (T, N)
     status = np.where(present, 2, 0).astype(np.int8)
 
+    # A marker marked "incorrect" for a real, positive reason (a measured
+    # distance/anchor/speed that actually failed against trustworthy
+    # reference data) is "verified bad" — the stickiness override below
+    # must never reinstate it. A marker marked "incorrect" only because
+    # there wasn't enough corroborating data to confirm it either way (no
+    # individually-correct anchor to compare against, an untrustworthy
+    # local reference, swept up in a gate veto with no direct evidence of
+    # its own, ...) stays eligible for stickiness — "can't verify" is not
+    # the same claim as "verified wrong".
+    verified_bad = np.zeros((T, N), dtype=bool)
+
     all_bones = infer_bones(labels)  # for visualisation / return value only
     bone_ref, speeds = build_reference(markers, ref_frames, all_bones, extra_markers=static_markers)
 
@@ -638,6 +662,7 @@ def label_quality_cascade(
         forearm_pairs = [(i, j) for k, i in enumerate(forearm_idxs) for j in forearm_idxs[k + 1:]]
         forearm_local_ref = _rolling_local_reference(markers, forearm_pairs, forearm_window)
         forearm_bad_marker = ~present[:, forearm_idxs]
+        forearm_verified_bad_marker = np.zeros((T, len(forearm_idxs)), dtype=bool)
         idx_pos = {idx: k for k, idx in enumerate(forearm_idxs)}
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
@@ -659,20 +684,43 @@ def label_quality_cascade(
                 else:
                     local_untrustworthy = np.zeros(T, dtype=bool)
 
-                bad_pair = (
-                    present[:, i] & present[:, j]
-                    & (~np.isfinite(d) | ~np.isfinite(local_med) | (np.abs(d - local_med) > tol) | local_untrustworthy)
-                )
+                both_present = present[:, i] & present[:, j]
+                # A local reference is only trustworthy to measure a real
+                # deviation against when it exists at all AND passed its own
+                # sanity check — a distance vs. an untrustworthy local
+                # baseline is "can't verify", not positive evidence, even
+                # though the pair still gets marked incorrect defensively.
+                has_trustworthy_local = np.isfinite(local_med) & ~local_untrustworthy
+                real_bad = both_present & has_trustworthy_local & np.isfinite(d) & (np.abs(d - local_med) > tol)
+                unverifiable_bad = both_present & (~has_trustworthy_local | ~np.isfinite(d))
+                bad_pair = real_bad | unverifiable_bad
+
                 forearm_bad_marker[bad_pair, idx_pos[i]] = True
                 forearm_bad_marker[bad_pair, idx_pos[j]] = True
+                forearm_verified_bad_marker[real_bad, idx_pos[i]] = True
+                forearm_verified_bad_marker[real_bad, idx_pos[j]] = True
+        # A pairwise check can only implicate a *pair*, not tell you which
+        # of the two actually moved — unlike Palm, Forearm markers have no
+        # independent anchor to break that tie with. The real culprit in a
+        # single-marker failure shows up bad in *every* one of its pairs,
+        # while an innocent partner only shows up bad in the one pair it
+        # shares with the culprit — so only count a marker as genuinely
+        # confirmed-bad (blocking stickiness) when it's implicated in all
+        # of its pairs; a marker only partly implicated stays eligible,
+        # same as before this real/unverifiable split existed.
+        n_forearm = len(forearm_idxs)
+        fully_implicated = forearm_verified_bad_marker.sum(axis=1) == max(n_forearm - 1, 0)
+        forearm_confirmed_bad_marker = forearm_verified_bad_marker & fully_implicated[:, None]
         forearm_gate_ok = forearm_bad_marker.sum(axis=1) < forearm_max_bad
     else:
         forearm_bad_marker = np.zeros((T, 0), dtype=bool)
+        forearm_confirmed_bad_marker = np.zeros((T, 0), dtype=bool)
         forearm_gate_ok = np.zeros(T, dtype=bool)
 
     for k, idx in enumerate(forearm_idxs):
         bad = present[:, idx] & forearm_bad_marker[:, k]
         status[bad, idx] = 1
+        verified_bad[present[:, idx] & forearm_confirmed_bad_marker[:, k], idx] = True
 
     # ---- forearm centroid + anchor-distance reference (Palm & finger bases) ----
     with warnings.catch_warnings():
@@ -694,6 +742,9 @@ def label_quality_cascade(
 
     finger_first_idxs = [digits[min(digits)] for digits in fingers.values()]
     anchor_ok: dict[int, np.ndarray] = {}  # idx -> (T,) bool, distance-to-centroid within tolerance
+    # idx -> (T,) bool, a REAL measured deviation (not just "couldn't verify"
+    # from too few reference samples) — see the verified_bad note above.
+    anchor_verified_bad: dict[int, np.ndarray] = {}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
         for idx in palm_idxs + finger_first_idxs:
@@ -705,19 +756,26 @@ def label_quality_cascade(
                 d_ref = np.concatenate([d_ref, d_static])
             if d_ref.size < 2:
                 anchor_ok[idx] = np.zeros(T, dtype=bool)  # not enough reference data to verify
+                anchor_verified_bad[idx] = np.zeros(T, dtype=bool)  # can't verify != verified wrong
                 continue
             med = float(np.median(d_ref))
             mad = float(np.median(np.abs(d_ref - med))) or 1.0
             tol = max(anchor_tol_mad * mad, anchor_tol_mm)
             d = np.linalg.norm(markers[:, idx] - centroid, axis=-1)
             anchor_ok[idx] = np.isfinite(d) & (np.abs(d - med) <= tol)
+            anchor_verified_bad[idx] = np.isfinite(d) & (np.abs(d - med) > tol)
 
     # ---- stage 2: palm gate ----
     if palm_idxs:
         palm_present = present[:, palm_idxs]                                    # (T, P)
-        palm_bonelength_ok = palm_present & ~_pairwise_bad_anchor_tiebreak(
+        # Every "bad" flag _pairwise_bad_anchor_tiebreak returns is a real
+        # measured deviation (a pair with no reference is silently skipped,
+        # never counted "bad") — bone-length badness is always verified.
+        palm_bonelength_bad = _pairwise_bad_anchor_tiebreak(
             markers, present, bone_ref, palm_idxs, bone_tol_mad, bone_tol_mm, anchor_ok)
+        palm_bonelength_ok = palm_present & ~palm_bonelength_bad
         palm_anchor_ok = np.stack([anchor_ok[idx] for idx in palm_idxs], axis=1)  # (T, P)
+        palm_anchor_verified_bad = np.stack([anchor_verified_bad[idx] for idx in palm_idxs], axis=1)
 
         palm_gate_ok = (
             forearm_gate_ok
@@ -728,13 +786,16 @@ def label_quality_cascade(
         # A Palm marker is individually "correct" only if it clears every
         # criterion itself, not just the frame-level >= counts.
         palm_marker_ok = palm_present & palm_bonelength_ok & palm_anchor_ok
+        palm_marker_verified_bad = palm_present & (palm_bonelength_bad | palm_anchor_verified_bad)
     else:
         palm_gate_ok = np.zeros(T, dtype=bool)
         palm_marker_ok = np.zeros((T, 0), dtype=bool)
+        palm_marker_verified_bad = np.zeros((T, 0), dtype=bool)
 
     for k, idx in enumerate(palm_idxs):
         bad = present[:, idx] & forearm_gate_ok & ~palm_marker_ok[:, k]
         status[bad, idx] = 1
+        verified_bad[bad & palm_marker_verified_bad[:, k], idx] = True
 
     # ---- stage 3: finger chain, gated by the palm stage ----
     gate_ok = forearm_gate_ok & palm_gate_ok
@@ -746,11 +807,13 @@ def label_quality_cascade(
 
             if first_idx in palm_group_set:
                 # Thumb1 was already folded into the palm group and fully
-                # resolved in stage 2 — reuse that status instead of
-                # re-deriving it here (it has no bones to the *other*
-                # fingers' base markers, so the check below wouldn't have
-                # anything meaningful to compare it against anyway).
+                # resolved in stage 2 — reuse that status (and its
+                # verified_bad) instead of re-deriving it here (it has no
+                # bones to the *other* fingers' base markers, so the check
+                # below wouldn't have anything meaningful to compare it
+                # against anyway).
                 prev_idx, prev_ok = first_idx, status[:, first_idx] == 2
+                prev_verified_bad = verified_bad[:, first_idx]
             else:
                 # Finger-base marker: must be within tolerance of every
                 # individually-correct Palm-group marker it actually has a
@@ -759,11 +822,16 @@ def label_quality_cascade(
                 # so its correctness can't silently inflate the count
                 # without ever being checked against). No individually-
                 # correct, bonded marker to compare against means it can't
-                # be confirmed, so it's marked incorrect (no fallback).
+                # be confirmed, so it's marked incorrect (no fallback) —
+                # but that's a lack-of-anchor situation, not positive
+                # evidence, unless its own anchor-to-centroid distance (or
+                # a comparison against an actually-correct palm marker) is
+                # itself a real measured failure.
                 relevant = [k for k, palm_idx in enumerate(palm_idxs)
                             if bone_ref.get((palm_idx, first_idx)) is not None]
                 n_correct_palm = palm_marker_ok[:, relevant].sum(axis=1) if relevant else np.zeros(T, dtype=int)
                 chain_ok = gate_ok & (n_correct_palm > 0) & anchor_ok[first_idx]
+                chain_verified_bad = anchor_verified_bad[first_idx].copy()
                 for k in relevant:
                     palm_idx = palm_idxs[k]
                     med, mad = bone_ref[(palm_idx, first_idx)]
@@ -772,27 +840,41 @@ def label_quality_cascade(
                     pair_ok = np.isfinite(d) & (np.abs(d - med) <= tol)
                     # Only this pair's failure matters where that Palm-group
                     # marker is actually one of the "correct" ones being
-                    # compared against.
+                    # compared against — and only counts as *real* evidence
+                    # under that same condition.
+                    chain_verified_bad |= palm_marker_ok[:, k] & ~pair_ok
                     chain_ok &= ~palm_marker_ok[:, k] | pair_ok
 
                 bad = present[:, first_idx] & ~chain_ok
                 status[bad, first_idx] = 1
+                verified_bad[bad & chain_verified_bad, first_idx] = True
 
-                prev_idx, prev_ok = first_idx, chain_ok
+                prev_idx, prev_ok, prev_verified_bad = first_idx, chain_ok, chain_verified_bad
             for d in ordered[1:]:
                 cur_idx = digits[d]
                 med, mad = bone_ref.get((prev_idx, cur_idx), (None, None))
                 if med is None:
+                    # No reference for this pair at all — can't verify this
+                    # link itself either way; only inherit real evidence
+                    # already established further up the chain.
                     cur_ok = np.zeros(T, dtype=bool)
+                    cur_verified_bad = prev_verified_bad.copy()
                 else:
                     dist = np.linalg.norm(markers[:, prev_idx] - markers[:, cur_idx], axis=-1)
                     tol = max(bone_tol_mad * mad, bone_tol_mm)
                     dist_ok = np.isfinite(dist) & (np.abs(dist - med) <= tol)
                     cur_ok = prev_ok & dist_ok
+                    # Only counts as real evidence against *this* marker
+                    # when it's actually being compared against a trusted
+                    # (prev_ok) predecessor; otherwise inherit whatever
+                    # real evidence already indicted the chain upstream.
+                    real_local_bad = prev_ok & ~dist_ok
+                    cur_verified_bad = prev_verified_bad | real_local_bad
 
                 bad = present[:, cur_idx] & ~cur_ok
                 status[bad, cur_idx] = 1
-                prev_idx, prev_ok = cur_idx, cur_ok
+                verified_bad[bad & cur_verified_bad, cur_idx] = True
+                prev_idx, prev_ok, prev_verified_bad = cur_idx, cur_ok, cur_verified_bad
 
     # ---- temporal check (same as label_quality) ----
     with warnings.catch_warnings():
@@ -814,6 +896,7 @@ def label_quality_cascade(
                 tol = max(speed_tol_mad * speed_mad[n], speed_tol_mm)
                 if dist > tol:
                     status[t, n] = 1
+                    verified_bad[t, n] = True  # a real measured speed anomaly, not a lack of data
             last_pos[n] = markers[t, n]
             last_frame[n] = t
 
@@ -851,12 +934,21 @@ def label_quality_cascade(
 
     # ---- stickiness override ----
     # A marker that was "correct" in an adjacent frame and hasn't moved
-    # more than ``sticky_tol_mm`` since stays "correct" too, overriding
-    # every check above — bone-length, anchor, gate veto, all of it. A
-    # marker that barely moved can't have been swapped with a different
-    # physical marker or relabelled mid-air; whatever tripped the checks
-    # (a neighbour's swap corrupting a shared reference, a momentarily
-    # untrustworthy anchor, ...) isn't this marker's own problem.
+    # more than ``sticky_tol_mm`` since stays "correct" too — but *only* if
+    # its "incorrect" here was never *verified*, i.e. no check actually
+    # measured a real deviation against trustworthy data; it was marked
+    # incorrect purely for lack of something to confirm it against (no
+    # individually-correct anchor, an untrustworthy local reference, swept
+    # up in a gate veto with no direct evidence of its own, ...). A marker
+    # that barely moved can't have been swapped with a different physical
+    # marker or relabelled mid-air, so an *unverified* incorrect isn't this
+    # marker's own problem — but a *verified* one is real, positive
+    # evidence that this override must never paper over, no matter how
+    # little the marker moved (seen on real data: a persistent label swap
+    # between two fingers can hold both physically still for hundreds of
+    # frames afterward, during which every step is individually well under
+    # tolerance — comparing only to the adjacent frame would otherwise
+    # resurrect "correct" status for the entire wrong stretch).
     #
     # Runs forward (t-1 -> t) then backward (t+1 -> t), each a full
     # frame-by-frame sweep so a whole run of static frames propagates from
@@ -869,7 +961,7 @@ def label_quality_cascade(
     for t in range(1, T):
         moved = np.linalg.norm(markers[t] - markers[t - 1], axis=-1)  # (N,)
         stuck = (
-            (status[t] != 2)
+            (status[t] != 2) & ~verified_bad[t]
             & (status[t - 1] == 2)
             & present[t] & present[t - 1]
             & np.isfinite(moved) & (moved <= sticky_tol_mm)
@@ -879,7 +971,7 @@ def label_quality_cascade(
     for t in range(T - 2, -1, -1):
         moved = np.linalg.norm(markers[t] - markers[t + 1], axis=-1)  # (N,)
         stuck = (
-            (status[t] != 2)
+            (status[t] != 2) & ~verified_bad[t]
             & (status[t + 1] == 2)
             & present[t] & present[t + 1]
             & np.isfinite(moved) & (moved <= sticky_tol_mm)
