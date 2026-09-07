@@ -472,17 +472,71 @@ def _assign_and_verify(ctx, *, max_dist_mm, min_trusted: int = 6,
 # ---- animation -------------------------------------------------------------
 
 _STEP_JS = """
-var gd = document.getElementById('%(div_id)s');
-var n = %(n_frames)d, cur = 0;
-function go(i){ cur = Math.max(0, Math.min(n-1, i));
-  Plotly.animate(gd, [String(cur)],
-    {mode:'immediate', frame:{duration:0, redraw:true}, transition:{duration:0}}); }
-document.addEventListener('keydown', function(e){
-  if(e.key === 'ArrowRight'){ go(cur+1); e.preventDefault(); }
-  if(e.key === 'ArrowLeft'){ go(cur-1); e.preventDefault(); }
-});
-gd.on('plotly_animatingframe', function(ev){
-  if(ev && ev.name !== undefined){ cur = parseInt(ev.name); }});
+(function() {
+  var gd = document.getElementById('%(div_id)s');
+  var nFrames = %(n_frames)d;
+  // Real recording frame number for each animation step. The animation
+  // samples a subset of the trial, so "go to frame" has to map a real frame
+  // number onto the nearest sampled step rather than index the steps directly.
+  var realFrames = %(real_frames)s;
+  var cur = 0;
+
+  function goToStep(k) {
+    cur = ((k %% nFrames) + nFrames) %% nFrames;
+    Plotly.animate(gd, [String(cur)],
+      {frame: {duration: 0, redraw: true}, transition: {duration: 0}, mode: 'immediate'});
+    var lbl = document.getElementById('curFrameLbl');
+    if (lbl) lbl.textContent = 'frame ' + realFrames[cur] +
+      '  (step ' + (cur + 1) + '/' + nFrames + ')';
+  }
+  function goToRealFrame(f) {
+    var best = 0, bestd = Infinity;
+    for (var i = 0; i < realFrames.length; i++) {
+      var d = Math.abs(realFrames[i] - f);
+      if (d < bestd) { bestd = d; best = i; }
+    }
+    goToStep(best);
+  }
+  gd.on('plotly_animatingframe', function(e) {
+    if (e && e.name !== undefined) {
+      cur = parseInt(e.name, 10);
+      var lbl = document.getElementById('curFrameLbl');
+      if (lbl) lbl.textContent = 'frame ' + realFrames[cur] +
+        '  (step ' + (cur + 1) + '/' + nFrames + ')';
+    }
+  });
+
+  var bar = document.createElement('div');
+  bar.style = 'margin-top:8px;display:flex;gap:8px;align-items:center;' +
+              'font-family:sans-serif;font-size:13px;flex-wrap:wrap;';
+  bar.innerHTML =
+    '<button id="prevFrameBtn" title="Left arrow">&#9198; Prev</button>' +
+    '<button id="nextFrameBtn" title="Right arrow">Next &#9197;</button>' +
+    '<span id="curFrameLbl" style="min-width:210px"></span>' +
+    '<input id="gotoFrameInput" type="number" placeholder="recording frame #" ' +
+    'style="width:150px">' +
+    '<button id="gotoFrameBtn">Go</button>' +
+    '<span style="color:#666">jumps to the nearest sampled frame</span>';
+  gd.parentNode.insertBefore(bar, gd.nextSibling);
+
+  document.getElementById('prevFrameBtn').onclick = function() { goToStep(cur - 1); };
+  document.getElementById('nextFrameBtn').onclick = function() { goToStep(cur + 1); };
+  function doGoto() {
+    var v = parseInt(document.getElementById('gotoFrameInput').value, 10);
+    if (!isNaN(v)) goToRealFrame(v);
+  }
+  document.getElementById('gotoFrameBtn').onclick = doGoto;
+  document.getElementById('gotoFrameInput').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { doGoto(); e.preventDefault(); }
+  });
+  document.addEventListener('keydown', function(e) {
+    // don't hijack the arrows while the user is typing a frame number
+    if (document.activeElement && document.activeElement.id === 'gotoFrameInput') return;
+    if (e.key === 'ArrowRight') { goToStep(cur + 1); e.preventDefault(); }
+    else if (e.key === 'ArrowLeft') { goToStep(cur - 1); e.preventDefault(); }
+  });
+  goToStep(0);
+})();
 """
 
 
@@ -596,7 +650,7 @@ def build_figure(d, participant, trial, min_correct_pct):
                 for k, t in enumerate(frame_idx)])],
         ),
     )
-    return fig, len(frame_idx)
+    return fig, len(frame_idx), frame_idx
 
 
 def main(argv=None):
@@ -649,10 +703,12 @@ def run_one(participant, trial, args):
                       skip_unusable=not args.no_skip_unusable)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    fig, n_frames = build_figure(d, participant, trial, args.min_correct_pct)
+    fig, n_frames, frame_idx = build_figure(d, participant, trial, args.min_correct_pct)
     out = OUT_DIR / f"relabelled_{participant}_{trial}.html"
     fig.write_html(str(out), include_plotlyjs=True, div_id="animfig",
-                   post_script=_STEP_JS % {"div_id": "animfig", "n_frames": n_frames})
+                   post_script=_STEP_JS % {
+                       "div_id": "animfig", "n_frames": n_frames,
+                       "real_frames": "[" + ",".join(str(int(t)) for t in frame_idx) + "]"})
     print(f"\nSaved {out}")
     return out, d.get("summary")
 
