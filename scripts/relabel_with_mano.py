@@ -500,11 +500,18 @@ def build_figure(d, participant, trial, min_correct_pct):
     n_markers = markers.shape[1]
 
     def title(t):
-        n_rel = int((out_status[t] == RELABELLED).sum())
+        # Both ring colours mark markers the model moved: blue = the repair
+        # now verifies, red = it does not. Counting only RELABELLED (blue)
+        # under-reports the work done — a frame showing one blue and one red
+        # ring really had two markers relabelled, not one.
+        n_ok = int((out_status[t] == RELABELLED).sum())
+        n_bad = int((out_status[t] == INCORRECT).sum())
+        n_rel = n_ok + n_bad
         tag = "" if t in repaired else "   (below threshold — untouched)"
+        detail = f" ({n_ok} now correct, {n_bad} still wrong)" if n_rel else ""
         return (f"{participant}/{trial}  frame {t}  "
                 f"correct {pct_after[t]:.0f}% (was {pct[t]:.0f}%)  "
-                f"relabelled {n_rel}{tag}")
+                f"relabelled {n_rel}{detail}{tag}")
 
     def trace_data(t):
         fm = markers[t]
