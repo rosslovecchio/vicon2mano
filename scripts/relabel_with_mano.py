@@ -123,8 +123,26 @@ def load_trial_map(path: Path) -> dict[tuple[str, str], str]:
     return mapping
 
 
-def find_trial_csv(participant: str, trial: str) -> tuple[Path | None, Path | None]:
-    """Return (trial csv, static csv) for a participant."""
+# Static recordings that are usable for MANO calibration but NOT as the
+# cascade's bone-length reference. P9's static was taken after a Forearm
+# marker fell off and was reattached, so its forearm-plate geometry no longer
+# matches the trials — folding it into the cascade reference collapsed 3 of
+# P9's 4 trials to 0% correct, and it is deliberately left unmapped in
+# trial_filename_map.csv for that reason. MANO calibration only ever touches
+# the 16 *hand* markers (MANO has no forearm), so the forearm disturbance is
+# irrelevant there and the file is still a valid shape/offset source.
+MANO_ONLY_STATIC = {
+    "P9": "static_after_forerm1_fall.csv",
+}
+
+
+def find_trial_csv(participant: str, trial: str) -> tuple[Path | None, Path | None, Path | None]:
+    """Return (trial csv, cascade-static csv, mano-calibration-static csv).
+
+    The two statics are usually the same file; they differ only where a
+    static recording is trustworthy for the hand but not for the forearm
+    (see MANO_ONLY_STATIC).
+    """
     pdir = DATA_ROOT / participant / participant
     overrides = load_trial_map(TRIAL_MAP_CSV)
     trial_path = static_path = None
@@ -134,7 +152,14 @@ def find_trial_csv(participant: str, trial: str) -> tuple[Path | None, Path | No
             trial_path = c
         elif key == "static":
             static_path = c
-    return trial_path, static_path
+
+    mano_static = static_path
+    extra = MANO_ONLY_STATIC.get(participant)
+    if extra is not None:
+        cand = pdir / extra
+        if cand.exists():
+            mano_static = cand
+    return trial_path, static_path, mano_static
 
 
 def auto_reference(markers: np.ndarray, need: int = 300) -> np.ndarray:
@@ -158,18 +183,27 @@ def auto_reference(markers: np.ndarray, need: int = 300) -> np.ndarray:
 
 def relabel_trial(participant: str, trial: str, *, min_correct_pct: float,
                    n_out: int, min_correct_calib: int, max_dist_mm: float,
-                   side: str = "right"):
-    trial_path, static_path = find_trial_csv(participant, trial)
+                   min_trusted: int = 6, side: str = "right"):
+    trial_path, static_path, mano_static_path = find_trial_csv(participant, trial)
     if trial_path is None:
         raise SystemExit(f"No CSV mapped to {participant}/{trial}")
     print(f"Loading {trial_path}")
     markers, labels = load_csv(str(trial_path))
 
+    # Cascade bone reference — only a static the map endorses.
     static_markers = None
     if static_path is not None:
         sm, sl = load_csv(str(static_path))
         static_markers = lmq.align_markers_to_labels(sm, sl, labels)
-        print(f"  static reference: {static_path.name} ({sm.shape[0]} frames)")
+        print(f"  cascade static reference: {static_path.name} ({sm.shape[0]} frames)")
+
+    # MANO calibration source — may be a static the cascade rejects.
+    calib_static = static_markers
+    if mano_static_path is not None and mano_static_path != static_path:
+        sm2, sl2 = load_csv(str(mano_static_path))
+        calib_static = lmq.align_markers_to_labels(sm2, sl2, labels)
+        print(f"  MANO-only static (not used as cascade reference): "
+              f"{mano_static_path.name} ({sm2.shape[0]} frames)")
 
     try:
         ref = lmq.load_ref_ranges_csv(str(REF_CSV), participant, trial)
@@ -203,11 +237,11 @@ def relabel_trial(participant: str, trial: str, *, min_correct_pct: float,
                                  min_correct=min_correct_calib, max_frames=300)
     source = "trial"
     if calib.size < 20:
-        if static_markers is None:
+        if calib_static is None:
             raise SystemExit(
                 f"Only {calib.size} calibration frames in the trial and no static "
                 f"recording for {participant}; cannot calibrate.")
-        present = np.isfinite(static_markers[:, mapped]).all(axis=(1, 2))
+        present = np.isfinite(calib_static[:, mapped]).all(axis=(1, 2))
         idx = np.flatnonzero(present)
         if idx.size < 20:
             raise SystemExit(
@@ -215,7 +249,7 @@ def relabel_trial(participant: str, trial: str, *, min_correct_pct: float,
                 f"frames for {participant}; cannot calibrate.")
         if idx.size > 150:
             idx = idx[np.linspace(0, idx.size - 1, 150).astype(int)]
-        calib_src, calib_status, calib, source = static_markers, None, idx, "static"
+        calib_src, calib_status, calib, source = calib_static, None, idx, "static"
         print(f"  only {mr.select_fit_frames(status, mapped, min_correct=min_correct_calib).size}"
               f" usable trial frames -> calibrating from the static recording")
 
@@ -268,10 +302,18 @@ def relabel_trial(participant: str, trial: str, *, min_correct_pct: float,
     out_status = status.copy().astype(np.int8)
     relabelled = markers.copy()
     n_moves = 0
+    n_skipped_untrusted = 0
     moves_by_pair: dict[tuple[str, str], int] = {}
     for k, t in enumerate(targets):
         flagged = status[t] == INCORRECT
         if not flagged.any():
+            continue
+        # The pose was fitted from this frame's CORRECT markers alone. With
+        # too few of them the fit is under-constrained, so its predictions
+        # are not evidence about anything and reassigning from them would be
+        # inventing structure. Matters most when --min-correct-pct is low.
+        if int((status[t] == CORRECT).sum()) < min_trusted:
+            n_skipped_untrusted += 1
             continue
         mapping = mr.relabel_frame(
             markers[t] * 1e-3, pred[k], flagged, max_dist_m=max_dist_mm / 1000.0)
@@ -457,6 +499,9 @@ def main(argv=None):
                     help="markers that must be correct for a calibration frame")
     ap.add_argument("--max-dist-mm", type=float, default=30.0,
                     help="max prediction-to-marker distance for a reassignment")
+    ap.add_argument("--min-trusted", type=int, default=6,
+                    help="skip relabelling in frames with fewer correct markers "
+                         "than this (the pose fit would be under-constrained)")
     ap.add_argument("--side", default="right", choices=["right", "left"])
     ap.add_argument("--all", action="store_true",
                     help="run every (participant, trial) in trial_filename_map.csv")
@@ -473,7 +518,8 @@ def run_one(participant, trial, args):
     d = relabel_trial(participant, trial,
                       min_correct_pct=args.min_correct_pct, n_out=args.n_out,
                       min_correct_calib=args.min_correct_calib,
-                      max_dist_mm=args.max_dist_mm, side=args.side)
+                      max_dist_mm=args.max_dist_mm,
+                      min_trusted=args.min_trusted, side=args.side)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     fig, n_frames = build_figure(d, participant, trial, args.min_correct_pct)
