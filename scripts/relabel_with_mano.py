@@ -189,21 +189,51 @@ def relabel_trial(participant: str, trial: str, *, min_correct_pct: float,
     print(f"  {len(m2j)} markers map to MANO joints")
 
     # ---- calibration: subject shape + per-marker segment-frame offsets ----
+    # Preferred source is the trial itself, since that guarantees the marker
+    # placement matches. Trials the cascade rates poorly often have almost no
+    # usable frames though (P10, P14: ~3), so fall back to the participant's
+    # static recording — betas and skin offsets are properties of the subject
+    # and the marker placement, not of the trial. A static trial is one pose,
+    # so it cannot *validate* pose-invariance, but the segment-frame offset is
+    # constructed to be pose-invariant and that assumption is validated
+    # separately on the participants that do have varied data.
+    calib_src, calib_labels = markers, labels
+    calib_status = status
     calib = mr.select_fit_frames(status, mapped,
                                  min_correct=min_correct_calib, max_frames=300)
+    source = "trial"
     if calib.size < 20:
-        raise SystemExit(
-            f"Only {calib.size} calibration frames at min_correct="
-            f"{min_correct_calib}; too few to calibrate this trial.")
-    n_bins = len(np.unique((calib / markers.shape[0] * 30).astype(int)))
-    print(f"  calibration frames: {calib.size} across {n_bins} time bins")
+        if static_markers is None:
+            raise SystemExit(
+                f"Only {calib.size} calibration frames in the trial and no static "
+                f"recording for {participant}; cannot calibrate.")
+        present = np.isfinite(static_markers[:, mapped]).all(axis=(1, 2))
+        idx = np.flatnonzero(present)
+        if idx.size < 20:
+            raise SystemExit(
+                f"Only {calib.size} trial frames and {idx.size} complete static "
+                f"frames for {participant}; cannot calibrate.")
+        if idx.size > 150:
+            idx = idx[np.linspace(0, idx.size - 1, 150).astype(int)]
+        calib_src, calib_status, calib, source = static_markers, None, idx, "static"
+        print(f"  only {mr.select_fit_frames(status, mapped, min_correct=min_correct_calib).size}"
+              f" usable trial frames -> calibrating from the static recording")
+
+    if source == "trial":
+        n_bins = len(np.unique((calib / markers.shape[0] * 30).astype(int)))
+        print(f"  calibration frames: {calib.size} across {n_bins} time bins (trial)")
+    else:
+        print(f"  calibration frames: {calib.size} (static recording, single pose)")
 
     t0 = time.time()
-    res_c = mr.fit_frames(markers, labels, calib, mano_dir=str(MANO_DIR), side=side)
+    res_c = mr.fit_frames(calib_src, calib_labels, calib,
+                          mano_dir=str(MANO_DIR), side=side)
     offsets, spreads = mr.calibrate_marker_offsets(
-        markers, calib, res_c.joints, m2j, status=status)
+        calib_src, calib, res_c.joints, m2j, status=calib_status)
     print(f"  shape+offset calibration: {time.time() - t0:.0f}s, "
           f"betas={np.round(res_c.betas, 3)}")
+    if not offsets:
+        raise SystemExit("No marker offsets could be calibrated.")
     print(f"  offsets for {len(offsets)}/{len(m2j)} markers, "
           f"mean spread {np.mean(list(spreads.values())):.1f} mm")
 
@@ -262,9 +292,33 @@ def relabel_trial(participant: str, trial: str, *, min_correct_pct: float,
         for (dst, src), c in sorted(moves_by_pair.items(), key=lambda kv: -kv[1])[:10]:
             print(f"    {dst:24s} <- {src:24s} {c:5d} frames")
 
+    # ---- re-run the cascade on the repaired positions ----
+    # This is the verification *and* what the animation reports, so "correct"
+    # in the title means correct after repair rather than before it.
+    status_after, _ = lmq.label_quality_cascade(
+        relabelled, labels, ref, static_markers=static_markers)
+    pct_after = (status_after == CORRECT).sum(axis=1) / status_after.shape[1] * 100
+
+    before = int((status[targets] == CORRECT).sum())
+    after = int((status_after[targets] == CORRECT).sum())
+    tot = status[targets].size
+    moved = out_status == RELABELLED
+    now_ok = int((status_after[moved] == CORRECT).sum())
+    print(f"\n  cascade on repaired frames: {before/tot:.1%} -> {after/tot:.1%} correct "
+          f"({after - before:+d} marker-instances)")
+    print(f"  of {n_moves} relabelled markers, {now_ok} ({now_ok/max(1,n_moves):.1%}) "
+          f"now verify as CORRECT")
+
+    # Ring colours come from the post-repair verdict, except that anything we
+    # moved stays blue so the repair itself remains visible.
+    ring_status = status_after.copy().astype(np.int8)
+    ring_status[moved] = RELABELLED
+
     return dict(markers=markers, relabelled=relabelled, labels=labels, bones=bones,
-                status=status, out_status=out_status, pct=pct,
-                frame_idx=frame_idx, targets=targets, res_t=res_t, pred=pred)
+                status=status, out_status=ring_status, pct=pct, pct_after=pct_after,
+                frame_idx=frame_idx, targets=targets, res_t=res_t, pred=pred,
+                summary=dict(before=before, after=after, total=tot, moved=n_moves,
+                             now_ok=now_ok, flagged=n_flagged))
 
 
 # ---- animation -------------------------------------------------------------
@@ -287,6 +341,7 @@ gd.on('plotly_animatingframe', function(ev){
 def build_figure(d, participant, trial, min_correct_pct):
     markers, labels = d["relabelled"], d["labels"]
     bones, out_status, pct = d["bones"], d["out_status"], d["pct"]
+    pct_after = d["pct_after"]
     frame_idx = d["frame_idx"]
     repaired = set(int(t) for t in d["targets"])
 
@@ -300,7 +355,8 @@ def build_figure(d, participant, trial, min_correct_pct):
         n_rel = int((out_status[t] == RELABELLED).sum())
         tag = "" if t in repaired else "   (below threshold — untouched)"
         return (f"{participant}/{trial}  frame {t}  "
-                f"cascade-correct {pct[t]:.0f}%  relabelled {n_rel}{tag}")
+                f"correct {pct_after[t]:.0f}% (was {pct[t]:.0f}%)  "
+                f"relabelled {n_rel}{tag}")
 
     def trace_data(t):
         fm = markers[t]
@@ -402,20 +458,83 @@ def main(argv=None):
     ap.add_argument("--max-dist-mm", type=float, default=30.0,
                     help="max prediction-to-marker distance for a reassignment")
     ap.add_argument("--side", default="right", choices=["right", "left"])
+    ap.add_argument("--all", action="store_true",
+                    help="run every (participant, trial) in trial_filename_map.csv")
     args = ap.parse_args(argv)
 
-    d = relabel_trial(args.participant, args.trial,
+    if args.all:
+        return run_all(args)
+
+    out = run_one(args.participant, args.trial, args)
+    return out
+
+
+def run_one(participant, trial, args):
+    d = relabel_trial(participant, trial,
                       min_correct_pct=args.min_correct_pct, n_out=args.n_out,
                       min_correct_calib=args.min_correct_calib,
                       max_dist_mm=args.max_dist_mm, side=args.side)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    fig, n_frames = build_figure(d, args.participant, args.trial, args.min_correct_pct)
-    out = OUT_DIR / f"relabelled_{args.participant}_{args.trial}.html"
+    fig, n_frames = build_figure(d, participant, trial, args.min_correct_pct)
+    out = OUT_DIR / f"relabelled_{participant}_{trial}.html"
     fig.write_html(str(out), include_plotlyjs=True, div_id="animfig",
                    post_script=_STEP_JS % {"div_id": "animfig", "n_frames": n_frames})
     print(f"\nSaved {out}")
-    return out
+    return out, d.get("summary")
+
+
+TRIAL_KEYS = ["Trial1_handsonly", "Trial1_hoi", "Trial2_handsonly", "Trial2_hoi"]
+
+
+def run_all(args):
+    """Relabel every (participant, trial) listed in trial_filename_map.csv."""
+    overrides = load_trial_map(TRIAL_MAP_CSV)
+    participants = sorted({p for (p, _fn) in overrides},
+                          key=lambda s: (len(s), s))   # P7, P8, ..., P10, ...
+    rows = []
+    t_start = time.time()
+    for participant in participants:
+        have = {overrides[(p, fn)] for (p, fn) in overrides if p == participant}
+        for trial in TRIAL_KEYS:
+            if trial not in have:
+                continue
+            print("\n" + "=" * 78)
+            print(f"### {participant} / {trial}")
+            print("=" * 78)
+            try:
+                _out, summary = run_one(participant, trial, args)
+                if summary:
+                    rows.append((participant, trial, summary, None))
+            except SystemExit as exc:
+                print(f"  SKIPPED: {exc}")
+                rows.append((participant, trial, None, str(exc)))
+            except Exception as exc:                    # keep the batch going
+                print(f"  FAILED: {type(exc).__name__}: {exc}")
+                rows.append((participant, trial, None, f"{type(exc).__name__}: {exc}"))
+
+    print("\n" + "=" * 78)
+    print(f"SUMMARY — {len(rows)} trials in {(time.time()-t_start)/60:.0f} min")
+    print("=" * 78)
+    print(f"{'trial':28s} {'before':>8s} {'after':>8s} {'moved':>8s} {'fixed':>8s}")
+    csv_path = OUT_DIR / "relabel_summary.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        w = csv_mod.writer(fh)
+        w.writerow(["participant", "trial", "pct_before", "pct_after",
+                    "flagged", "moved", "now_correct", "note"])
+        for participant, trial, s, note in rows:
+            name = f"{participant}/{trial}"
+            if s is None:
+                print(f"{name:28s} {'--':>8s} {'--':>8s} {'--':>8s} {'--':>8s}  {note}")
+                w.writerow([participant, trial, "", "", "", "", "", note])
+                continue
+            b, a = s["before"] / s["total"], s["after"] / s["total"]
+            fixed = s["now_ok"] / max(1, s["moved"])
+            print(f"{name:28s} {b:7.1%} {a:7.1%} {s['moved']:8d} {fixed:7.1%}")
+            w.writerow([participant, trial, f"{b:.4f}", f"{a:.4f}",
+                        s["flagged"], s["moved"], s["now_ok"], ""])
+    print(f"\nWrote {csv_path}")
+    return csv_path
 
 
 if __name__ == "__main__":
