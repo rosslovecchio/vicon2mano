@@ -192,17 +192,17 @@ def auto_reference(markers: np.ndarray, need: int = 300) -> np.ndarray:
 def relabel_trial(participant: str, trial: str, *, min_correct_pct: float,
                    n_out: int, min_correct_calib: int, max_dist_mm: float,
                    min_trusted: int = 6, side: str = "right",
-                   skip_unusable: bool = True):
+                   fit_on: str = "correct", skip_unusable: bool = True):
     """Fit, predict, then assign at one gate value. See _prepare_trial."""
     ctx = _prepare_trial(participant, trial, min_correct_pct=min_correct_pct,
                          n_out=n_out, min_correct_calib=min_correct_calib,
-                         side=side, skip_unusable=skip_unusable)
+                         side=side, fit_on=fit_on, skip_unusable=skip_unusable)
     return _assign_and_verify(ctx, max_dist_mm=max_dist_mm, min_trusted=min_trusted)
 
 
 def _prepare_trial(participant: str, trial: str, *, min_correct_pct: float,
                     n_out: int, min_correct_calib: int, side: str = "right",
-                    skip_unusable: bool = True):
+                    fit_on: str = "correct", skip_unusable: bool = True):
     """Everything up to and including the model's marker-position prediction.
 
     Split out from the assignment so a gate sweep can reuse a single (slow)
@@ -309,11 +309,31 @@ def _prepare_trial(participant: str, trial: str, *, min_correct_pct: float,
     if targets.size == 0:
         raise SystemExit("No frames meet the correctness threshold.")
 
-    # Fit pose on the trusted markers only: NaN out everything the cascade
-    # did not verify, so a mislabelled marker cannot bend the fit toward
-    # itself and then "confirm" its own wrong label.
-    trusted = markers.copy()
-    trusted[status != CORRECT] = np.nan
+    # Which markers may the pose fit see?
+    #
+    # "correct" (default) hides everything the cascade did not verify, so a
+    # mislabelled marker cannot bend the fit toward itself and then "confirm"
+    # its own wrong label. That is the safe choice, but it has a blind spot:
+    # when *every* marker on a finger is flagged, the fit sees none of that
+    # finger and its predictions there are pose-prior extrapolation rather
+    # than evidence. Measured on P7/Trial1_handsonly frame 42789, where all
+    # six Ring and Pinky markers were flagged at once, prediction error
+    # against the observed (and, on inspection, correctly labelled) markers:
+    #
+    #     marker   correct-only fit   all-marker fit
+    #     Ring3          46.0mm            6.9mm
+    #     Pinky2         38.1mm            8.5mm
+    #     Pinky3         79.7mm           20.1mm
+    #
+    # "all" trusts the labels as given, which restores visibility of such a
+    # finger but re-opens the circularity the default exists to prevent — in
+    # that same frame Thumb1 degraded from 2.3mm to 17.0mm once bad labels
+    # were allowed into the fit. Use it as an experiment, not a default.
+    if fit_on == "all":
+        trusted = markers
+    else:
+        trusted = markers.copy()
+        trusted[status != CORRECT] = np.nan
 
     # Cheap reliability pre-check on a small sample before committing to the
     # full fit. A trial whose model cannot separate neighbouring markers
@@ -715,6 +735,11 @@ def main(argv=None):
                          "(P7: 78.3%% correct at 8mm vs 86.2%% at 30mm) because "
                          "the assignment is solved jointly per frame, not as "
                          "independent pairwise choices")
+    ap.add_argument("--fit-on", default="correct", choices=["correct", "all"],
+                    help="which markers the pose fit may see: 'correct' hides "
+                         "everything the cascade flagged (safe, but blind to a "
+                         "finger whose markers are all flagged); 'all' trusts "
+                         "the labels as given")
     ap.add_argument("--min-trusted", type=int, default=6,
                     help="skip relabelling in frames with fewer correct markers "
                          "than this (the pose fit would be under-constrained)")
@@ -745,6 +770,7 @@ def run_one(participant, trial, args):
                       min_correct_calib=args.min_correct_calib,
                       max_dist_mm=args.max_dist_mm,
                       min_trusted=args.min_trusted, side=args.side,
+                      fit_on=args.fit_on,
                       skip_unusable=not args.no_skip_unusable)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
