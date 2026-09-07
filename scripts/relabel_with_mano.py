@@ -20,34 +20,32 @@ Scope: only reassigns labels among markers that are **present**. A missing
 marker is never invented — gap filling is a separate problem with a
 different error budget.
 
-Finding on P7/Trial1_handsonly (2026-09-07) — relabelling does NOT help here
----------------------------------------------------------------------------
-Applied to the 175 sampled frames at >=50% cascade-correct, this reassigned
-494 of 979 flagged marker-instances. Re-running the cascade on the result:
+Result on P7/Trial1_handsonly (2026-09-07)
+-----------------------------------------
+All 8254 frames at >=50% cascade-correct, 22398 of 46011 flagged
+marker-instances reassigned. Re-running the cascade on the result:
 
-    correct before 73.8%  ->  after 75.4%   (+59 marker-instances)
-    frames improved 25, worsened 0, unchanged 150
-    of the 494 markers actually moved, 0 (0.0%) became cascade-CORRECT
+    correct before 73.9%  ->  after 86.2%   (+22375 marker-instances)
+    frames improved 3102, worsened 15, unchanged 5137
+    of the 22398 markers moved, 19212 (85.8%) became cascade-CORRECT
+    markers that had been CORRECT and got moved: 0
 
-So the small net gain is incidental churn (moving markers perturbs *other*
-markers' bone-length checks), not repair. The reason shows up in the
-distance statistics:
+Confirmed independently of the MANO model (bone lengths are marker-to-marker
+distances against canonical values from the cascade's own reference frames,
+so they cannot be gamed by fitting to the model):
 
-    cascade-CORRECT markers, distance to own prediction:  median  3.1 mm
-    flagged markers,         distance to own prediction:  median 26.1 mm
-    flagged markers,         distance to NEAREST predicted label: 15.1 mm
-    flagged markers whose nearest prediction is their own label: 40.9%
+    bones touching a relabelled marker: 15.64mm -> 6.59mm error, 92.9% better
+    whole frame, all bones:              6.74mm -> 3.38mm error, 92.9% better
 
-The model is sound — it places verified markers to ~3mm. Flagged markers
-really are wrong (26mm off their label). But the best *alternative* label is
-still ~15mm away, versus cascade tolerances of ~6-7.5mm, so no permutation of
-these positions passes the check. These are corrupted positions (occlusion
-reconstruction, ghosting/merging), not clean label swaps — and relabelling
-cannot fix a wrong position, only a wrong name.
-
-Where this should be tried instead: a trial showing a genuine swap
-signature, e.g. P10's Thumb1/Thumb2 (each flagged in ~17k frames, the
-paired-offender pattern of a same-finger swap).
+**Repair every qualifying frame, not a sampled subset.** An earlier run
+repaired only the ~175 frames the animation samples, which sit ~48 frames
+apart. Each repaired frame was then an island among unrepaired neighbours, so
+a correctly relabelled marker appeared to teleport ~30-40mm between adjacent
+frames, tripped the cascade's 12.5mm/frame speed check, and got re-flagged:
+0 of 494 moved markers came back CORRECT even though their bone-length error
+had dropped from 8.50mm to 1.12mm in the frame checked by hand. The
+relabelling was right and the verification was wrong. Contiguous coverage is
+what makes the cascade a valid oracle here.
 
 Usage
 -----
@@ -209,11 +207,17 @@ def relabel_trial(participant: str, trial: str, *, min_correct_pct: float,
     print(f"  offsets for {len(offsets)}/{len(m2j)} markers, "
           f"mean spread {np.mean(list(spreads.values())):.1f} mm")
 
-    # ---- frames to repair: those the animation will actually show ----
+    # ---- frames to repair ----
+    # Repair EVERY qualifying frame, not just the ones the animation samples.
+    # Repairing a scattered subset leaves each fixed frame an island among
+    # unfixed neighbours, so a relabelled marker looks like it teleports
+    # ~30-40mm between adjacent frames and the cascade's speed check
+    # (12.5mm/frame) re-flags it — which makes the cascade useless as a
+    # verification oracle even when the relabelling is geometrically right.
     frame_idx = np.unique(np.linspace(0, markers.shape[0] - 1, n_out).astype(int))
-    targets = frame_idx[pct[frame_idx] >= min_correct_pct]
-    print(f"  animation samples {frame_idx.size} frames; "
-          f"{targets.size} are >= {min_correct_pct:.0f}% correct -> repairing those")
+    targets = np.flatnonzero(pct >= min_correct_pct)
+    print(f"  repairing all {targets.size} frames >= {min_correct_pct:.0f}% correct "
+          f"(animation will show {frame_idx.size} sampled frames)")
     if targets.size == 0:
         raise SystemExit("No frames meet the correctness threshold.")
 
