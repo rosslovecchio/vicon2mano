@@ -87,11 +87,18 @@ FINGER_PALETTE = {
     "ring": "#e67e22", "pinky": "#8e44ad", "palm": "#444444",
     "forearm": "#95a5a6",
 }
+# Ring encoding, chosen so the *effect of the repair* is what stands out:
+#   green      originally correct — the cascade verified it, we never touched it
+#   blue       relabelled, and it now verifies as correct  (repair worked)
+#   red        relabelled, but it still does not verify    (repair failed)
+#   no ring    originally incorrect and left alone         (not attempted)
+# Anything unringed is therefore "known bad, untouched", which keeps the eye
+# on the markers the model actually acted on.
 STATUS_OUTLINE = {
-    MISSING: "rgba(0,0,0,0)",
-    INCORRECT: "#e74c3c",     # red   — still wrong
-    CORRECT: "#2ecc71",       # green — cascade-verified, untouched
-    RELABELLED: "#2e86ff",    # blue  — reassigned by the MANO model
+    MISSING: "rgba(0,0,0,0)",     # no ring
+    INCORRECT: "#e74c3c",         # red   — relabelled, still incorrect
+    CORRECT: "#2ecc71",           # green — originally correct
+    RELABELLED: "#2e86ff",        # blue  — relabelled, now correct
 }
 
 
@@ -444,8 +451,13 @@ def _assign_and_verify(ctx, *, max_dist_mm, min_trusted: int = 6,
 
     # Ring colours come from the post-repair verdict, except that anything we
     # moved stays blue so the repair itself remains visible.
-    ring_status = status_after.copy().astype(np.int8)
-    ring_status[moved] = RELABELLED
+    # Default: no ring. Only markers that were originally correct, or that we
+    # actually moved, get one — an originally-incorrect marker we never
+    # attempted stays unmarked rather than being drawn as a failure.
+    ring_status = np.zeros_like(status, dtype=np.int8)
+    ring_status[status == CORRECT] = CORRECT                       # green
+    ring_status[moved & (status_after == CORRECT)] = RELABELLED    # blue
+    ring_status[moved & (status_after != CORRECT)] = INCORRECT     # red
 
     return dict(markers=markers, relabelled=relabelled, labels=labels, bones=bones,
                 status=status, out_status=ring_status, pct=pct, pct_after=pct_after,
@@ -538,9 +550,9 @@ def build_figure(d, participant, trial, min_correct_pct):
         go.Scatter3d(x=[None], y=[None], z=[None], mode="markers",
                      marker=dict(size=10, color=c), name=n,
                      legendgroup="status", legendgrouptitle=dict(text="Status"))
-        for n, c in [("correct (cascade)", STATUS_OUTLINE[CORRECT]),
-                     ("relabelled (MANO)", STATUS_OUTLINE[RELABELLED]),
-                     ("still incorrect", STATUS_OUTLINE[INCORRECT])]
+        for n, c in [("originally correct", STATUS_OUTLINE[CORRECT]),
+                     ("relabelled → now correct", STATUS_OUTLINE[RELABELLED]),
+                     ("relabelled → still wrong", STATUS_OUTLINE[INCORRECT])]
     ]
 
     frames = []

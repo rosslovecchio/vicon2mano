@@ -87,9 +87,23 @@ def _normalise_name(s: str) -> str:
 def load_ref_ranges_csv(
     path: str, participant: str, trial: str,
 ) -> np.ndarray:
-    """Look up manually-verified good frames from a tab-separated log.
+    """Look up manually-verified good frames from the manual-frames log.
 
-    Columns: participant, trial, then one or more individually-verified
+    The delimiter is sniffed per file: the log started out tab-separated and
+    has since been re-saved as CSV, and parsing a comma file as TSV collapses
+    every line into a single field, so *nothing* matches and the caller
+    silently falls back to an automatic reference. That failure is quiet and
+    expensive — on P7/Trial1_handsonly it cut the calibration set from 120
+    frames across 12 time bins to 30 across 3, and the model's reliability
+    from 0.43 (good) to 0.65 (marginal).
+
+    Any non-numeric field is treated as a candidate trial name, so a row
+    carrying both a display name and a canonical key
+    ("P7,Trial 1 Hands only,Trial1_handsonly,1,15237,35569") matches on
+    either.
+
+    Columns: participant, trial (one or more name columns), then one or more
+    individually-verified
     good frame numbers (NOT a start/end range — each number is its own
     spot-checked frame; a row with "1  15237  35569" means exactly those
     three frames are confirmed good, not "1 through 35569"), with any
@@ -117,26 +131,41 @@ def load_ref_ranges_csv(
     """
     import csv as csv_mod
 
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        sample = f.read(8192)
+    # Pick whichever delimiter actually splits this file into fields.
+    delim = "\t" if sample.count("\t") >= sample.count(",") else ","
+
+    def _is_int(c: str) -> bool:
+        return c.strip().lstrip("-").isdigit()
+
     want_p, want_t = _normalise_name(participant), _normalise_name(trial)
     frames: set[int] = set()
     matched_rows = []
     current_p = ""
     with open(path, newline="", encoding="utf-8-sig") as f:
-        for row in csv_mod.reader(f, delimiter="\t"):
+        for row in csv_mod.reader(f, delimiter=delim):
             if not row or not any(c.strip() for c in row):
                 continue
-            p, t = (row + ["", ""])[:2]
+            p = (row + [""])[0]
             if p.strip():
                 current_p = p.strip()
             if _normalise_name(current_p) != want_p:
                 continue
-            if want_t not in _normalise_name(t) and _normalise_name(t) not in want_t:
+            # Every non-numeric field after the participant is a candidate
+            # name for this trial, so a row carrying both a display name and
+            # the CSV stem ("P7,Trial 1 Hands only,Trial1_handsonly,...")
+            # matches on either. Trailing free-text notes are harmless here:
+            # they only ever add a name that fails to match.
+            names = [c for c in row[1:] if c.strip() and not _is_int(c)]
+            if not any(want_t in _normalise_name(n) or _normalise_name(n) in want_t
+                       for n in names if _normalise_name(n)):
                 continue
-            row_frames = [int(c.strip()) for c in row[2:] if c.strip().lstrip("-").isdigit()]
+            row_frames = [int(c.strip()) for c in row[1:] if _is_int(c)]
             if not row_frames:
                 continue
             frames.update(row_frames)
-            matched_rows.append((current_p, t.strip(), row_frames))
+            matched_rows.append((current_p, " / ".join(n.strip() for n in names), row_frames))
 
     if not frames:
         raise ValueError(
