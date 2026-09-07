@@ -193,13 +193,17 @@ def relabel_trial(participant: str, trial: str, *, min_correct_pct: float,
                    n_out: int, min_correct_calib: int, max_dist_mm: float,
                    min_trusted: int = 6, side: str = "right",
                    fit_on: str = "correct", skip_unusable: bool = True,
-                   passes: int = 2, confident_mm: float = 12.0):
+                   passes: int = 2, confident_mm: float = 12.0,
+                   frame_start: int | None = None, frame_end: int | None = None,
+                   last_fraction: float | None = None):
     """Fit, predict, then assign at one gate value. See _prepare_trial."""
     ctx = _prepare_trial(participant, trial, min_correct_pct=min_correct_pct,
                          n_out=n_out, min_correct_calib=min_correct_calib,
                          side=side, fit_on=fit_on, skip_unusable=skip_unusable,
                          passes=passes, confident_mm=confident_mm,
-                         max_dist_mm=max_dist_mm, min_trusted=min_trusted)
+                         max_dist_mm=max_dist_mm, min_trusted=min_trusted,
+                         frame_start=frame_start, frame_end=frame_end,
+                         last_fraction=last_fraction)
     return _assign_and_verify(ctx, max_dist_mm=max_dist_mm, min_trusted=min_trusted)
 
 
@@ -207,7 +211,9 @@ def _prepare_trial(participant: str, trial: str, *, min_correct_pct: float,
                     n_out: int, min_correct_calib: int, side: str = "right",
                     fit_on: str = "correct", skip_unusable: bool = True,
                     passes: int = 2, confident_mm: float = 12.0,
-                    max_dist_mm: float = 30.0, min_trusted: int = 6):
+                    max_dist_mm: float = 30.0, min_trusted: int = 6,
+                    frame_start: int | None = None, frame_end: int | None = None,
+                    last_fraction: float | None = None):
     """Everything up to and including the model's marker-position prediction.
 
     Split out from the assignment so a gate sweep can reuse a single (slow)
@@ -307,10 +313,26 @@ def _prepare_trial(participant: str, trial: str, *, min_correct_pct: float,
     # ~30-40mm between adjacent frames and the cascade's speed check
     # (12.5mm/frame) re-flags it — which makes the cascade useless as a
     # verification oracle even when the relabelling is geometrically right.
-    frame_idx = np.unique(np.linspace(0, markers.shape[0] - 1, n_out).astype(int))
+    # An optional frame window narrows what gets repaired and animated. The
+    # cascade above still runs on the whole recording, and calibration still
+    # draws from it, because both need the full temporal context — only the
+    # repair targets are restricted. Useful for iterating on a long trial
+    # without paying for the whole fit.
+    lo = 0 if frame_start is None else max(0, frame_start)
+    hi = markers.shape[0] if frame_end is None else min(markers.shape[0], frame_end)
+    if last_fraction is not None:
+        # e.g. 1/3 -> start two thirds of the way in. Resolved here because it
+        # needs the recording length, which is only known after loading.
+        lo = max(lo, int(markers.shape[0] * (1.0 - last_fraction)))
+    if lo >= hi:
+        raise SystemExit(f"empty frame window [{lo}, {hi})")
+
+    frame_idx = np.unique(np.linspace(lo, hi - 1, n_out).astype(int))
     targets = np.flatnonzero(pct >= min_correct_pct)
-    print(f"  repairing all {targets.size} frames >= {min_correct_pct:.0f}% correct "
-          f"(animation will show {frame_idx.size} sampled frames)")
+    targets = targets[(targets >= lo) & (targets < hi)]
+    window = "" if (lo, hi) == (0, markers.shape[0]) else f" within frames [{lo}, {hi})"
+    print(f"  repairing all {targets.size} frames >= {min_correct_pct:.0f}% correct"
+          f"{window} (animation will show {frame_idx.size} sampled frames)")
     if targets.size == 0:
         raise SystemExit("No frames meet the correctness threshold.")
 
@@ -794,6 +816,13 @@ def main(argv=None):
                          "everything the cascade flagged (safe, but blind to a "
                          "finger whose markers are all flagged); 'all' trusts "
                          "the labels as given")
+    ap.add_argument("--frame-start", type=int, default=None,
+                    help="first frame to repair/animate (default: 0)")
+    ap.add_argument("--frame-end", type=int, default=None,
+                    help="one past the last frame to repair/animate")
+    ap.add_argument("--last-fraction", type=float, default=None,
+                    help="repair only the last F of the recording, e.g. 0.333 "
+                         "for the final third; overrides --frame-start")
     ap.add_argument("--passes", type=int, default=2, choices=[1, 2],
                     help="2 = after pass one, re-admit confidently repaired "
                          "markers into the fit and re-predict, so a finger "
@@ -833,6 +862,8 @@ def run_one(participant, trial, args):
                       min_trusted=args.min_trusted, side=args.side,
                       fit_on=args.fit_on, passes=args.passes,
                       confident_mm=args.confident_mm,
+                      frame_start=args.frame_start, frame_end=args.frame_end,
+                      last_fraction=args.last_fraction,
                       skip_unusable=not args.no_skip_unusable)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
