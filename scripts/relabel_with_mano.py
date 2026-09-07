@@ -183,7 +183,23 @@ def auto_reference(markers: np.ndarray, need: int = 300) -> np.ndarray:
 
 def relabel_trial(participant: str, trial: str, *, min_correct_pct: float,
                    n_out: int, min_correct_calib: int, max_dist_mm: float,
-                   min_trusted: int = 6, side: str = "right"):
+                   min_trusted: int = 6, side: str = "right",
+                   skip_unusable: bool = True):
+    """Fit, predict, then assign at one gate value. See _prepare_trial."""
+    ctx = _prepare_trial(participant, trial, min_correct_pct=min_correct_pct,
+                         n_out=n_out, min_correct_calib=min_correct_calib,
+                         side=side, skip_unusable=skip_unusable)
+    return _assign_and_verify(ctx, max_dist_mm=max_dist_mm, min_trusted=min_trusted)
+
+
+def _prepare_trial(participant: str, trial: str, *, min_correct_pct: float,
+                    n_out: int, min_correct_calib: int, side: str = "right",
+                    skip_unusable: bool = True):
+    """Everything up to and including the model's marker-position prediction.
+
+    Split out from the assignment so a gate sweep can reuse a single (slow)
+    fit across many --max-dist-mm values.
+    """
     trial_path, static_path, mano_static_path = find_trial_csv(participant, trial)
     if trial_path is None:
         raise SystemExit(f"No CSV mapped to {participant}/{trial}")
@@ -291,12 +307,62 @@ def relabel_trial(participant: str, trial: str, *, min_correct_pct: float,
     trusted = markers.copy()
     trusted[status != CORRECT] = np.nan
 
+    # Cheap reliability pre-check on a small sample before committing to the
+    # full fit. A trial whose model cannot separate neighbouring markers
+    # produces near-arbitrary reassignments (P10: ratio 1.75, only 18% of
+    # moves verify), and the full fit costs minutes to hours, so it is worth
+    # a few seconds to find out first.
+    probe = targets[np.linspace(0, targets.size - 1,
+                                min(200, targets.size)).astype(int)]
+    probe = np.unique(probe)
+    t0 = time.time()
+    res_p = mr.fit_frames(trusted, labels, probe, mano_dir=str(MANO_DIR),
+                          side=side, betas=res_c.betas)
+    pred_p = mr.predict_marker_positions(res_p.joints, offsets, m2j, len(labels))
+    rel_probe = mr.model_reliability(markers, status, pred_p, probe, m2j)
+    print(f"  reliability probe ({probe.size} frames, {time.time()-t0:.0f}s): "
+          f"p95 error {rel_probe['p95_err_mm']:.1f} mm vs spacing "
+          f"{rel_probe['spacing_mm']:.1f} mm -> ratio {rel_probe['ratio']:.2f} "
+          f"({rel_probe['verdict'].upper()})")
+    if skip_unusable and rel_probe["verdict"] == "unusable":
+        raise SystemExit(
+            f"model unusable for this trial (ratio {rel_probe['ratio']:.2f}); "
+            f"skipping — pass --no-skip-unusable to run it anyway")
+
     t0 = time.time()
     res_t = mr.fit_frames(trusted, labels, targets, mano_dir=str(MANO_DIR),
                           side=side, betas=res_c.betas)
     print(f"  pose fit on {targets.size} frames: {time.time() - t0:.0f}s")
 
     pred = mr.predict_marker_positions(res_t.joints, offsets, m2j, len(labels))
+
+    return dict(participant=participant, trial=trial, markers=markers, labels=labels,
+                bones=bones, status=status, pct=pct, m2j=m2j, offsets=offsets,
+                spreads=spreads, frame_idx=frame_idx, targets=targets,
+                res_t=res_t, pred=pred, ref=ref, static_markers=static_markers)
+
+
+def _assign_and_verify(ctx, *, max_dist_mm, min_trusted: int = 6,
+                        verbose: bool = True):
+    participant, trial = ctx["participant"], ctx["trial"]
+    markers, labels, bones = ctx["markers"], ctx["labels"], ctx["bones"]
+    status, pct, targets = ctx["status"], ctx["pct"], ctx["targets"]
+    pred, frame_idx = ctx["pred"], ctx["frame_idx"]
+    ref, static_markers = ctx["ref"], ctx["static_markers"]
+
+    rel = ctx.get("reliability")
+    if rel is None:
+        rel = mr.model_reliability(markers, status, pred, targets, ctx["m2j"])
+        ctx["reliability"] = rel
+    if verbose:
+        print(f"  model reliability: p95 error {rel['p95_err_mm']:.1f} mm vs "
+              f"marker spacing {rel['spacing_mm']:.1f} mm -> ratio "
+              f"{rel['ratio']:.2f} ({rel['verdict'].upper()})")
+        if rel["verdict"] != "good":
+            print(f"  WARNING: at this ratio the model cannot reliably tell "
+                  f"neighbouring markers apart; treat the reassignments as "
+                  f"unverified (P10, ratio 1.75, had only 18% of moves verify "
+                  f"against 86% on P7 at ratio 0.40)")
 
     # ---- reassign flagged markers ----
     out_status = status.copy().astype(np.int8)
@@ -358,9 +424,11 @@ def relabel_trial(participant: str, trial: str, *, min_correct_pct: float,
 
     return dict(markers=markers, relabelled=relabelled, labels=labels, bones=bones,
                 status=status, out_status=ring_status, pct=pct, pct_after=pct_after,
-                frame_idx=frame_idx, targets=targets, res_t=res_t, pred=pred,
+                frame_idx=frame_idx, targets=targets, res_t=ctx["res_t"], pred=pred,
                 summary=dict(before=before, after=after, total=tot, moved=n_moves,
-                             now_ok=now_ok, flagged=n_flagged))
+                             now_ok=now_ok, flagged=n_flagged,
+                             ratio=rel["ratio"], verdict=rel["verdict"],
+                             p95_err_mm=rel["p95_err_mm"], spacing_mm=rel["spacing_mm"]))
 
 
 # ---- animation -------------------------------------------------------------
@@ -498,10 +566,17 @@ def main(argv=None):
     ap.add_argument("--min-correct-calib", type=int, default=10,
                     help="markers that must be correct for a calibration frame")
     ap.add_argument("--max-dist-mm", type=float, default=30.0,
-                    help="max prediction-to-marker distance for a reassignment")
+                    help="max prediction-to-marker distance for a reassignment. "
+                         "30mm is the sweep optimum; tighter is uniformly worse "
+                         "(P7: 78.3%% correct at 8mm vs 86.2%% at 30mm) because "
+                         "the assignment is solved jointly per frame, not as "
+                         "independent pairwise choices")
     ap.add_argument("--min-trusted", type=int, default=6,
                     help="skip relabelling in frames with fewer correct markers "
                          "than this (the pose fit would be under-constrained)")
+    ap.add_argument("--no-skip-unusable", action="store_true",
+                    help="run a trial even when the reliability probe says the "
+                         "model cannot separate neighbouring markers")
     ap.add_argument("--side", default="right", choices=["right", "left"])
     ap.add_argument("--all", action="store_true",
                     help="run every (participant, trial) in trial_filename_map.csv")
@@ -519,7 +594,8 @@ def run_one(participant, trial, args):
                       min_correct_pct=args.min_correct_pct, n_out=args.n_out,
                       min_correct_calib=args.min_correct_calib,
                       max_dist_mm=args.max_dist_mm,
-                      min_trusted=args.min_trusted, side=args.side)
+                      min_trusted=args.min_trusted, side=args.side,
+                      skip_unusable=not args.no_skip_unusable)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     fig, n_frames = build_figure(d, participant, trial, args.min_correct_pct)
@@ -562,23 +638,29 @@ def run_all(args):
     print("\n" + "=" * 78)
     print(f"SUMMARY — {len(rows)} trials in {(time.time()-t_start)/60:.0f} min")
     print("=" * 78)
-    print(f"{'trial':28s} {'before':>8s} {'after':>8s} {'moved':>8s} {'fixed':>8s}")
+    print(f"{'trial':28s} {'before':>8s} {'after':>8s} {'moved':>8s} {'fixed':>8s} "
+          f"{'ratio':>6s} {'verdict':>9s}")
     csv_path = OUT_DIR / "relabel_summary.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as fh:
         w = csv_mod.writer(fh)
         w.writerow(["participant", "trial", "pct_before", "pct_after",
-                    "flagged", "moved", "now_correct", "note"])
+                    "flagged", "moved", "now_correct",
+                    "p95_err_mm", "spacing_mm", "ratio", "verdict", "note"])
         for participant, trial, s, note in rows:
             name = f"{participant}/{trial}"
             if s is None:
-                print(f"{name:28s} {'--':>8s} {'--':>8s} {'--':>8s} {'--':>8s}  {note}")
-                w.writerow([participant, trial, "", "", "", "", "", note])
+                print(f"{name:28s} {'--':>8s} {'--':>8s} {'--':>8s} {'--':>8s} "
+                      f"{'--':>6s} {'--':>9s}  {note}")
+                w.writerow([participant, trial, "", "", "", "", "", "", "", "", "", note])
                 continue
             b, a = s["before"] / s["total"], s["after"] / s["total"]
             fixed = s["now_ok"] / max(1, s["moved"])
-            print(f"{name:28s} {b:7.1%} {a:7.1%} {s['moved']:8d} {fixed:7.1%}")
+            print(f"{name:28s} {b:7.1%} {a:7.1%} {s['moved']:8d} {fixed:7.1%} "
+                  f"{s['ratio']:6.2f} {s['verdict']:>9s}")
             w.writerow([participant, trial, f"{b:.4f}", f"{a:.4f}",
-                        s["flagged"], s["moved"], s["now_ok"], ""])
+                        s["flagged"], s["moved"], s["now_ok"],
+                        f"{s['p95_err_mm']:.1f}", f"{s['spacing_mm']:.1f}",
+                        f"{s['ratio']:.3f}", s["verdict"], ""])
     print(f"\nWrote {csv_path}")
     return csv_path
 

@@ -283,6 +283,72 @@ def predict_marker_positions(
     return out
 
 
+def model_reliability(
+    markers_mm: np.ndarray,       # (T, N, 3)
+    status: np.ndarray,           # (T, N) cascade status
+    predicted_m: np.ndarray,      # (F, N, 3) predictions for `frames`
+    frames: np.ndarray,           # frames `predicted_m` corresponds to
+    m2j: dict[int, int],
+    *,
+    stride: int = 7,
+) -> dict:
+    """Can this trial's fitted model tell neighbouring markers apart?
+
+    Two measured quantities decide it:
+
+    * ``p95_err_mm`` -- ``|marker - prediction|`` at the 95th percentile over
+      markers the cascade calls CORRECT. The label is known right there, so
+      the distance is model error, not mislabelling.
+    * ``spacing_mm`` -- median nearest-neighbour distance between markers.
+
+    Their ratio is what predicts whether relabelling can work, measured over
+    a gate sweep on three trials:
+
+        P7   p95 10.2mm / spacing 25.7mm = 0.40  ->  +12.3% correctness
+        P8   p95 17.5mm / spacing 22.8mm = 0.77  ->   +1.0%
+        P10  p95 50.2mm / spacing 28.6mm = 1.75  ->   +1.3%
+
+    P10 is the cautionary case: calibrated from a static recording alone, its
+    model is less accurate than the distance between adjacent markers, so the
+    13796 reassignments it proposes are largely arbitrary — only 18% of them
+    verify, against 86% on P7. A ratio near or above 1 means the predictions
+    carry no usable identity information and the output should not be trusted
+    regardless of how confident the assignment looks.
+
+    Note this is deliberately *not* used to set ``max_dist``. A sweep of
+    8-40mm showed tighter gates are uniformly worse (P7: 78.3% at 8mm vs
+    86.2% at 30mm) because the assignment is solved jointly across all
+    flagged markers in a frame rather than as independent pairwise choices,
+    so the naive "must be confident to better than spacing/2" bound does not
+    apply.
+    """
+    err = []
+    for k in range(0, len(frames), stride):
+        t = int(frames[k])
+        P, M = predicted_m[k], markers_mm[t] * 1e-3
+        for m in m2j:
+            if status[t, m] == CORRECT and np.isfinite(P[m]).all() and np.isfinite(M[m]).all():
+                err.append(np.linalg.norm(M[m] - P[m]) * 1000)
+
+    nn = []
+    step = max(1, len(frames) // 50)
+    for k in range(0, len(frames), step):
+        M = markers_mm[int(frames[k])]
+        idx = [m for m in m2j if np.isfinite(M[m]).all()]
+        for a in idx:
+            d = [np.linalg.norm(M[a] - M[b]) for b in idx if b != a]
+            if d:
+                nn.append(min(d))
+
+    p95 = float(np.percentile(err, 95)) if err else float("inf")
+    spacing = float(np.median(nn)) if nn else float("nan")
+    ratio = p95 / spacing if spacing and np.isfinite(spacing) else float("inf")
+    return dict(p95_err_mm=p95, median_err_mm=float(np.median(err)) if err else float("nan"),
+                spacing_mm=spacing, ratio=ratio, n_err=len(err),
+                verdict=("good" if ratio < 0.55 else
+                         "marginal" if ratio < 0.9 else "unusable"))
+
+
 def relabel_frame(
     frame_markers_m: np.ndarray,   # (N, 3) metres
     predicted_m: np.ndarray,       # (N, 3) metres, NaN where unpredictable
