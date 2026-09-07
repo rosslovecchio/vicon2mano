@@ -192,17 +192,22 @@ def auto_reference(markers: np.ndarray, need: int = 300) -> np.ndarray:
 def relabel_trial(participant: str, trial: str, *, min_correct_pct: float,
                    n_out: int, min_correct_calib: int, max_dist_mm: float,
                    min_trusted: int = 6, side: str = "right",
-                   fit_on: str = "correct", skip_unusable: bool = True):
+                   fit_on: str = "correct", skip_unusable: bool = True,
+                   passes: int = 2, confident_mm: float = 12.0):
     """Fit, predict, then assign at one gate value. See _prepare_trial."""
     ctx = _prepare_trial(participant, trial, min_correct_pct=min_correct_pct,
                          n_out=n_out, min_correct_calib=min_correct_calib,
-                         side=side, fit_on=fit_on, skip_unusable=skip_unusable)
+                         side=side, fit_on=fit_on, skip_unusable=skip_unusable,
+                         passes=passes, confident_mm=confident_mm,
+                         max_dist_mm=max_dist_mm, min_trusted=min_trusted)
     return _assign_and_verify(ctx, max_dist_mm=max_dist_mm, min_trusted=min_trusted)
 
 
 def _prepare_trial(participant: str, trial: str, *, min_correct_pct: float,
                     n_out: int, min_correct_calib: int, side: str = "right",
-                    fit_on: str = "correct", skip_unusable: bool = True):
+                    fit_on: str = "correct", skip_unusable: bool = True,
+                    passes: int = 2, confident_mm: float = 12.0,
+                    max_dist_mm: float = 30.0, min_trusted: int = 6):
     """Everything up to and including the model's marker-position prediction.
 
     Split out from the assignment so a gate sweep can reuse a single (slow)
@@ -371,10 +376,59 @@ def _prepare_trial(participant: str, trial: str, *, min_correct_pct: float,
 
     pred = mr.predict_marker_positions(res_t.joints, offsets, m2j, len(labels))
 
+    # ---- second pass: give the fit back the fingers it could not see ----
+    #
+    # Fitting on cascade-CORRECT markers alone goes blind wherever an entire
+    # finger is flagged: the model then has no data for it and predicts from
+    # the pose prior, which is not evidence about anything. Handing it every
+    # marker instead is worse — on this trial it tripled the model's error on
+    # known-good markers (p95 11.8mm -> 30.5mm, ratio 0.43 -> 1.11) because
+    # roughly three markers in four are mislabelled.
+    #
+    # So re-admit only what pass one repaired *confidently*. A move's
+    # assignment distance is its confidence, and the populations separate
+    # sharply: at frame 42789 the two accepted moves sat at 5.5mm and 5.9mm
+    # while every rejected option was 33mm+. Markers repaired within
+    # ``confident_mm`` are put back at their repaired positions, the fit is
+    # redone, and everything is re-predicted — so a finger gets a foothold
+    # from its own confidently-fixed markers rather than from arbitrary ones.
+    n_confident = 0
+    if passes >= 2:
+        t0 = time.time()
+        confident = np.zeros(markers.shape[:2], dtype=bool)
+        repaired = markers.copy()
+        for k, t in enumerate(targets):
+            flagged = status[t] == INCORRECT
+            if not flagged.any() or int((status[t] == CORRECT).sum()) < min_trusted:
+                continue
+            mapping, dists = mr.relabel_frame(
+                markers[t] * 1e-3, pred[k], flagged, max_dist_m=max_dist_mm / 1000.0)
+            keep = {s: src for s, src in mapping.items()
+                    if dists.get(s, np.inf) * 1000.0 <= confident_mm}
+            if not keep:
+                continue
+            mr.apply_relabel(repaired, t, keep)
+            for s in keep:
+                confident[t, s] = True
+        n_confident = int(confident.sum())
+
+        if n_confident:
+            fit2 = markers.copy()
+            fit2[status != CORRECT] = np.nan
+            fit2[confident] = repaired[confident]
+            res_t = mr.fit_frames(fit2, labels, targets, mano_dir=str(MANO_DIR),
+                                  side=side, betas=res_c.betas)
+            pred = mr.predict_marker_positions(res_t.joints, offsets, m2j, len(labels))
+            print(f"  pass 2: re-admitted {n_confident} confidently repaired markers "
+                  f"(<= {confident_mm:.0f}mm), refit in {time.time() - t0:.0f}s")
+        else:
+            print("  pass 2: no move met the confidence threshold; keeping pass 1")
+
     return dict(participant=participant, trial=trial, markers=markers, labels=labels,
                 bones=bones, status=status, pct=pct, m2j=m2j, offsets=offsets,
                 spreads=spreads, frame_idx=frame_idx, targets=targets,
-                res_t=res_t, pred=pred, ref=ref, static_markers=static_markers)
+                res_t=res_t, pred=pred, ref=ref, static_markers=static_markers,
+                n_confident=n_confident)
 
 
 def _assign_and_verify(ctx, *, max_dist_mm, min_trusted: int = 6,
@@ -416,7 +470,7 @@ def _assign_and_verify(ctx, *, max_dist_mm, min_trusted: int = 6,
         if int((status[t] == CORRECT).sum()) < min_trusted:
             n_skipped_untrusted += 1
             continue
-        mapping = mr.relabel_frame(
+        mapping, _dists = mr.relabel_frame(
             markers[t] * 1e-3, pred[k], flagged, max_dist_m=max_dist_mm / 1000.0)
         if not mapping:
             continue
@@ -740,6 +794,13 @@ def main(argv=None):
                          "everything the cascade flagged (safe, but blind to a "
                          "finger whose markers are all flagged); 'all' trusts "
                          "the labels as given")
+    ap.add_argument("--passes", type=int, default=2, choices=[1, 2],
+                    help="2 = after pass one, re-admit confidently repaired "
+                         "markers into the fit and re-predict, so a finger "
+                         "whose markers were all flagged stops being invisible")
+    ap.add_argument("--confident-mm", type=float, default=12.0,
+                    help="a pass-one move closer than this counts as confident "
+                         "and is fed back into the pass-two fit")
     ap.add_argument("--min-trusted", type=int, default=6,
                     help="skip relabelling in frames with fewer correct markers "
                          "than this (the pose fit would be under-constrained)")
@@ -770,7 +831,8 @@ def run_one(participant, trial, args):
                       min_correct_calib=args.min_correct_calib,
                       max_dist_mm=args.max_dist_mm,
                       min_trusted=args.min_trusted, side=args.side,
-                      fit_on=args.fit_on,
+                      fit_on=args.fit_on, passes=args.passes,
+                      confident_mm=args.confident_mm,
                       skip_unusable=not args.no_skip_unusable)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)

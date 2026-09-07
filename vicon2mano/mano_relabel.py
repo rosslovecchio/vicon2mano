@@ -370,36 +370,44 @@ def relabel_frame(
     flagged: np.ndarray,           # (N,) bool — markers to reconsider
     *,
     max_dist_m: float = 0.030,
-) -> dict[int, int]:
+) -> tuple[dict[int, int], dict[int, float]]:
     """Reassign flagged marker *positions* to the labels they best fit.
 
     Solves a small assignment problem between the positions currently
     carried by flagged markers and the predicted positions of those same
-    labels. Returns {marker_slot: source_marker_slot} — i.e. "the data now
-    under label A should come from the position currently under label B".
-    Only pairs within ``max_dist_m`` are considered, and the identity
-    mapping is omitted.
+    labels. Only pairs within ``max_dist_m`` are considered, and the
+    identity mapping is omitted.
+
+    Returns ({marker_slot: source_marker_slot}, {marker_slot: distance_m}) —
+    "the data now under label A should come from the position currently
+    under label B", plus how far that position sat from where the model
+    expected A. The distance is the confidence of the move and separates
+    cleanly in practice: on P7/Trial1_handsonly frame 42789 the two accepted
+    moves landed at 5.5mm and 5.9mm while every rejected option was 33mm or
+    worse, against a model accurate to ~12mm at the 95th percentile.
     """
     cand = np.flatnonzero(flagged & np.isfinite(frame_markers_m).all(axis=1))
     slots = np.flatnonzero(flagged & np.isfinite(predicted_m).all(axis=1))
     if cand.size == 0 or slots.size == 0:
-        return {}
+        return {}, {}
 
     cost = np.linalg.norm(
         predicted_m[slots][:, None, :] - frame_markers_m[cand][None, :, :], axis=-1
     )                                                    # (slots, cand)
     big = max_dist_m * 10
-    cost = np.where(cost > max_dist_m, big, cost)
+    cost_gated = np.where(cost > max_dist_m, big, cost)
 
-    rows, cols = linear_sum_assignment(cost)
+    rows, cols = linear_sum_assignment(cost_gated)
     out: dict[int, int] = {}
+    dists: dict[int, float] = {}
     for r, c in zip(rows, cols):
-        if cost[r, c] >= big:
+        if cost_gated[r, c] >= big:
             continue
         slot, src = int(slots[r]), int(cand[c])
         if slot != src:
             out[slot] = src
-    return out
+            dists[slot] = float(cost[r, c])
+    return out, dists
 
 
 def apply_relabel(markers: np.ndarray, frame: int, mapping: dict[int, int]) -> None:
