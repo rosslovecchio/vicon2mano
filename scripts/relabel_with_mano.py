@@ -425,6 +425,23 @@ def _assign_and_verify(ctx, *, max_dist_mm, min_trusted: int = 6,
     print(f"  of {n_moves} relabelled markers, {now_ok} ({now_ok/max(1,n_moves):.1%}) "
           f"now verify as CORRECT")
 
+    # Accept the repair only if it actually improved the cascade verdict.
+    # Same rule fitter._refine_outliers uses for its rescue stage: a proposed
+    # correction that does not beat the thing it replaces is not a correction.
+    # Without this the pipeline happily writes damage -- P11/Trial1_handsonly
+    # moved 44225 markers, only 3.6% of which verified, and drove correctness
+    # 48.8% -> 48.3%, i.e. a net loss of 4532 marker-instances.
+    regressed = after < before
+    if regressed:
+        print(f"  REJECTED: repair made it worse ({before/tot:.1%} -> {after/tot:.1%}); "
+              f"keeping the original labelling")
+        relabelled = markers.copy()
+        status_after = status
+        pct_after = pct
+        out_status = status.copy().astype(np.int8)
+        moved = np.zeros_like(out_status, dtype=bool)
+        after, n_moves, now_ok = before, 0, 0
+
     # Ring colours come from the post-repair verdict, except that anything we
     # moved stays blue so the repair itself remains visible.
     ring_status = status_after.copy().astype(np.int8)
@@ -436,7 +453,8 @@ def _assign_and_verify(ctx, *, max_dist_mm, min_trusted: int = 6,
                 summary=dict(before=before, after=after, total=tot, moved=n_moves,
                              now_ok=now_ok, flagged=n_flagged,
                              ratio=rel["ratio"], verdict=rel["verdict"],
-                             p95_err_mm=rel["p95_err_mm"], spacing_mm=rel["spacing_mm"]))
+                             p95_err_mm=rel["p95_err_mm"], spacing_mm=rel["spacing_mm"],
+                             rejected=bool(regressed)))
 
 
 # ---- animation -------------------------------------------------------------
