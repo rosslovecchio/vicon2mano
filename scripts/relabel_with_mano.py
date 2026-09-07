@@ -58,6 +58,7 @@ import argparse
 import csv as csv_mod
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -574,6 +575,12 @@ def main(argv=None):
     ap.add_argument("--min-trusted", type=int, default=6,
                     help="skip relabelling in frames with fewer correct markers "
                          "than this (the pose fit would be under-constrained)")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="skip trials whose output HTML already exists (resume)")
+    ap.add_argument("--io-retries", type=int, default=3,
+                    help="retries for transient I/O errors reading the data drive")
+    ap.add_argument("--io-retry-wait", type=float, default=30.0,
+                    help="seconds to wait between I/O retries")
     ap.add_argument("--no-skip-unusable", action="store_true",
                     help="run a trial even when the reliability probe says the "
                          "model cannot separate neighbouring markers")
@@ -624,16 +631,38 @@ def run_all(args):
             print("\n" + "=" * 78)
             print(f"### {participant} / {trial}")
             print("=" * 78)
-            try:
-                _out, summary = run_one(participant, trial, args)
-                if summary:
-                    rows.append((participant, trial, summary, None))
-            except SystemExit as exc:
-                print(f"  SKIPPED: {exc}")
-                rows.append((participant, trial, None, str(exc)))
-            except Exception as exc:                    # keep the batch going
-                print(f"  FAILED: {type(exc).__name__}: {exc}")
-                rows.append((participant, trial, None, f"{type(exc).__name__}: {exc}"))
+            if args.skip_existing and (OUT_DIR / f"relabelled_{participant}_{trial}.html").exists():
+                print("  already done, skipping (--skip-existing)")
+                continue
+            # The data lives on an external drive that intermittently drops
+            # out under sustained load; a single blip once killed 30 trials
+            # in a row because every one failed instantly on OSError. Retry
+            # I/O errors rather than burning the rest of the batch.
+            for attempt in range(1, args.io_retries + 2):
+                try:
+                    _out, summary = run_one(participant, trial, args)
+                    if summary:
+                        rows.append((participant, trial, summary, None))
+                    break
+                except SystemExit as exc:
+                    print(f"  SKIPPED: {exc}")
+                    rows.append((participant, trial, None, str(exc)))
+                    break
+                except OSError as exc:
+                    if attempt <= args.io_retries:
+                        print(f"  I/O error ({exc}); retry {attempt}/{args.io_retries} "
+                              f"in {args.io_retry_wait}s")
+                        time.sleep(args.io_retry_wait)
+                        continue
+                    traceback.print_exc()
+                    print(f"  FAILED after {attempt} attempts: {type(exc).__name__}: {exc}")
+                    rows.append((participant, trial, None, f"{type(exc).__name__}: {exc}"))
+                    break
+                except Exception as exc:                # keep the batch going
+                    traceback.print_exc()
+                    print(f"  FAILED: {type(exc).__name__}: {exc}")
+                    rows.append((participant, trial, None, f"{type(exc).__name__}: {exc}"))
+                    break
 
     print("\n" + "=" * 78)
     print(f"SUMMARY — {len(rows)} trials in {(time.time()-t_start)/60:.0f} min")
