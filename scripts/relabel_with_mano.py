@@ -325,6 +325,13 @@ def _prepare_trial(participant: str, trial: str, *, min_correct_pct: float,
           f"p95 error {rel_probe['p95_err_mm']:.1f} mm vs spacing "
           f"{rel_probe['spacing_mm']:.1f} mm -> ratio {rel_probe['ratio']:.2f} "
           f"({rel_probe['verdict'].upper()})")
+    if rel_probe["verdict"] == "unmeasurable":
+        raise SystemExit(
+            f"only {rel_probe['n_err']} cascade-correct MANO-mapped markers in the "
+            f"probe: this trial has essentially no verified *hand* markers, so "
+            f"there is nothing to fit a pose from or score against (a high "
+            f"overall correctness here comes from forearm/palm markers, which "
+            f"MANO does not model)")
     if skip_unusable and rel_probe["verdict"] == "unusable":
         raise SystemExit(
             f"model unusable for this trial (ratio {rel_probe['ratio']:.2f}); "

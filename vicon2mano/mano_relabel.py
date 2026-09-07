@@ -291,6 +291,7 @@ def model_reliability(
     m2j: dict[int, int],
     *,
     stride: int = 7,
+    min_samples: int = 30,
 ) -> dict:
     """Can this trial's fitted model tell neighbouring markers apart?
 
@@ -343,10 +344,24 @@ def model_reliability(
     p95 = float(np.percentile(err, 95)) if err else float("inf")
     spacing = float(np.median(nn)) if nn else float("nan")
     ratio = p95 / spacing if spacing and np.isfinite(spacing) else float("inf")
+
+    # "Cannot be measured" is a different failure from "measured and bad", and
+    # conflating them hides a real data problem behind an apparent model
+    # problem. P9/Trial2_hoi reads 16.4% correct overall, but only 0.24% of
+    # the MANO-mapped (hand) markers are correct -- that 16.4% is almost
+    # entirely forearm and palm markers, which MANO does not model. With no
+    # verified hand markers there is nothing to fit a pose from and nothing to
+    # score a prediction against, so no calibration source could rescue it.
+    if len(err) < min_samples:
+        verdict = "unmeasurable"
+    elif ratio < 0.55:
+        verdict = "good"
+    elif ratio < 0.9:
+        verdict = "marginal"
+    else:
+        verdict = "unusable"
     return dict(p95_err_mm=p95, median_err_mm=float(np.median(err)) if err else float("nan"),
-                spacing_mm=spacing, ratio=ratio, n_err=len(err),
-                verdict=("good" if ratio < 0.55 else
-                         "marginal" if ratio < 0.9 else "unusable"))
+                spacing_mm=spacing, ratio=ratio, n_err=len(err), verdict=verdict)
 
 
 def relabel_frame(
