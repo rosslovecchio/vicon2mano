@@ -449,15 +449,60 @@ def _assign_and_verify(ctx, *, max_dist_mm, min_trusted: int = 6,
         moved = np.zeros_like(out_status, dtype=bool)
         after, n_moves, now_ok = before, 0, 0
 
-    # Ring colours come from the post-repair verdict, except that anything we
-    # moved stays blue so the repair itself remains visible.
+    # Was each repair actually good? The cascade's own verdict is too harsh to
+    # answer that, because a failing bone flags *both* its endpoints: a marker
+    # placed perfectly still comes back INCORRECT when the neighbour further
+    # out along the finger is the one that is wrong. Measured case,
+    # P7/Trial1_handsonly frame 42789, where Ring1 <-> Pinky1 were swapped
+    # back: Pinky1 lands within tolerance of all three Palm markers
+    # (39.6/36.8, 57.6/54.3, 44.2/42.6 mm) and its only failing link is to
+    # Pinky2 -- still mislabelled, and not repaired in that frame -- which it
+    # misses by 0.1mm past the threshold. Calling that repair a failure is
+    # simply wrong.
+    #
+    # So judge a moved marker only against partners that are themselves
+    # confirmed good after the repair, and ignore links into still-broken
+    # territory. A marker with no confirmed-good partner has no evidence
+    # either way and keeps the cascade's verdict.
+    bone_tol_mad, bone_tol_mm = 4.0, 7.5            # cascade stage-3 defaults
+    bone_ref_r, _ = lmq.build_reference(markers, ref, bones,
+                                        extra_markers=static_markers)
+    links: dict[int, list[tuple[int, float, float]]] = {}
+    for (i, j), (med, mad) in bone_ref_r.items():
+        links.setdefault(i, []).append((j, med, mad))
+        links.setdefault(j, []).append((i, med, mad))
+
+    repair_ok = np.zeros_like(status, dtype=bool)
+    for t, m in np.argwhere(moved):
+        if status_after[t, m] == CORRECT:
+            repair_ok[t, m] = True
+            continue
+        judged, all_ok = False, True
+        for o, med, mad in links.get(int(m), ()):
+            if status_after[t, o] != CORRECT:
+                continue                    # partner is itself suspect
+            a, b = relabelled[t, m], relabelled[t, o]
+            if not (np.isfinite(a).all() and np.isfinite(b).all()):
+                continue
+            judged = True
+            if abs(np.linalg.norm(a - b) - med) > max(bone_tol_mad * mad, bone_tol_mm):
+                all_ok = False
+                break
+        repair_ok[t, m] = judged and all_ok
+
     # Default: no ring. Only markers that were originally correct, or that we
     # actually moved, get one — an originally-incorrect marker we never
     # attempted stays unmarked rather than being drawn as a failure.
     ring_status = np.zeros_like(status, dtype=np.int8)
-    ring_status[status == CORRECT] = CORRECT                       # green
-    ring_status[moved & (status_after == CORRECT)] = RELABELLED    # blue
-    ring_status[moved & (status_after != CORRECT)] = INCORRECT     # red
+    ring_status[status == CORRECT] = CORRECT              # green
+    ring_status[moved & repair_ok] = RELABELLED           # blue
+    ring_status[moved & ~repair_ok] = INCORRECT           # red
+
+    n_repair_ok = int((moved & repair_ok).sum())
+    if verbose and n_moves:
+        print(f"  of {n_moves} relabelled, {n_repair_ok} ({n_repair_ok/n_moves:.1%}) "
+              f"are consistent with the confirmed-good markers around them "
+              f"(vs {now_ok} ({now_ok/n_moves:.1%}) the cascade itself certifies)")
 
     return dict(markers=markers, relabelled=relabelled, labels=labels, bones=bones,
                 status=status, out_status=ring_status, pct=pct, pct_after=pct_after,
