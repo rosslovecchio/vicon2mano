@@ -16,3 +16,14 @@ data/**/*.csv
 vicon2mano/eval/fit/*.html
 vicon2mano/eval/fit/finger_angles.csv
 scripts/debug_out/
+
+# Script output: results/ (cascade + fit runs), interactive Plotly pages and
+# rendered figures. All regenerable from visualize_data.py / scripts/*.py, and
+# a single animation HTML embeds its own copy of plotly.js (~3 MB).
+results/
+*.html
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.webp
