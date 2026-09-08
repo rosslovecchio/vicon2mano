@@ -181,6 +181,179 @@ def load_ref_ranges_csv(
     return np.array(sorted(f - 1 for f in frames), dtype=int)
 
 
+# ---------------------------------------------------------------------------
+# manual_frames.csv readers
+#
+# The log is the authority on which recording is which trial: its "Session"
+# column is the trial's identity and its "CSV name" column + ".csv" is the
+# file. Shared by visualize_data.py and scripts/relabel_with_mano.py so both
+# resolve trials identically — they used to disagree, with the relabeller
+# enumerating from trial_filename_map.csv (34 trials) while the cascade used
+# the log (66).
+# ---------------------------------------------------------------------------
+
+
+def participant_sort_key(name: str) -> tuple[int, str]:
+    """Sort "P2" before "P10" — plain string order puts P10 first, which
+    makes the all-participants summary grid read wrong."""
+    m = re.fullmatch(r"[A-Za-z]*(\d+)", name.strip())
+    return (int(m.group(1)), name) if m else (10**9, name)
+
+
+def resolve_participants(requested: list[str],
+                         manual_sessions: dict[str, dict[str, str]],
+                         source: str = "manual_frames.csv") -> list[str]:
+    """Expand ["all"] to every participant with rows in manual_frames.csv,
+    in numeric order. Any other list is returned as given (order preserved),
+    with a warning for names the log doesn't know about — those would
+    otherwise just silently produce an empty row in the summary grid."""
+    if any(p.strip().lower() == "all" for p in requested):
+        found = sorted(manual_sessions, key=participant_sort_key)
+        print(f"PARTICIPANTS=all -> {len(found)} participant(s) from "
+              f"{source}: {', '.join(found)}")
+        return found
+    for p in requested:
+        if p not in manual_sessions:
+            print(f"[warn] {p}: no rows in {source}")
+    return list(requested)
+
+
+def slug(name: str) -> str:
+    """Filename-safe form of a Session name ("Trial 1 Hands only" ->
+    "Trial_1_Hands_only"), for the per-trial output HTML."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
+
+
+def sniff_delimiter(path: Path) -> str:
+    """Tab or comma, whichever actually splits this file into fields.
+
+    manual_frames.csv started life tab-separated and has since been
+    re-saved as true CSV; parsing a comma file as TSV collapses every line
+    into one field, so nothing matches and every trial silently falls back
+    to the AUTO reference. ``label_marker_quality.load_ref_ranges_csv``
+    sniffs the same way — keep the two in step.
+    """
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        sample = f.read(8192)
+    return "\t" if sample.count("\t") >= sample.count(",") else ","
+
+
+def is_frame_number(cell: str) -> bool:
+    return cell.strip().lstrip("-").isdigit()
+
+
+# Header cell -> which column it is. Matched on the normalised (alnum-only,
+# lowercased) text, so "Partecipant" (the spelling actually in the file)
+# and "CSV name" both land correctly.
+_HEADER_PARTICIPANT = ("participant", "partecipant")
+_HEADER_SESSION = ("session",)
+_HEADER_CSVNAME = ("csvname", "filename", "file", "csv")
+
+
+def load_trial_sessions(path: Path) -> dict[str, dict[str, str]]:
+    """Read manual_frames.csv's (participant, session, CSV name) columns.
+
+    The file is a header-row CSV with fixed columns::
+
+        Partecipant,Session,CSV name,Ref frame 1..4,Notes
+        P1,Trial 1 Hands only,P101,9952,26304,44016,,subject with missing markers
+
+    Both name columns are taken **verbatim**: ``Session`` is the trial's
+    identity (the strings in ``TRIALS``) and ``CSV name`` + ".csv" is its
+    file. Neither is normalised or keyword-classified — the log is the
+    authority, so a value that doesn't line up is a typo to fix at the
+    source, not something to guess around.
+
+    Frame and Notes columns are ignored here, including the rows where a
+    note has slid into a frame column (P9's "too noisy with a lot of extra
+    markers"). A blank participant cell means "same participant as the row
+    above". Columns are located by header name, falling back to positions
+    0/1/2 if the header is missing or renamed.
+
+    Returns {participant: {session: csv_name}}. Sessions that appear twice
+    for one participant keep the first row and warn; a deliberate retake is
+    better given its own distinct Session name (as P17's "Trial2 Hands only
+    extra" is), which then simply goes unused unless it's listed in
+    ``TRIALS``.
+    """
+    import csv as csv_mod
+
+    sessions: dict[str, dict[str, str]] = {}
+    if not path.exists():
+        return sessions
+    delim = sniff_delimiter(path)
+    i_p, i_session, i_csv = 0, 1, 2
+    seen_header = False
+    current_p = ""
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        for row in csv_mod.reader(f, delimiter=delim):
+            if not row or not any(c.strip() for c in row):
+                continue
+            cells = [c.strip() for c in row]
+            norm = [re.sub(r"[^a-z0-9]", "", c.lower()) for c in cells]
+
+            if not seen_header and norm and norm[0] in _HEADER_PARTICIPANT:
+                seen_header = True
+                for i, n in enumerate(norm):
+                    if n in _HEADER_PARTICIPANT:
+                        i_p = i
+                    elif n in _HEADER_SESSION:
+                        i_session = i
+                    elif n in _HEADER_CSVNAME:
+                        i_csv = i
+                continue
+
+            def cell(i: int) -> str:
+                return cells[i] if i < len(cells) else ""
+
+            if cell(i_p):
+                current_p = cell(i_p)
+            session, csv_name = cell(i_session), cell(i_csv)
+            if not current_p or not session or not csv_name:
+                continue
+            if is_frame_number(session) or is_frame_number(csv_name):
+                continue  # not a real row (stray numbers in the name columns)
+            slots = sessions.setdefault(current_p, {})
+            if session in slots:
+                print(f"[warn] {path.name}: {current_p}/{session!r} appears twice "
+                      f"({csv_name!r} vs {slots[session]!r}) — keeping the first")
+                continue
+            slots[session] = csv_name
+    return sessions
+
+
+def find_session_file(participant_dir: Path, csv_name: str) -> Path | None:
+    """Resolve a manual_frames.csv ``CSV name`` cell to its file: the stem
+    plus ".csv", nothing cleverer.
+
+    The log's ``CSV name`` column *is* the filename on disk, so no
+    normalisation, fuzzy matching or keyword guessing is needed or wanted —
+    a mismatch means a genuine typo on one side or the other, and should be
+    fixed at the source rather than papered over by a guess that might pick
+    the wrong recording. Currently 8 of 66 rows mismatch: P4 Trial1 HOI
+    ("Trail1_HOI" logged, "Trial1_HOI.csv" on disk), P10's two Trial1 rows
+    (the *files* are typo'd "Trail1_*"), P11 Trial2 hands-only
+    ("Trial2_hands_only" vs "Trial2_handsonly.csv") and P12's four
+    ("Staic_trial0N" vs "Static_trial0N.csv"). Those trials are skipped
+    with a warning until the log or the filenames are corrected.
+
+    Matching is case-sensitive in intent but tolerant of the filesystem's
+    own casing: the real directory entry is returned, so a case difference
+    doesn't silently produce a Path that only works on Windows.
+    """
+    if not csv_name:
+        return None
+    want = f"{csv_name}.csv"
+    for csv_path in sorted(participant_dir.glob("*.csv")):
+        if csv_path.name == want:
+            return csv_path
+        if csv_path.name.lower() == want.lower():
+            print(f"[info] {participant_dir}: {csv_name!r} matched "
+                  f"{csv_path.name!r} (case differs)")
+            return csv_path
+    return None
+
+
 def parse_frame_spec(spec: str) -> np.ndarray:
     """Parse "100-200,500,900-950" into a sorted unique 0-indexed int array.
 

@@ -77,7 +77,9 @@ DATA_ROOT = Path(r"D:\ExperimentsJune25")
 REF_CSV = DATA_ROOT / "manual_frames.csv"
 TRIAL_MAP_CSV = DATA_ROOT / "trial_filename_map.csv"
 MANO_DIR = REPO_ROOT.parent / "clean_kinematics" / "mano_v1_2" / "models"
-OUT_DIR = REPO_ROOT / "scripts" / "debug_out"
+# Default output home; override with --out-dir. "pass1" is the first full
+# relabelling sweep over every trial in manual_frames.csv.
+OUT_DIR = REPO_ROOT / "results" / "mano_relabelling_pass1"
 
 # status codes: cascade uses 0/1/2; 3 is added here for "relabelled by MANO"
 MISSING, INCORRECT, CORRECT, RELABELLED = 0, 1, 2, 3
@@ -152,13 +154,22 @@ def find_trial_csv(participant: str, trial: str) -> tuple[Path | None, Path | No
     (see MANO_ONLY_STATIC).
     """
     pdir = DATA_ROOT / participant / participant
+
+    # The trial itself comes from manual_frames.csv: its "Session" column is
+    # the trial's identity and "CSV name" + ".csv" is the file. This used to
+    # read trial_filename_map.csv, which only ever covered 34 of the 66
+    # trials — P1-P6 and P17 were absent entirely, so --all silently skipped
+    # them. The map is still the source for *statics*, which the log does
+    # not track, and it still carries the curation described in
+    # MANO_ONLY_STATIC below.
+    sessions = lmq.load_trial_sessions(REF_CSV).get(participant, {})
+    csv_name = sessions.get(trial)
+    trial_path = lmq.find_session_file(pdir, csv_name) if csv_name else None
+
     overrides = load_trial_map(TRIAL_MAP_CSV)
-    trial_path = static_path = None
+    static_path = None
     for c in sorted(pdir.glob("*.csv")):
-        key = overrides.get((participant, c.name.lower()))
-        if key == trial:
-            trial_path = c
-        elif key == "static":
+        if overrides.get((participant, c.name.lower())) == "static":
             static_path = c
 
     mano_static = static_path
@@ -795,10 +806,12 @@ def build_figure(d, participant, trial, min_correct_pct):
 
 
 def main(argv=None):
+    global OUT_DIR
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--participant", default="P7")
-    ap.add_argument("--trial", default="Trial1_handsonly")
+    ap.add_argument("--trial", default="Trial 1 Hands only",
+                    help="manual_frames.csv Session name, e.g. 'Trial 1 HOI'")
     ap.add_argument("--min-correct-pct", type=float, default=50.0,
                     help="only repair frames at least this %% cascade-correct")
     ap.add_argument("--n-out", type=int, default=1000,
@@ -843,9 +856,15 @@ def main(argv=None):
                     help="run a trial even when the reliability probe says the "
                          "model cannot separate neighbouring markers")
     ap.add_argument("--side", default="right", choices=["right", "left"])
+    ap.add_argument("--out-dir", type=Path, default=None,
+                    help=f"where to write animations and the summary "
+                         f"(default {OUT_DIR})")
     ap.add_argument("--all", action="store_true",
                     help="run every (participant, trial) in trial_filename_map.csv")
     args = ap.parse_args(argv)
+
+    if args.out_dir is not None:
+        OUT_DIR = args.out_dir
 
     if args.all:
         return run_all(args)
@@ -868,7 +887,7 @@ def run_one(participant, trial, args):
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     fig, n_frames, frame_idx = build_figure(d, participant, trial, args.min_correct_pct)
-    out = OUT_DIR / f"relabelled_{participant}_{trial}.html"
+    out = OUT_DIR / f"relabelled_{participant}_{lmq.slug(trial)}.html"
     fig.write_html(str(out), include_plotlyjs=True, div_id="animfig",
                    post_script=_STEP_JS % {
                        "div_id": "animfig", "n_frames": n_frames,
@@ -877,25 +896,28 @@ def run_one(participant, trial, args):
     return out, d.get("summary")
 
 
-TRIAL_KEYS = ["Trial1_handsonly", "Trial1_hoi", "Trial2_handsonly", "Trial2_hoi"]
+# Trial names exactly as manual_frames.csv's "Session" column spells them
+# (its inconsistent "Trial 1" / "Trial2" spacing included).
+TRIAL_KEYS = ["Trial 1 Hands only", "Trial 1 HOI", "Trial2 Hands only", "Trial2 HOI"]
 
 
 def run_all(args):
-    """Relabel every (participant, trial) listed in trial_filename_map.csv."""
-    overrides = load_trial_map(TRIAL_MAP_CSV)
-    participants = sorted({p for (p, _fn) in overrides},
-                          key=lambda s: (len(s), s))   # P7, P8, ..., P10, ...
+    """Relabel every (participant, trial) in manual_frames.csv."""
+    sessions = lmq.load_trial_sessions(REF_CSV)
+    participants = sorted(sessions, key=lmq.participant_sort_key)
     rows = []
     t_start = time.time()
+    print(f"{len(participants)} participant(s), "
+          f"{sum(len(set(v) & set(TRIAL_KEYS)) for v in sessions.values())} trial(s) to run")
     for participant in participants:
-        have = {overrides[(p, fn)] for (p, fn) in overrides if p == participant}
+        have = sessions[participant]
         for trial in TRIAL_KEYS:
             if trial not in have:
                 continue
             print("\n" + "=" * 78)
             print(f"### {participant} / {trial}")
             print("=" * 78)
-            if args.skip_existing and (OUT_DIR / f"relabelled_{participant}_{trial}.html").exists():
+            if args.skip_existing and (OUT_DIR / f"relabelled_{participant}_{lmq.slug(trial)}.html").exists():
                 print("  already done, skipping (--skip-existing)")
                 continue
             # The data lives on an external drive that intermittently drops
