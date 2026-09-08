@@ -31,10 +31,19 @@ import label_marker_quality as lmq
 DATA_ROOT = Path(r"D:\ExperimentsJune25")
 REF_CSV = DATA_ROOT / "manual_frames.csv"
 TRIAL_MAP_CSV = DATA_ROOT / "trial_filename_map.csv"
-PARTICIPANTS = ["P7",] # "P8", "P9", "P10", "P11", "P12", "P13", "P14", "P15", "P16", "P17"]
-TRIALS = ["Trial1_handsonly",]# "Trial1_hoi", "Trial2_handsonly", "Trial2_hoi"]
+# Either an explicit list, or ["all"] for every participant that has rows
+# in manual_frames.csv (resolved by _resolve_participants below).
+PARTICIPANTS = ["all"]  # e.g. ["P7", "P8"] to narrow it down
+# Trials are named exactly as manual_frames.csv's "Session" column spells
+# them — that column is the trial's identity, so no canonicalisation or
+# keyword guessing is involved anywhere. Note the inconsistent spacing
+# ("Trial 1" vs "Trial2") is the file's, and is deliberately preserved.
+TRIALS = ["Trial 1 Hands only", "Trial 1 HOI", "Trial2 Hands only", "Trial2 HOI"]
 
-OUT_DIR = REPO_ROOT / "scripts" / "debug_out"
+# Everything this script produces (per-trial animation HTML, the summary
+# plot, the before/after statistics) lands here. "cascade_only" = the
+# marker-quality cascade's own output, with no MANO fitting involved.
+OUT_DIR = REPO_ROOT / "results" / "cascade_only"
 
 
 def load_trial_filename_map(path: Path) -> dict[tuple[str, str], str]:
@@ -116,95 +125,163 @@ def find_trial_files(participant: str, participant_dir: Path,
     return found
 
 
+def _participant_sort_key(name: str) -> tuple[int, str]:
+    """Sort "P2" before "P10" — plain string order puts P10 first, which
+    makes the all-participants summary grid read wrong."""
+    m = re.fullmatch(r"[A-Za-z]*(\d+)", name.strip())
+    return (int(m.group(1)), name) if m else (10**9, name)
+
+
+def _resolve_participants(requested: list[str],
+                          manual_sessions: dict[str, dict[str, str]]) -> list[str]:
+    """Expand ["all"] to every participant with rows in manual_frames.csv,
+    in numeric order. Any other list is returned as given (order preserved),
+    with a warning for names the log doesn't know about — those would
+    otherwise just silently produce an empty row in the summary grid."""
+    if any(p.strip().lower() == "all" for p in requested):
+        found = sorted(manual_sessions, key=_participant_sort_key)
+        print(f"PARTICIPANTS=all -> {len(found)} participant(s) from "
+              f"{REF_CSV.name}: {', '.join(found)}")
+        return found
+    for p in requested:
+        if p not in manual_sessions:
+            print(f"[warn] {p}: no rows in {REF_CSV.name}")
+    return list(requested)
+
+
+def _slug(name: str) -> str:
+    """Filename-safe form of a Session name ("Trial 1 Hands only" ->
+    "Trial_1_Hands_only"), for the per-trial output HTML."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
+
+
+def _sniff_delimiter(path: Path) -> str:
+    """Tab or comma, whichever actually splits this file into fields.
+
+    manual_frames.csv started life tab-separated and has since been
+    re-saved as true CSV; parsing a comma file as TSV collapses every line
+    into one field, so nothing matches and every trial silently falls back
+    to the AUTO reference. ``label_marker_quality.load_ref_ranges_csv``
+    sniffs the same way — keep the two in step.
+    """
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        sample = f.read(8192)
+    return "\t" if sample.count("\t") >= sample.count(",") else ","
+
+
+def _is_frame_number(cell: str) -> bool:
+    return cell.strip().lstrip("-").isdigit()
+
+
+# Header cell -> which column it is. Matched on the normalised (alnum-only,
+# lowercased) text, so "Partecipant" (the spelling actually in the file)
+# and "CSV name" both land correctly.
+_HEADER_PARTICIPANT = ("participant", "partecipant")
+_HEADER_SESSION = ("session",)
+_HEADER_CSVNAME = ("csvname", "filename", "file", "csv")
+
+
 def load_manual_trial_sessions(path: Path) -> dict[str, dict[str, str]]:
-    """Read manual_frames.csv's own (participant, canonical trial name,
-    session/filename label) rows — this is now the authoritative source for
-    which file belongs to which trial slot, not filename keyword-guessing.
-    Column B is a standardised canonical name ("Trial 1 Hands only",
-    "Trial 1 HOI", ...), classified here with the same heuristic used for
-    filenames; column C is the actual session/filename stub to look up on
-    disk (frequently inconsistent with what the recording "should" be
-    called — e.g. a mislabelled or renamed file — so trust it over any
-    keyword guess on the real filename). A blank participant cell means
-    "same participant as the row above". Returns
-    {participant: {trial_key: session_label}}; the first row per key wins,
-    later ones (retakes, aborted takes, rows explicitly marked "extra") are
-    skipped with a warning.
+    """Read manual_frames.csv's (participant, session, CSV name) columns.
+
+    The file is a header-row CSV with fixed columns::
+
+        Partecipant,Session,CSV name,Ref frame 1..4,Notes
+        P1,Trial 1 Hands only,P101,9952,26304,44016,,subject with missing markers
+
+    Both name columns are taken **verbatim**: ``Session`` is the trial's
+    identity (the strings in ``TRIALS``) and ``CSV name`` + ".csv" is its
+    file. Neither is normalised or keyword-classified — the log is the
+    authority, so a value that doesn't line up is a typo to fix at the
+    source, not something to guess around.
+
+    Frame and Notes columns are ignored here, including the rows where a
+    note has slid into a frame column (P9's "too noisy with a lot of extra
+    markers"). A blank participant cell means "same participant as the row
+    above". Columns are located by header name, falling back to positions
+    0/1/2 if the header is missing or renamed.
+
+    Returns {participant: {session: csv_name}}. Sessions that appear twice
+    for one participant keep the first row and warn; a deliberate retake is
+    better given its own distinct Session name (as P17's "Trial2 Hands only
+    extra" is), which then simply goes unused unless it's listed in
+    ``TRIALS``.
     """
     import csv as csv_mod
 
     sessions: dict[str, dict[str, str]] = {}
     if not path.exists():
         return sessions
+    delim = _sniff_delimiter(path)
+    i_p, i_session, i_csv = 0, 1, 2
+    seen_header = False
     current_p = ""
     with path.open(newline="", encoding="utf-8-sig") as f:
-        for row in csv_mod.reader(f, delimiter="\t"):
+        for row in csv_mod.reader(f, delimiter=delim):
             if not row or not any(c.strip() for c in row):
                 continue
-            row = (row + ["", "", ""])[:3]
-            p, canonical, session_label = (c.strip() for c in row)
-            if p:
-                current_p = p
-            key = _classify_trial_name(canonical)
-            if key is None or key == "static":
+            cells = [c.strip() for c in row]
+            norm = [re.sub(r"[^a-z0-9]", "", c.lower()) for c in cells]
+
+            if not seen_header and norm and norm[0] in _HEADER_PARTICIPANT:
+                seen_header = True
+                for i, n in enumerate(norm):
+                    if n in _HEADER_PARTICIPANT:
+                        i_p = i
+                    elif n in _HEADER_SESSION:
+                        i_session = i
+                    elif n in _HEADER_CSVNAME:
+                        i_csv = i
                 continue
+
+            def cell(i: int) -> str:
+                return cells[i] if i < len(cells) else ""
+
+            if cell(i_p):
+                current_p = cell(i_p)
+            session, csv_name = cell(i_session), cell(i_csv)
+            if not current_p or not session or not csv_name:
+                continue
+            if _is_frame_number(session) or _is_frame_number(csv_name):
+                continue  # not a real row (stray numbers in the name columns)
             slots = sessions.setdefault(current_p, {})
-            if key in slots:
-                print(f"[warn] manual_frames.csv: {current_p}/{canonical!r} "
-                      f"({session_label!r}) duplicates {key!r} "
-                      f"(already {slots[key]!r}) — keeping the first")
+            if session in slots:
+                print(f"[warn] {path.name}: {current_p}/{session!r} appears twice "
+                      f"({csv_name!r} vs {slots[session]!r}) — keeping the first")
                 continue
-            slots[key] = session_label
+            slots[session] = csv_name
     return sessions
 
 
-def find_session_file(participant_dir: Path, session_label: str,
-                       target_key: str | None = None) -> Path | None:
-    """Locate the CSV file matching a manual_frames.csv session label —
-    exact (case-insensitive) filename stem match first, then normalised
-    (alnum-only) equality for minor punctuation differences, then a fuzzy
-    closest-match (``difflib``) for typos like "Staic_trial01" (log) vs
-    "Static_trial01.csv" (actual file). The fuzzy tier prints what it
-    picked so a bad guess is easy to spot and correct.
+def find_session_file(participant_dir: Path, csv_name: str) -> Path | None:
+    """Resolve a manual_frames.csv ``CSV name`` cell to its file: the stem
+    plus ".csv", nothing cleverer.
 
-    ``target_key`` (e.g. "Trial1_handsonly") guards the fuzzy tier: a
-    candidate whose *own* filename unambiguously keyword-classifies to a
-    *different* Trial1/2-handsonly/hoi key is excluded, even if it's
-    textually closer — otherwise a label like "Trial1_handsonly" can
-    fuzzy-match a similarly-spelled "Trial2_handsonly.csv" over the actual
-    typo'd "Trail1_handsonly.csv" (wrong trial number, not just a wrong
-    filename). Files that classify as "static" stay eligible even when
-    ``target_key`` is a trial slot — some participants' real trial
-    recordings are themselves typo'd as "static" (e.g. "Staic_trial01");
-    the difflib cutoff is strict enough that an unrelated static file won't
-    accidentally win a trial label it doesn't resemble.
+    The log's ``CSV name`` column *is* the filename on disk, so no
+    normalisation, fuzzy matching or keyword guessing is needed or wanted —
+    a mismatch means a genuine typo on one side or the other, and should be
+    fixed at the source rather than papered over by a guess that might pick
+    the wrong recording. Currently 8 of 66 rows mismatch: P4 Trial1 HOI
+    ("Trail1_HOI" logged, "Trial1_HOI.csv" on disk), P10's two Trial1 rows
+    (the *files* are typo'd "Trail1_*"), P11 Trial2 hands-only
+    ("Trial2_hands_only" vs "Trial2_handsonly.csv") and P12's four
+    ("Staic_trial0N" vs "Static_trial0N.csv"). Those trials are skipped
+    with a warning until the log or the filenames are corrected.
+
+    Matching is case-sensitive in intent but tolerant of the filesystem's
+    own casing: the real directory entry is returned, so a case difference
+    doesn't silently produce a Path that only works on Windows.
     """
-    import difflib
-    import re as re_mod
-
-    if not session_label:
+    if not csv_name:
         return None
-    low = session_label.lower()
-    candidates = sorted(participant_dir.glob("*.csv"))
-    for csv_path in candidates:
-        if csv_path.stem.lower() == low:
+    want = f"{csv_name}.csv"
+    for csv_path in sorted(participant_dir.glob("*.csv")):
+        if csv_path.name == want:
             return csv_path
-    target = re_mod.sub(r"[^a-z0-9]", "", low)
-    for csv_path in candidates:
-        if re_mod.sub(r"[^a-z0-9]", "", csv_path.stem.lower()) == target:
+        if csv_path.name.lower() == want.lower():
+            print(f"[info] {participant_dir}: {csv_name!r} matched "
+                  f"{csv_path.name!r} (case differs)")
             return csv_path
-    fuzzy_candidates = [
-        c for c in candidates
-        if target_key is None
-        or _classify_trial_name(c.stem) in (None, "static", target_key)
-    ]
-    stems = [c.stem for c in fuzzy_candidates]
-    close = difflib.get_close_matches(session_label, stems, n=1, cutoff=0.7)
-    if close:
-        match = next(c for c in fuzzy_candidates if c.stem == close[0])
-        print(f"[info] {participant_dir}: fuzzy-matched session label "
-              f"{session_label!r} -> {match.name!r}")
-        return match
     return None
 
 
@@ -230,31 +307,98 @@ def auto_reference(markers, min_frames=300):
     return np.array(sorted(idx), dtype=int)
 
 
+# %% Before/after statistics - definitions
+# "Before" is the raw Vicon export as loaded: a marker sample counts if
+# its XYZ is finite (i.e. Nexus labelled it in that frame). "After" is
+# what survives the cascade - the samples it positively confirms as
+# correct. The gap is what screening costs you, and is the number to
+# look at before feeding a trial into a MANO fit. Defined up here so the
+# load cell below can fill stats_by_trial as it goes.
+import csv as _csv
+
+STATUS_MISSING, STATUS_INCORRECT, STATUS_CORRECT = 0, 1, 2
+
+_STAT_FIELDS = [
+    "participant", "session", "csv_file", "n_frames", "n_markers", "n_samples",
+    "ref_frames",
+    # before
+    "before_pct_present", "before_frames_full", "before_pct_frames_full",
+    # after
+    "after_pct_correct", "after_frames_full", "after_pct_frames_full",
+    "after_pct_incorrect", "after_pct_missing",
+    # before -> after
+    "pct_present_rejected", "delta_pct_samples", "delta_pct_frames_full",
+]
+
+
+def trial_stats(participant, session, csv_file, markers, status, n_ref):
+    """One row of before/after numbers for a single trial."""
+    present = np.isfinite(markers).all(axis=-1)      # (T, M) raw availability
+    correct = status == STATUS_CORRECT
+    n_frames, n_markers = present.shape
+    n_samples = present.size
+
+    before_pct = present.sum() / n_samples * 100
+    after_pct = correct.sum() / n_samples * 100
+    before_full = int(present.all(axis=1).sum())     # frames with every marker labelled
+    after_full = int(correct.all(axis=1).sum())      # frames the cascade fully vouches for
+    n_present = int(present.sum())
+
+    return {
+        "participant": participant, "session": session, "csv_file": csv_file,
+        "n_frames": n_frames, "n_markers": n_markers, "n_samples": n_samples,
+        "ref_frames": n_ref,
+        "before_pct_present": round(before_pct, 2),
+        "before_frames_full": before_full,
+        "before_pct_frames_full": round(before_full / n_frames * 100, 2),
+        "after_pct_correct": round(after_pct, 2),
+        "after_frames_full": after_full,
+        "after_pct_frames_full": round(after_full / n_frames * 100, 2),
+        "after_pct_incorrect": round((status == STATUS_INCORRECT).sum() / n_samples * 100, 2),
+        "after_pct_missing": round((status == STATUS_MISSING).sum() / n_samples * 100, 2),
+        # Of the samples Vicon *did* label, how many the cascade refuses to
+        # vouch for - the headline "cost of screening" number.
+        "pct_present_rejected": (round((n_present - int(correct.sum())) / n_present * 100, 2)
+                                 if n_present else 0.0),
+        "delta_pct_samples": round(after_pct - before_pct, 2),
+        "delta_pct_frames_full": round((after_full - before_full) / n_frames * 100, 2),
+    }
+
+
 # %% Load + label every trial
 # Each trial's result is kept in results[(participant, trial)] as
 # (markers, labels, bones, status, pct_correct). Set a breakpoint inside
 # label_marker_quality.label_quality_cascade to step through the cascade
 # stage by stage for a specific trial.
 results = {}
+stats_by_trial = {}
 trial_map = load_trial_filename_map(TRIAL_MAP_CSV)
 manual_sessions = load_manual_trial_sessions(REF_CSV)
+# Resolved once here; the summary/animation cells below use this rather
+# than PARTICIPANTS, so ["all"] works when running cell by cell too.
+participants = _resolve_participants(PARTICIPANTS, manual_sessions)
 
-for participant in PARTICIPANTS:
+for participant in participants:
     participant_dir = DATA_ROOT / participant / participant
-    # manual_frames.csv is authoritative for which file belongs to which
-    # trial slot; find_trial_files' keyword guess is only a fallback for
-    # trial slots that have no row there yet (and for the extra "static"
-    # bone-length reference, which manual_frames.csv doesn't track).
+    # manual_frames.csv's CSV-name column is the only source for trial
+    # slots — its cell + ".csv" is the filename. find_trial_files' keyword
+    # guess is used *only* to locate the extra "static" bone-length
+    # reference, which manual_frames.csv doesn't track; deliberately not as
+    # a fallback for a trial whose CSV name doesn't resolve, since a guess
+    # there would silently paper over the typo instead of surfacing it.
     keyword_files = find_trial_files(participant, participant_dir, trial_map)
     sessions = manual_sessions.get(participant, {})
-    trial_files: dict[str, Path] = dict(keyword_files)
-    for trial_key, session_label in sessions.items():
-        session_path = find_session_file(participant_dir, session_label, trial_key)
+    trial_files: dict[str, Path] = {}
+    if "static" in keyword_files:
+        trial_files["static"] = keyword_files["static"]
+    for session, csv_name in sessions.items():
+        session_path = find_session_file(participant_dir, csv_name)
         if session_path is None:
-            print(f"[warn] {participant}/{trial_key}: manual_frames.csv session "
-                  f"{session_label!r} has no matching CSV in {participant_dir}")
+            print(f"[warn] {participant}/{session!r}: manual_frames.csv CSV name "
+                  f"{csv_name!r} -> {csv_name}.csv not found in {participant_dir} "
+                  f"— fix the typo in manual_frames.csv or rename the file")
             continue
-        trial_files[trial_key] = session_path
+        trial_files[session] = session_path
 
     static_path = trial_files.get("static")
     static_markers_raw, static_labels = (None, None)
@@ -287,15 +431,17 @@ for participant in PARTICIPANTS:
         pct_correct = (status == 2).sum(axis=1) / status.shape[1] * 100
 
         results[(participant, trial)] = (markers, labels, bones, status, pct_correct)
+        stats_by_trial[(participant, trial)] = trial_stats(
+            participant, trial, path.name, markers, status, len(ref_frames))
         print(f"{participant}/{trial}: {markers.shape[0]} frames, "
               f"ref={ref_source} ({len(ref_frames)} frames), "
               f"mean correct {pct_correct.mean():.1f}% "
               f"(min {pct_correct.min():.0f}%, max {pct_correct.max():.0f}%)")
 
 # %% Summary: % correct over time, all trials
-fig, axes = plt.subplots(len(PARTICIPANTS), len(TRIALS), figsize=(4 * len(TRIALS), 3 * len(PARTICIPANTS)),
+fig, axes = plt.subplots(len(participants), len(TRIALS), figsize=(4 * len(TRIALS), 3 * len(participants)),
                           sharey=True, squeeze=False)
-for row, participant in enumerate(PARTICIPANTS):
+for row, participant in enumerate(participants):
     for col, trial in enumerate(TRIALS):
         ax = axes[row, col]
         key = (participant, trial)
@@ -315,6 +461,99 @@ summary_png = OUT_DIR / "quality_summary.png"
 fig.savefig(summary_png, dpi=120)
 print(f"Saved summary plot to {summary_png}")
 plt.show()  # blocks in a plain terminal; close the window to continue
+
+# %% Before/after statistics -> results/cascade_only/*.csv
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+stats_rows = [stats_by_trial[k] for k in results]
+
+if stats_rows:
+    # Pooled totals, weighted by sample/frame counts rather than a mean of
+    # means - trials differ in length by an order of magnitude.
+    tot_samples = sum(r["n_samples"] for r in stats_rows)
+    tot_frames = sum(r["n_frames"] for r in stats_rows)
+    overall = {f: "" for f in _STAT_FIELDS}
+    overall.update({
+        "participant": "ALL", "session": f"{len(stats_rows)} trial(s)", "csv_file": "",
+        "n_frames": tot_frames, "n_markers": "", "n_samples": tot_samples,
+        "ref_frames": sum(r["ref_frames"] for r in stats_rows),
+        "before_pct_present": round(
+            sum(r["before_pct_present"] * r["n_samples"] for r in stats_rows) / tot_samples, 2),
+        "after_pct_correct": round(
+            sum(r["after_pct_correct"] * r["n_samples"] for r in stats_rows) / tot_samples, 2),
+        "before_frames_full": sum(r["before_frames_full"] for r in stats_rows),
+        "after_frames_full": sum(r["after_frames_full"] for r in stats_rows),
+    })
+    overall["before_pct_frames_full"] = round(overall["before_frames_full"] / tot_frames * 100, 2)
+    overall["after_pct_frames_full"] = round(overall["after_frames_full"] / tot_frames * 100, 2)
+    overall["delta_pct_samples"] = round(
+        overall["after_pct_correct"] - overall["before_pct_present"], 2)
+    overall["delta_pct_frames_full"] = round(
+        overall["after_pct_frames_full"] - overall["before_pct_frames_full"], 2)
+
+    stats_csv = OUT_DIR / "before_after_stats.csv"
+    with stats_csv.open("w", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=_STAT_FIELDS)
+        w.writeheader()
+        w.writerows(stats_rows)
+        w.writerow(overall)
+    print(f"Saved before/after statistics to {stats_csv}")
+
+    # Per-marker view, pooled over every trial: which markers the cascade
+    # rejects most is usually where a label swap or a bad plate lives.
+    marker_totals: dict[str, list[int]] = {}
+    for (participant, trial), (markers, labels, _, status, _) in results.items():
+        present = np.isfinite(markers).all(axis=-1)
+        for m, label in enumerate(labels):
+            # Vicon labels carry a subject prefix ("P14:Ring1"); strip it so
+            # the same anatomical marker pools across participants instead of
+            # producing one row per person.
+            base = label.split(":")[-1]
+            acc = marker_totals.setdefault(base, [0, 0, 0])  # samples, present, correct
+            acc[0] += present.shape[0]
+            acc[1] += int(present[:, m].sum())
+            acc[2] += int((status[:, m] == STATUS_CORRECT).sum())
+    marker_csv = OUT_DIR / "before_after_by_marker.csv"
+    with marker_csv.open("w", newline="", encoding="utf-8") as f:
+        w = _csv.writer(f)
+        w.writerow(["marker", "n_samples", "before_pct_present", "after_pct_correct",
+                    "pct_present_rejected"])
+        for label, (n, n_present, n_correct) in sorted(
+                marker_totals.items(),
+                key=lambda kv: (kv[1][1] - kv[1][2]) / kv[1][1] if kv[1][1] else 0,
+                reverse=True):
+            w.writerow([
+                label, n,
+                round(n_present / n * 100, 2),
+                round(n_correct / n * 100, 2),
+                round((n_present - n_correct) / n_present * 100, 2) if n_present else 0.0,
+            ])
+    print(f"Saved per-marker breakdown to {marker_csv}")
+
+    # Paired before/after bars, one pair per trial.
+    labels_x = [f"{r['participant']}\n{r['session']}" for r in stats_rows]
+    xs = np.arange(len(stats_rows))
+    fig_ba, ax_ba = plt.subplots(figsize=(max(6, 0.7 * len(stats_rows) + 2), 4.5))
+    ax_ba.bar(xs - 0.2, [r["before_pct_present"] for r in stats_rows], 0.4,
+              label="before (labelled by Vicon)", color="#95a5a6")
+    ax_ba.bar(xs + 0.2, [r["after_pct_correct"] for r in stats_rows], 0.4,
+              label="after (confirmed by cascade)", color="#2980b9")
+    ax_ba.set_xticks(xs)
+    ax_ba.set_xticklabels(labels_x, rotation=90, fontsize=7)
+    ax_ba.set_ylabel("% of marker samples")
+    ax_ba.set_ylim(0, 100)
+    ax_ba.set_title("Marker samples before vs after the quality cascade")
+    ax_ba.legend(fontsize=8)
+    fig_ba.tight_layout()
+    ba_png = OUT_DIR / "before_after.png"
+    fig_ba.savefig(ba_png, dpi=120)
+    print(f"Saved before/after plot to {ba_png}")
+    print(f"OVERALL: {overall['before_pct_present']}% of samples labelled -> "
+          f"{overall['after_pct_correct']}% confirmed correct "
+          f"({overall['delta_pct_samples']} pp); fully-clean frames "
+          f"{overall['before_pct_frames_full']}% -> {overall['after_pct_frames_full']}%")
+else:
+    print("No trials loaded - nothing to summarise.")
+
 
 # %% Animation setup (helpers)
 N_OUT = 1000
@@ -530,7 +769,7 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 animation_paths = []
 for (participant, trial), (markers, labels, bones, status, pct_correct) in results.items():
     fig, n_frames = build_animation_figure(participant, trial, markers, labels, bones, status, pct_correct)
-    anim_html_path = OUT_DIR / f"animation_{participant}_{trial}.html"
+    anim_html_path = OUT_DIR / f"animation_{participant}_{_slug(trial)}.html"
     save_animation_html(fig, n_frames, anim_html_path)
     animation_paths.append(anim_html_path)
 
