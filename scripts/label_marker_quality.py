@@ -640,9 +640,9 @@ def _rolling_local_reference(
     pairs: list[tuple[int, int]],
     window: int,
 ) -> dict[tuple[int, int], tuple[np.ndarray, np.ndarray]]:
-    """Per-pair LOCAL median/MAD over a centered rolling window of nearby
-    frames, instead of a single global reference built from a handful of
-    (possibly far-away-in-time) ``ref_frames``.
+    """Per-pair LOCAL median and residual-scale over a centered rolling
+    window of nearby frames, instead of a single global reference built
+    from a handful of (possibly far-away-in-time) ``ref_frames``.
 
     Markers sitting on skin, not a rigid plate, legitimately drift several
     mm over the course of a long recording as the limb rotates and muscle
@@ -654,8 +654,33 @@ def _rolling_local_reference(
     *abrupt* deviations from it — which is what an actual tracking error
     or occlusion-fill jump looks like.
 
-    Returns ``{(i, j): (local_med, local_mad)}``, each ``(T,)``, NaN where
+    Returns ``{(i, j): (local_med, local_dev)}``, each ``(T,)``, NaN where
     the window had no valid samples at all (e.g. right at a long gap).
+
+    ``local_dev`` is deliberately **not** a windowed MAD (the median of
+    ``|x - median(x)|`` over each window's raw distances) — it is the
+    rolling median of ``|d[t] - local_med[t]|``, i.e. of each frame's
+    residual from its *own* centered local median. That is the exact
+    statistic the caller then thresholds, so this estimates the null
+    distribution of the quantity actually being tested, rather than the
+    spread of the raw values.
+
+    The distinction is invisible in a stationary window (both give the
+    same number, and both are equally robust to a minority of bad frames)
+    and matters under drift — which is the whole reason this local
+    reference exists. Measured on synthetic data with 6mm of drift per
+    301-frame window: this residual scale reads 0.33mm, a true windowed
+    MAD reads 1.50mm, the latter dominated by the within-window trend
+    rather than by the noise. Since the centered median already tracks
+    that trend, the residual being tested does *not* grow with it, so a
+    true MAD would inflate the tolerance (2.5mm -> 6.0mm here) purely as a
+    function of how fast the forearm happens to be drifting. Downstream,
+    over that same drift, it costs nearly all sensitivity to the small
+    sustained errors this cascade is already worst at catching: recall on
+    injected jumps goes 87.5% -> 0% at 3mm and 100% -> 1.7% at 5mm, with
+    no reduction in false positives to show for it (0% either way). So
+    don't "correct" this into a real MAD without re-tuning
+    ``forearm_tol_mm`` / ``forearm_tol_mad`` to win that recall back.
     """
     import pandas as pd  # local import: only needed by this experimental path
 
@@ -666,8 +691,8 @@ def _rolling_local_reference(
         d = np.linalg.norm(markers[:, i] - markers[:, j], axis=-1)
         s = pd.Series(d)
         local_med = s.rolling(window, center=True, min_periods=min_periods).median()
-        local_mad = (s - local_med).abs().rolling(window, center=True, min_periods=min_periods).median()
-        out[(i, j)] = (local_med.to_numpy(), local_mad.to_numpy())
+        local_dev = (s - local_med).abs().rolling(window, center=True, min_periods=min_periods).median()
+        out[(i, j)] = (local_med.to_numpy(), local_dev.to_numpy())
     return out
 
 
@@ -682,16 +707,17 @@ def label_quality_cascade(
     forearm_max_bad: int = 2,
     forearm_window: int = 301,
     forearm_sanity_mm: float = 10.0,
+    forearm_dev_inflation: float = 3.0,
     anchor_tol_mad: float = 1.5,
-    anchor_tol_mm: float = 6.0,
+    anchor_tol_mm: float = 12.0,
     palm_min_present: int = 2,
     palm_min_bonelength_ok: int = 2,
     palm_min_anchor_ok: int = 2,
     bone_tol_mad: float = 4.0,
-    bone_tol_mm: float = 7.5,
+    bone_tol_mm: float = 10.0,
     speed_tol_mad: float = 4.0,
     speed_tol_mm: float = 12.5,
-    sticky_tol_mm: float = 4.0,
+    sticky_tol_mm: float = 5.0,
 ) -> tuple[np.ndarray, list[tuple[int, int, str]]]:
     """Cascading trust-chain marker quality check.
 
@@ -724,6 +750,23 @@ def label_quality_cascade(
        ``forearm_sanity_mm`` from that fixed anchor, the local baseline
        itself is untrusted and the pair is flagged regardless of how well
        the current frame matches its own (drifted) local neighbourhood.
+       The local *spread* gets a matching guard. That spread
+       (``local_dev``) is the rolling median of each frame's residual from
+       its own local median — deliberately not a windowed MAD; see
+       ``_rolling_local_reference`` for why, and don't convert it into one
+       without re-tuning the tolerances. Being a median, it survives a
+       minority of bad frames in its window; past that it inflates, and
+       since the tolerance is ``forearm_tol_mad`` times it, the check
+       would silently widen its own tolerance exactly where the data is
+       worst — failing permissive, the opposite of this cascade's intended
+       bias. So it's capped at ``forearm_dev_inflation`` times the global
+       reference MAD (real skin drift moves the median slowly and leaves
+       the residual scale alone, so quiet and drifting windows alike are
+       unaffected by the cap). Unlike an out-of-range median, an inflated
+       spread doesn't make the frame unverifiable — it only withholds the
+       extra slack, and the ``forearm_tol_mm`` floor still applies. Note
+       the cap only binds past ~50% contamination of a window, where the
+       median sanity check above is the other line of defence.
        (Note: a pairwise-distance check structurally can't catch two Forearm
        markers swapping labels with each other, since swapping doesn't
        change the distance between them — that job falls to the temporal
@@ -765,14 +808,14 @@ def label_quality_cascade(
        Thumb1 has no bone to another finger's base, so it's excluded from
        this specific check rather than letting its correctness count
        without ever being geometrically compared) that came out
-       individually "correct" in stage 2, plus the Forearm centroid; if
-       there is no such correct, bonded marker to compare against, or any
-       of those reference distances is out of tolerance, it is "incorrect".
-       Each subsequent marker on the finger is checked against the
-       *previous* marker's actual position, but is only eligible to be
-       "correct" if the previous marker was itself "correct" — one broken
-       link marks everything further out on that finger "incorrect" too,
-       even if its own consecutive distance happens to look fine.
+       individually "correct" in stage 2; if there is no such correct,
+       bonded marker to compare against, or any of those reference distances
+       is out of tolerance, it is "incorrect". Each subsequent marker on
+       the finger is checked against the *previous* marker's actual
+       position, but is only eligible to be "correct" if the previous
+       marker was itself "correct" — one broken link marks everything
+       further out on that finger "incorrect" too, even if its own
+       consecutive distance happens to look fine.
     4. **Gate veto.** A frame that failed the forearm gate (step 1) has
        *every* present marker in it — Forearm included — forced to
        "incorrect", since an untrustworthy plate means nothing in the
@@ -830,9 +873,14 @@ def label_quality_cascade(
     A per-marker temporal (frame-to-frame speed) check is applied on top,
     same as ``label_quality``, before the gate veto (step 4) has final say.
 
-    ``static_markers``, if given, supplements the bone-length and
-    forearm-anchor-distance references with extra frames from a separate
-    (e.g. static/calibration) recording — see ``align_markers_to_labels``.
+    ``static_markers``, if given, supplements the bone-length reference with
+    extra frames from a separate (e.g. static/calibration) recording — see
+    ``align_markers_to_labels``. Deliberately NOT used for the forearm-anchor-
+    distance reference: an anchor distance depends on the palm's pose
+    relative to the forearm (unlike a bone length, which is pose-invariant),
+    so a static calibration pose can sit measurably off from a dynamic
+    trial's anchor distances with no tracking error involved — see the
+    comment above the anchor-reference block for a measured example.
 
     Returns (T, N) status array: 0=missing, 1=incorrect, 2=correct.
     """
@@ -876,14 +924,21 @@ def label_quality_cascade(
         forearm_local_ref = _rolling_local_reference(markers, forearm_pairs, forearm_window)
         forearm_bad_marker = ~present[:, forearm_idxs]
         forearm_verified_bad_marker = np.zeros((T, len(forearm_idxs)), dtype=bool)
+        # Per marker, per frame: how many of its pairs could actually be
+        # judged this frame (both markers present, trustworthy local
+        # reference) and how many of those it was implicated in. Needed to
+        # tell the culprit ("bad in every pair it takes part in") from an
+        # innocent partner ("bad only in the pair it shares with the
+        # culprit") — see below.
+        forearm_pair_evaluable = np.zeros((T, len(forearm_idxs)), dtype=np.int16)
+        forearm_pair_real_bad = np.zeros((T, len(forearm_idxs)), dtype=np.int16)
         idx_pos = {idx: k for k, idx in enumerate(forearm_idxs)}
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
-            for (i, j), (local_med, local_mad) in forearm_local_ref.items():
+            for (i, j), (local_med, local_dev) in forearm_local_ref.items():
                 d = np.linalg.norm(markers[:, i] - markers[:, j], axis=-1)
-                mad_floor = np.nan_to_num(local_mad, nan=0.0)
-                mad_floor[mad_floor == 0] = 1.0  # avoid zero-width tolerance
-                tol = np.maximum(forearm_tol_mad * mad_floor, forearm_tol_mm)
+                dev_floor = np.nan_to_num(local_dev, nan=0.0)
+                dev_floor[dev_floor == 0] = 1.0  # avoid zero-width tolerance
 
                 # Sanity-check the local baseline itself against the global,
                 # ref_frames-based reference — a local median that has
@@ -891,11 +946,35 @@ def label_quality_cascade(
                 # failure got mistaken for a new "normal", not real skin
                 # drift (see docstring). Skip if there's no global reference
                 # for this pair to sanity-check against.
-                global_med, _global_mad = bone_ref.get((i, j), (None, None))
+                global_med, global_mad = bone_ref.get((i, j), (None, None))
                 if global_med is not None:
                     local_untrustworthy = np.isfinite(local_med) & (np.abs(local_med - global_med) > forearm_sanity_mm)
+                    # ...and the same treatment for the local *spread*
+                    # (`local_dev` — a residual scale, not a windowed MAD;
+                    # see `_rolling_local_reference`). Being a median it
+                    # survives a minority of bad frames in the window, but
+                    # past that it inflates, and since the tolerance is a
+                    # multiple of it, the check would silently get *more*
+                    # permissive exactly where the data is dirtiest —
+                    # failing toward "wave it through", the opposite of this
+                    # cascade's intended bias. So it's capped at
+                    # `forearm_dev_inflation` times the global reference
+                    # MAD; real skin drift is a slow shift of the median and
+                    # leaves this residual scale alone, so quiet and
+                    # drifting windows alike are unaffected by the cap.
+                    # Capping (rather than declaring the pair unverifiable,
+                    # as an out-of-range median does) keeps the frame
+                    # *evaluable*: an inflated spread is no reason to stop
+                    # measuring, only a reason to withhold the extra slack.
+                    # The `forearm_tol_mm` floor below still guarantees a
+                    # workable tolerance if the global MAD is itself tiny
+                    # (ref frames close together in time). Measured: the cap
+                    # only binds past ~50% contamination of a window.
+                    dev_floor = np.minimum(dev_floor, forearm_dev_inflation * global_mad)
                 else:
                     local_untrustworthy = np.zeros(T, dtype=bool)
+
+                tol = np.maximum(forearm_tol_mad * dev_floor, forearm_tol_mm)
 
                 both_present = present[:, i] & present[:, j]
                 # A local reference is only trustworthy to measure a real
@@ -912,6 +991,11 @@ def label_quality_cascade(
                 forearm_bad_marker[bad_pair, idx_pos[j]] = True
                 forearm_verified_bad_marker[real_bad, idx_pos[i]] = True
                 forearm_verified_bad_marker[real_bad, idx_pos[j]] = True
+
+                evaluable = both_present & has_trustworthy_local & np.isfinite(d)
+                for pos in (idx_pos[i], idx_pos[j]):
+                    forearm_pair_evaluable[:, pos] += evaluable
+                    forearm_pair_real_bad[:, pos] += real_bad
         # A pairwise check can only implicate a *pair*, not tell you which
         # of the two actually moved — unlike Palm, Forearm markers have no
         # independent anchor to break that tie with. The real culprit in a
@@ -921,9 +1005,14 @@ def label_quality_cascade(
         # confirmed-bad (blocking stickiness) when it's implicated in all
         # of its pairs; a marker only partly implicated stays eligible,
         # same as before this real/unverifiable split existed.
-        n_forearm = len(forearm_idxs)
-        fully_implicated = forearm_verified_bad_marker.sum(axis=1) == max(n_forearm - 1, 0)
-        forearm_confirmed_bad_marker = forearm_verified_bad_marker & fully_implicated[:, None]
+        # Implicated in *every* pair it could be judged in this frame (and in
+        # at least one) — counted per marker over its own pairs, not over
+        # how many markers happen to be flagged in the frame.
+        fully_implicated = (
+            (forearm_pair_evaluable > 0)
+            & (forearm_pair_real_bad == forearm_pair_evaluable)
+        )
+        forearm_confirmed_bad_marker = forearm_verified_bad_marker & fully_implicated
         forearm_gate_ok = forearm_bad_marker.sum(axis=1) < forearm_max_bad
     else:
         forearm_bad_marker = np.zeros((T, 0), dtype=bool)
@@ -942,17 +1031,22 @@ def label_quality_cascade(
 
     ref_ok = ref_frames[forearm_gate_ok[ref_frames]] if forearm_idxs else np.array([], dtype=int)
 
-    # A static recording has no frame-level forearm_gate_ok computed for it,
-    # so just require all Forearm markers present that frame — good enough
-    # for a calibration/static trial, which is expected to be stable
-    # throughout.
-    static_centroid = static_present = None
-    if static_markers is not None and forearm_idxs:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            static_present = np.isfinite(static_markers[:, forearm_idxs]).all(axis=(1, 2))
-            static_centroid = np.nanmean(static_markers[:, forearm_idxs], axis=1)
-
+    # Deliberately NOT pooled with static_markers, unlike the bone-length
+    # reference above. Bone lengths are pose-invariant (a rigid segment
+    # measures the same regardless of how the hand is posed), so a static
+    # recording is a legitimate extra sample of them. An anchor distance
+    # (Palm/finger-base marker to the Forearm centroid) is not pose-invariant
+    # in the same way — the palm's angle relative to the forearm changes
+    # with wrist/thumb pose, so a static calibration pose and a dynamic HOI
+    # trial can genuinely sit at different anchor distances even with no
+    # tracking error at all. Measured on P4/Trial 1 HOI: pooling 362 static
+    # frames against 3 trial ref-frames left Palm3's anchor reference
+    # 9.5mm from the trial-only value (which itself was within ~1-7mm of
+    # real HOI frames) and made every anchor_tol_mm setting wrong somewhere
+    # — too tight and it fails on the static-pose bias throughout the trial,
+    # too loose and it stops catching real Palm/finger-base errors. So the
+    # anchor reference draws only from this trial's own (forearm-gate-passing)
+    # ref_frames.
     finger_first_idxs = [digits[min(digits)] for digits in fingers.values()]
     anchor_ok: dict[int, np.ndarray] = {}  # idx -> (T,) bool, distance-to-centroid within tolerance
     # idx -> (T,) bool, a REAL measured deviation (not just "couldn't verify"
@@ -963,10 +1057,6 @@ def label_quality_cascade(
         for idx in palm_idxs + finger_first_idxs:
             d_ref = np.linalg.norm(markers[ref_ok, idx] - centroid[ref_ok], axis=-1)
             d_ref = d_ref[np.isfinite(d_ref)]
-            if static_centroid is not None:
-                d_static = np.linalg.norm(static_markers[:, idx] - static_centroid, axis=-1)
-                d_static = d_static[static_present & np.isfinite(d_static)]
-                d_ref = np.concatenate([d_ref, d_static])
             if d_ref.size < 2:
                 anchor_ok[idx] = np.zeros(T, dtype=bool)  # not enough reference data to verify
                 anchor_verified_bad[idx] = np.zeros(T, dtype=bool)  # can't verify != verified wrong
@@ -1025,7 +1115,14 @@ def label_quality_cascade(
                 # bones to the *other* fingers' base markers, so the check
                 # below wouldn't have anything meaningful to compare it
                 # against anyway).
-                prev_idx, prev_ok = first_idx, status[:, first_idx] == 2
+                # Gate explicitly: stages 1/2 only *write* status for frames
+                # that passed the forearm gate, so a vetoed frame still reads
+                # back as 2 here (the veto runs later). Without `gate_ok` the
+                # chain below would propagate trust it never had and could
+                # stamp a stickiness-blocking `verified_bad` on the thumb in
+                # a frame where nothing was trustworthy.
+                prev_idx = first_idx
+                prev_ok = gate_ok & (status[:, first_idx] == 2)
                 prev_verified_bad = verified_bad[:, first_idx]
             else:
                 # Finger-base marker: must be within tolerance of every
@@ -1035,16 +1132,12 @@ def label_quality_cascade(
                 # so its correctness can't silently inflate the count
                 # without ever being checked against). No individually-
                 # correct, bonded marker to compare against means it can't
-                # be confirmed, so it's marked incorrect (no fallback) —
-                # but that's a lack-of-anchor situation, not positive
-                # evidence, unless its own anchor-to-centroid distance (or
-                # a comparison against an actually-correct palm marker) is
-                # itself a real measured failure.
+                # be confirmed, so it's marked incorrect (no fallback).
                 relevant = [k for k, palm_idx in enumerate(palm_idxs)
                             if bone_ref.get((palm_idx, first_idx)) is not None]
                 n_correct_palm = palm_marker_ok[:, relevant].sum(axis=1) if relevant else np.zeros(T, dtype=int)
-                chain_ok = gate_ok & (n_correct_palm > 0) & anchor_ok[first_idx]
-                chain_verified_bad = anchor_verified_bad[first_idx].copy()
+                chain_ok = gate_ok & (n_correct_palm > 0)
+                chain_verified_bad = np.zeros(T, dtype=bool)
                 for k in relevant:
                     palm_idx = palm_idxs[k]
                     med, mad = bone_ref[(palm_idx, first_idx)]
@@ -1206,13 +1299,14 @@ def debug_frame_cascade(
     forearm_max_bad: int = 2,
     forearm_window: int = 301,
     forearm_sanity_mm: float = 10.0,
+    forearm_dev_inflation: float = 3.0,
     anchor_tol_mad: float = 1.5,
-    anchor_tol_mm: float = 6.0,
+    anchor_tol_mm: float = 12.0,
     palm_min_present: int = 2,
     palm_min_bonelength_ok: int = 2,
     palm_min_anchor_ok: int = 2,
     bone_tol_mad: float = 4.0,
-    bone_tol_mm: float = 7.5,
+    bone_tol_mm: float = 10.0,
 ) -> None:
     """Print exactly how ``label_quality_cascade`` reasoned about frame
     ``t`` — every pairwise/anchor distance it checked, the reference it
@@ -1267,17 +1361,21 @@ def debug_frame_cascade(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
         for i, j in forearm_pairs:
-            local_med, local_mad = forearm_local_ref[(i, j)]
+            local_med, local_dev = forearm_local_ref[(i, j)]
             d = np.linalg.norm(markers[:, i] - markers[:, j], axis=-1)
-            mad_floor = np.nan_to_num(local_mad, nan=0.0)
-            mad_floor[mad_floor == 0] = 1.0
-            tol = np.maximum(forearm_tol_mad * mad_floor, forearm_tol_mm)
+            dev_floor = np.nan_to_num(local_dev, nan=0.0)
+            dev_floor[dev_floor == 0] = 1.0
 
-            global_med, _global_mad = bone_ref.get((i, j), (None, None))
+            global_med, global_mad = bone_ref.get((i, j), (None, None))
             if global_med is not None:
                 local_untrustworthy = np.isfinite(local_med) & (np.abs(local_med - global_med) > forearm_sanity_mm)
+                dev_capped = dev_floor > forearm_dev_inflation * global_mad
+                dev_floor = np.minimum(dev_floor, forearm_dev_inflation * global_mad)
             else:
                 local_untrustworthy = np.zeros(T, dtype=bool)
+                dev_capped = np.zeros(T, dtype=bool)
+
+            tol = np.maximum(forearm_tol_mad * dev_floor, forearm_tol_mm)
 
             bad_pair = (
                 present[:, i] & present[:, j]
@@ -1287,7 +1385,7 @@ def debug_frame_cascade(
             forearm_bad_marker[bad_pair, idx_pos[j]] = True
 
             # Print just frame t's numbers.
-            med_t, mad_t = local_med[t], local_mad[t]
+            med_t, dev_t = local_med[t], local_dev[t]
             if not np.isfinite(med_t):
                 print(f"    {labels[i]} <-> {labels[j]}: NO LOCAL REFERENCE "
                       f"(too few valid frames in the {forearm_window}-frame window here)")
@@ -1300,8 +1398,12 @@ def debug_frame_cascade(
             elif local_untrustworthy[t]:
                 verdict += (f" (local baseline itself is {abs(med_t - global_med):.1f}mm from the "
                             f"global reference {global_med:.1f}mm — untrusted, sanity cap ±{forearm_sanity_mm:.1f}mm)")
-            print(f"    {labels[i]} <-> {labels[j]}: d={d[t]:.1f}mm  local_ref={med_t:.1f}±{mad_t:.2f}mm  "
-                  f"tol=±{tol_t:.1f}mm  -> {verdict}")
+            cap_str = ""
+            if dev_capped[t]:
+                cap_str = (f"  [local spread capped: {dev_t:.2f}mm > "
+                           f"{forearm_dev_inflation:.1f}x global MAD {global_mad:.2f}mm]")
+            print(f"    {labels[i]} <-> {labels[j]}: d={d[t]:.1f}mm  local_ref={med_t:.1f}±{dev_t:.2f}mm  "
+                  f"tol=±{tol_t:.1f}mm  -> {verdict}{cap_str}")
     forearm_gate_ok_all = forearm_bad_marker.sum(axis=1) < forearm_max_bad if forearm_idxs else np.zeros(T, bool)
     n_bad = int(forearm_bad_marker[t].sum()) if forearm_idxs else 0
     for k, idx in enumerate(forearm_idxs):
@@ -1316,13 +1418,10 @@ def debug_frame_cascade(
         warnings.simplefilter("ignore", category=RuntimeWarning)
         centroid = np.nanmean(markers[:, forearm_idxs], axis=1) if forearm_idxs else np.full((T, 3), np.nan)
     ref_ok = ref_frames[forearm_gate_ok_all[ref_frames]] if forearm_idxs else np.array([], dtype=int)
-    static_centroid = static_present = None
-    if static_markers is not None and forearm_idxs:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            static_present = np.isfinite(static_markers[:, forearm_idxs]).all(axis=(1, 2))
-            static_centroid = np.nanmean(static_markers[:, forearm_idxs], axis=1)
-
+    # Deliberately trial-only, not pooled with static_markers — see the
+    # matching comment in label_quality_cascade for why an anchor distance
+    # (unlike bone length) isn't pose-invariant enough to borrow from a
+    # static recording.
     finger_first_idxs = [digits[min(digits)] for digits in fingers.values()]
     anchor_ok: dict[int, np.ndarray] = {}
     anchor_ref_info: dict[int, tuple[float, float, int]] = {}
@@ -1331,10 +1430,6 @@ def debug_frame_cascade(
         for idx in palm_idxs + finger_first_idxs:
             d_ref = np.linalg.norm(markers[ref_ok, idx] - centroid[ref_ok], axis=-1)
             d_ref = d_ref[np.isfinite(d_ref)]
-            if static_centroid is not None:
-                d_static = np.linalg.norm(static_markers[:, idx] - static_centroid, axis=-1)
-                d_static = d_static[static_present & np.isfinite(d_static)]
-                d_ref = np.concatenate([d_ref, d_static])
             if d_ref.size < 2:
                 anchor_ok[idx] = np.zeros(T, dtype=bool)
                 anchor_ref_info[idx] = (float("nan"), float("nan"), int(d_ref.size))

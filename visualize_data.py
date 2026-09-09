@@ -38,7 +38,7 @@ PARTICIPANTS = ["all"]  # e.g. ["P7", "P8"] to narrow it down
 # them — that column is the trial's identity, so no canonicalisation or
 # keyword guessing is involved anywhere. Note the inconsistent spacing
 # ("Trial 1" vs "Trial2") is the file's, and is deliberately preserved.
-TRIALS = ["Trial 1 Hands only", "Trial 1 HOI", "Trial2 Hands only", "Trial2 HOI"]
+TRIALS = ["Trial 1 HOI", "Trial2 HOI", "Trial 1 handsonly", "Trial2 handsonly"]
 
 # Everything this script produces (per-trial animation HTML, the summary
 # plot, the before/after statistics) lands here. "cascade_only" = the
