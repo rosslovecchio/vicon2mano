@@ -367,16 +367,24 @@ def model_reliability(
 def relabel_frame(
     frame_markers_m: np.ndarray,   # (N, 3) metres
     predicted_m: np.ndarray,       # (N, 3) metres, NaN where unpredictable
-    flagged: np.ndarray,           # (N,) bool — markers to reconsider
+    candidate_mask: np.ndarray,    # (N,) bool — observed positions eligible to move
+    slot_mask: np.ndarray | None = None,   # (N,) bool — labels eligible to receive a
+                                            # new position; None => same as candidate_mask
     *,
     max_dist_m: float = 0.030,
 ) -> tuple[dict[int, int], dict[int, float]]:
-    """Reassign flagged marker *positions* to the labels they best fit.
+    """Reassign marker *positions* to the labels they best fit.
 
-    Solves a small assignment problem between the positions currently
-    carried by flagged markers and the predicted positions of those same
-    labels. Only pairs within ``max_dist_m`` are considered, and the
+    Solves a small assignment problem between the observed positions allowed
+    by ``candidate_mask`` and the predicted positions of the labels allowed
+    by ``slot_mask``. Only pairs within ``max_dist_m`` are considered, and the
     identity mapping is omitted.
+
+    The two original callers (cascade-flagged relabelling) pass the same
+    ``flagged`` mask for both — a flagged position may only be reassigned to
+    another flagged label. Label-agnostic fitting instead passes "every
+    present marker" for both, so a marker can move even if its own label was
+    never flagged, as long as the model prefers a different position for it.
 
     Returns ({marker_slot: source_marker_slot}, {marker_slot: distance_m}) —
     "the data now under label A should come from the position currently
@@ -386,8 +394,10 @@ def relabel_frame(
     moves landed at 5.5mm and 5.9mm while every rejected option was 33mm or
     worse, against a model accurate to ~12mm at the 95th percentile.
     """
-    cand = np.flatnonzero(flagged & np.isfinite(frame_markers_m).all(axis=1))
-    slots = np.flatnonzero(flagged & np.isfinite(predicted_m).all(axis=1))
+    if slot_mask is None:
+        slot_mask = candidate_mask
+    cand = np.flatnonzero(candidate_mask & np.isfinite(frame_markers_m).all(axis=1))
+    slots = np.flatnonzero(slot_mask & np.isfinite(predicted_m).all(axis=1))
     if cand.size == 0 or slots.size == 0:
         return {}, {}
 
@@ -408,6 +418,73 @@ def relabel_frame(
             out[slot] = src
             dists[slot] = float(cost[r, c])
     return out, dists
+
+
+def relabel_frame_iterative(
+    markers_mm: np.ndarray,        # (T, N, 3) full recording
+    t: int,
+    labels: list[str],
+    m2j: dict[int, int],
+    offsets: dict[int, np.ndarray],
+    betas: np.ndarray,
+    *,
+    seed_mask: np.ndarray,         # (N,) bool — cascade-CORRECT this frame; iter-1 fit source
+    mano_dir: str,
+    side: str = "right",
+    max_dist_m: float = 0.030,
+    max_iters: int = 3,
+    min_trusted: int = 6,
+) -> tuple[dict[int, int], dict[int, float], int]:
+    """Label-agnostic relabelling for one frame, reference/test implementation.
+
+    Iteration 1 fits pose on ``seed_mask`` only (identical to the existing
+    cascade-CORRECT seed fit), predicts every mapped marker, then runs
+    ``relabel_frame`` with *every present marker* eligible on both sides of
+    the assignment — not just cascade-flagged ones. This is the actual
+    label-agnostic step: a marker never flagged by the cascade can still be
+    moved if the model prefers a different position for it.
+
+    Each further iteration applies the previous mapping to a working copy of
+    the frame, refits pose (betas frozen) on that full reassigned frame, and
+    reassigns again. Stops early once the mapping stops changing.
+
+    This is a single-frame reference implementation, useful for tests and
+    for reasoning about one frame in isolation (see
+    ``label_marker_quality.debug_frame_cascade`` for the analogous per-frame
+    tool on the cascade side). The trial-level driver in
+    ``scripts/relabel_with_mano.py`` does the batched multi-frame equivalent
+    for performance — ``fit_frames``/``predict_marker_positions`` are already
+    vectorized over frames, so refitting one frame at a time here would be
+    far slower across a whole trial.
+
+    Returns (final mapping, final distances, iterations actually run). An
+    empty mapping on return means either nothing was reassignable or the
+    frame had fewer than ``min_trusted`` seed markers (mirrors the existing
+    under-constrained-fit guard in ``_assign_and_verify``).
+    """
+    if int(seed_mask.sum()) < min_trusted:
+        return {}, {}, 0
+
+    present = np.isfinite(markers_mm[t]).all(axis=1)
+    working = markers_mm.copy()
+    working[t][~seed_mask] = np.nan
+
+    prev_mapping: dict[int, int] | None = None
+    mapping: dict[int, int] = {}
+    dists: dict[int, float] = {}
+    n_iters = 0
+    for n_iters in range(1, max_iters + 1):
+        res = fit_frames(working, labels, np.array([t]), mano_dir=mano_dir,
+                         side=side, betas=betas)
+        pred_t = predict_marker_positions(res.joints, offsets, m2j, len(labels))[0]
+        mapping, dists = relabel_frame(markers_mm[t] * 1e-3, pred_t, present,
+                                       max_dist_m=max_dist_m)
+        if mapping == prev_mapping:
+            break
+        prev_mapping = mapping
+        working = markers_mm.copy()
+        apply_relabel(working, t, mapping)
+    return mapping, dists, n_iters
 
 
 def apply_relabel(markers: np.ndarray, frame: int, mapping: dict[int, int]) -> None:

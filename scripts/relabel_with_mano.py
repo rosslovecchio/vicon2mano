@@ -204,7 +204,7 @@ def relabel_trial(participant: str, trial: str, *, min_correct_pct: float,
                    n_out: int, min_correct_calib: int, max_dist_mm: float,
                    min_trusted: int = 6, side: str = "right",
                    fit_on: str = "correct", skip_unusable: bool = True,
-                   passes: int = 2, confident_mm: float = 12.0,
+                   passes: int = 3, confident_mm: float = 12.0,
                    frame_start: int | None = None, frame_end: int | None = None,
                    last_fraction: float | None = None):
     """Fit, predict, then assign at one gate value. See _prepare_trial."""
@@ -426,7 +426,13 @@ def _prepare_trial(participant: str, trial: str, *, min_correct_pct: float,
     # redone, and everything is re-predicted — so a finger gets a foothold
     # from its own confidently-fixed markers rather than from arbitrary ones.
     n_confident = 0
-    if passes >= 2:
+    n_iters_run = 0
+    if fit_on == "label-agnostic":
+        res_t, pred, n_iters_run = _iterate_label_agnostic(
+            markers, labels, status, targets, pred, res_t, m2j, offsets,
+            res_c.betas, mano_dir=str(MANO_DIR), side=side,
+            max_dist_mm=max_dist_mm, max_iters=passes, min_trusted=min_trusted)
+    elif passes >= 2:
         t0 = time.time()
         confident = np.zeros(markers.shape[:2], dtype=bool)
         repaired = markers.copy()
@@ -461,7 +467,87 @@ def _prepare_trial(participant: str, trial: str, *, min_correct_pct: float,
                 bones=bones, status=status, pct=pct, m2j=m2j, offsets=offsets,
                 spreads=spreads, frame_idx=frame_idx, targets=targets,
                 res_t=res_t, pred=pred, ref=ref, static_markers=static_markers,
-                n_confident=n_confident)
+                n_confident=n_confident, n_iters_run=n_iters_run)
+
+
+def _iterate_label_agnostic(markers, labels, status, targets, pred, res_t, m2j,
+                            offsets, betas, *, mano_dir, side, max_dist_mm,
+                            max_iters, min_trusted):
+    """Batched multi-frame equivalent of ``mr.relabel_frame_iterative``.
+
+    Iteration 1 uses the pose already fitted on cascade-CORRECT markers
+    (``res_t``/``pred``, passed in from the seed fit above) and reassigns
+    with *every present marker* eligible, not just cascade-flagged ones —
+    the label-agnostic step. Each further iteration applies the previous
+    mapping, refits pose (betas frozen) on the resulting full frames, and
+    reassigns again. Stops early once every frame's mapping is unchanged
+    from the iteration before.
+
+    Frames with fewer than ``min_trusted`` cascade-CORRECT markers are
+    skipped every iteration (mirrors ``_assign_and_verify``'s under-
+    constrained-fit guard) and keep their pass-1 prediction.
+    """
+    max_dist_m = max_dist_mm / 1000.0
+    present = np.isfinite(markers[targets]).all(axis=-1)          # (len(targets), N)
+    n_trusted = (status[targets] == CORRECT).sum(axis=1)
+    eligible = n_trusted >= min_trusted
+
+    mapping_by_frame: dict[int, dict[int, int]] = {}
+    n_iters_run = 0
+    for it in range(1, max_iters + 1):
+        n_iters_run = it
+        new_mapping_by_frame: dict[int, dict[int, int]] = {}
+        all_dists: list[float] = []
+        for k, t in enumerate(targets):
+            if not eligible[k]:
+                continue
+            mapping, dists = mr.relabel_frame(
+                markers[t] * 1e-3, pred[k], present[k], max_dist_m=max_dist_m)
+            if mapping:
+                new_mapping_by_frame[int(t)] = mapping
+                all_dists.extend(dists.values())
+
+        n_observed = int(present.sum())
+        n_assigned = sum(len(m) for m in new_mapping_by_frame.values())
+        n_changed = sum(
+            1 for t, m in new_mapping_by_frame.items()
+            if mapping_by_frame.get(t) != m
+        ) + sum(1 for t in mapping_by_frame if t not in new_mapping_by_frame)
+        dist_mm = np.array(all_dists) * 1000.0
+        dist_summary = (f"mean {dist_mm.mean():.1f}mm p95 {np.percentile(dist_mm, 95):.1f}mm"
+                        if dist_mm.size else "n/a")
+        print(f"  label-agnostic iter {it}/{max_iters}: {n_observed} observed markers "
+              f"across {int(eligible.sum())} eligible frames, {n_assigned} assigned "
+              f"({dist_summary}), {n_changed} frame(s) changed since previous iter")
+
+        converged = new_mapping_by_frame == mapping_by_frame
+        mapping_by_frame = new_mapping_by_frame
+        if converged:
+            print(f"  label-agnostic: assignments stable after {it}/{max_iters} iterations")
+            break
+
+        # Build the refit input frame by frame: a slot that was reassigned
+        # this iteration contributes its new (permuted) position; every
+        # other slot contributes its original position only if the cascade
+        # already trusts it — an un-reassigned, cascade-INCORRECT slot never
+        # feeds the fit, same rule as the seed fit uses.
+        working = markers.copy()
+        working[status != CORRECT] = np.nan
+        for t, mapping in mapping_by_frame.items():
+            snapshot = markers[t]
+            for slot, src in mapping.items():
+                working[t, slot] = snapshot[src]
+
+        res_t = mr.fit_frames(working, labels, targets, mano_dir=mano_dir,
+                              side=side, betas=betas)
+        pred = mr.predict_marker_positions(res_t.joints, offsets, m2j, len(labels))
+    else:
+        print(f"  label-agnostic: did not converge within {max_iters} iterations")
+
+    total_moved = sum(len(m) for m in mapping_by_frame.values())
+    print(f"  label-agnostic: {total_moved} marker-instances reassigned across "
+          f"{len(mapping_by_frame)} frames after {n_iters_run} iteration(s)")
+    return res_t, pred, n_iters_run
 
 
 def _assign_and_verify(ctx, *, max_dist_mm, min_trusted: int = 6,
@@ -618,7 +704,8 @@ def _assign_and_verify(ctx, *, max_dist_mm, min_trusted: int = 6,
                              now_ok=now_ok, flagged=n_flagged,
                              ratio=rel["ratio"], verdict=rel["verdict"],
                              p95_err_mm=rel["p95_err_mm"], spacing_mm=rel["spacing_mm"],
-                             rejected=bool(regressed)))
+                             rejected=bool(regressed),
+                             n_iters_run=ctx.get("n_iters_run", 0)))
 
 
 # ---- animation -------------------------------------------------------------
@@ -809,8 +896,8 @@ def main(argv=None):
     global OUT_DIR
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--participant", default="P7")
-    ap.add_argument("--trial", default="Trial 1 Hands only",
+    ap.add_argument("--participant", default="P4")
+    ap.add_argument("--trial", default="Trial 1 HOI",
                     help="manual_frames.csv Session name, e.g. 'Trial 1 HOI'")
     ap.add_argument("--min-correct-pct", type=float, default=50.0,
                     help="only repair frames at least this %% cascade-correct")
@@ -824,11 +911,15 @@ def main(argv=None):
                          "(P7: 78.3%% correct at 8mm vs 86.2%% at 30mm) because "
                          "the assignment is solved jointly per frame, not as "
                          "independent pairwise choices")
-    ap.add_argument("--fit-on", default="correct", choices=["correct", "all"],
+    ap.add_argument("--fit-on", default="correct",
+                    choices=["correct", "all", "label-agnostic"],
                     help="which markers the pose fit may see: 'correct' hides "
                          "everything the cascade flagged (safe, but blind to a "
                          "finger whose markers are all flagged); 'all' trusts "
-                         "the labels as given")
+                         "the labels as given; 'label-agnostic' seeds from "
+                         "cascade-CORRECT markers, then iterates fit -> predict "
+                         "-> Hungarian-assign every present marker (not just "
+                         "flagged ones) -> refit, for up to --passes rounds")
     ap.add_argument("--frame-start", type=int, default=None,
                     help="first frame to repair/animate (default: 0)")
     ap.add_argument("--frame-end", type=int, default=None,
@@ -836,10 +927,12 @@ def main(argv=None):
     ap.add_argument("--last-fraction", type=float, default=None,
                     help="repair only the last F of the recording, e.g. 0.333 "
                          "for the final third; overrides --frame-start")
-    ap.add_argument("--passes", type=int, default=2, choices=[1, 2],
-                    help="2 = after pass one, re-admit confidently repaired "
-                         "markers into the fit and re-predict, so a finger "
-                         "whose markers were all flagged stops being invisible")
+    ap.add_argument("--passes", type=int, default=3,
+                    help="for --fit-on correct/all: 1 or 2, where 2 re-admits "
+                         "confidently repaired markers into the fit and "
+                         "re-predicts once. For --fit-on label-agnostic: the "
+                         "max number of fit/assign/refit iterations (stops "
+                         "early on convergence); 3 is a reasonable default")
     ap.add_argument("--confident-mm", type=float, default=12.0,
                     help="a pass-one move closer than this counts as confident "
                          "and is fed back into the pass-two fit")
