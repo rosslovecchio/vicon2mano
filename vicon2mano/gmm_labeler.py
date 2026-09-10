@@ -78,6 +78,30 @@ def to_local(markers_mm: np.ndarray, R: np.ndarray, origin: np.ndarray) -> np.nd
     return np.einsum("tab,tnb->tna", R, delta)
 
 
+def mask_untrustworthy_frames(local_mm: np.ndarray, anchor_valid: np.ndarray) -> np.ndarray:
+    """NaN out every marker's local position at frames with bad anchors.
+
+    ``rigid_frames``/``to_local`` compute a coordinate frame from 3 anchor
+    markers unconditionally -- if those anchors are themselves mislabelled
+    that frame (a real failure mode: see the P7/Trial1_handsonly
+    Ring1<->Pinky1 investigation, where a rolling mislabelling cascade
+    across Palm1/Palm2/Thumb1 corrupted the local frame for ~1600 frames),
+    every other marker's local coordinate silently becomes garbage with no
+    signal that anything is wrong.
+
+    Pass a per-frame boolean ``anchor_valid`` (e.g. from
+    ``label_quality_cascade``'s CORRECT verdict on the anchor labels) to
+    NaN those frames out here, upstream of both training
+    (``fit_marker_gmms`` already skips NaN samples) and evaluation
+    (``_build_hypotheses`` already treats a NaN observation as an
+    occlusion, extrapolated via the Kalman predict step) -- no separate
+    handling needed in either path.
+    """
+    out = local_mm.copy()
+    out[~anchor_valid] = np.nan
+    return out
+
+
 def to_world(local_mm: np.ndarray, R: np.ndarray, origin: np.ndarray) -> np.ndarray:
     """Local -> world, inverse of :func:`to_local`.
 
@@ -495,6 +519,53 @@ def viterbi_select(
 # swapping identity, not recovering labels from a wholly anonymous cloud.
 
 
+def _build_hypotheses(
+    local: np.ndarray,             # (T, N, 3)
+    gmms: dict[int, GMMParams],
+    kept: list[int],
+    *,
+    n_hypotheses: int,
+    theta_min: float,
+    init_frame: int,
+) -> tuple[list[list[tuple[np.ndarray, float]]], list[np.ndarray]]:
+    """Per-frame hypotheses + observation arrays, occlusion-safe.
+
+    A marker occluded at frame ``t`` (non-finite local position -- a real
+    Vicon gap) is dropped from that frame's *cost matrix columns* before
+    calling ``top_n_assignments`` (``linear_sum_assignment`` rejects NaN
+    entries outright), then remapped back to ``kept``-index space so
+    hypothesis assignment values always mean "index into ``kept``",
+    consistently across frames regardless of which markers were visible.
+    An occluded marker's own slot simply comes back -1 that frame, which
+    ``viterbi_select`` treats as "extrapolate via the Kalman predict step"
+    -- the paper's Section 3.2 occlusion handling.
+
+    ``obs_per_frame`` keeps the *full* (possibly-NaN) ``(K, 3)`` row per
+    frame (not the compacted present-only subset) so hypothesis assignment
+    values -- already in ``kept``-index space -- index directly into it.
+    """
+    hyps_per_frame: list[list[tuple[np.ndarray, float]]] = []
+    obs_per_frame: list[np.ndarray] = []
+    T = local.shape[0]
+    for t in range(T):
+        obs_full = local[t, kept]                       # (K, 3), K == len(kept)
+        finite = np.isfinite(obs_full).all(axis=1)
+        present = np.flatnonzero(finite)
+        cost = -loglik_matrix(obs_full[present], gmms, kept, theta_min=theta_min)
+        n_here = 1 if t == init_frame else n_hypotheses
+        raw = top_n_assignments(cost, n_here)
+        remapped = []
+        for a, c in raw:
+            if present.size:
+                idx_arr = present[np.clip(a, 0, len(present) - 1)]
+            else:
+                idx_arr = np.full_like(a, -1)
+            remapped.append((np.where(a >= 0, idx_arr, -1), c))
+        hyps_per_frame.append(remapped)
+        obs_per_frame.append(obs_full)
+    return hyps_per_frame, obs_per_frame
+
+
 def relabel_sequence(
     markers_mm: np.ndarray,        # (T, N, 3)
     labels: list[str],
@@ -508,40 +579,45 @@ def relabel_sequence(
     process_var: float = 1.0,
     obs_var: float = 25.0,
     init_frame: int = 0,
+    anchor_valid: np.ndarray | None = None,
 ) -> np.ndarray:
     """Per-frame identity assignment for ``marker_idxs`` via GMM + Viterbi.
 
     Returns ``(T, len(marker_idxs))``: entry ``[t, i]`` is the index (into
     ``marker_idxs``) of the column whose *observed position* should occupy
-    slot ``i`` at frame ``t``. Feed the result through
-    ``mano_relabel.apply_relabel`` (same ``{slot: source}`` convention,
-    after converting to marker-index space) to actually permute positions.
+    slot ``i`` at frame ``t`` (-1 if occluded that frame). Feed the result
+    through ``mano_relabel.apply_relabel`` (same ``{slot: source}``
+    convention, after converting to marker-index space) to actually permute
+    positions.
 
     Markers with no fitted GMM (too few reference samples -- see
     ``fit_marker_gmms``) are dropped from ``marker_idxs`` before assignment;
     check the returned array's second dimension against the input.
+
+    ``anchor_valid``: optional ``(T,)`` bool, per-frame trustworthiness of
+    the 3 anchor markers themselves (e.g. from a cascade CORRECT verdict on
+    ``anchor_labels``). Frames where they are *not* trustworthy have their
+    local coordinates NaN'd via ``mask_untrustworthy_frames`` before fitting
+    or assigning -- see that function's docstring for why this matters (a
+    real rolling-mislabelling episode found on P7/Trial1_handsonly
+    corrupted the anchors themselves for ~1600 frames, which silently wrecks
+    every other marker's local coordinate if left unguarded).
     """
     name_to_idx = {l: i for i, l in enumerate(labels)}
     origin_i, x_i, y_i = (name_to_idx[a] for a in anchor_labels)
     R, o = rigid_frames(markers_mm, origin_i, x_i, y_i)
     local = to_local(markers_mm, R, o)
+    if anchor_valid is not None:
+        local = mask_untrustworthy_frames(local, anchor_valid)
 
     gmms = fit_marker_gmms(local, marker_idxs, ref_frames, n_components=n_components)
     kept = [m for m in marker_idxs if m in gmms]
     if not kept:
         return np.zeros((markers_mm.shape[0], 0), dtype=int)
 
-    T = markers_mm.shape[0]
-    hyps_per_frame = []
-    obs_per_frame = []
-    for t in range(T):
-        obs = local[t, kept]                          # (K, 3), K == len(kept)
-        ll = loglik_matrix(obs, gmms, kept, theta_min=theta_min)
-        cost = -ll
-        n_here = 1 if t == init_frame else n_hypotheses
-        hyps_per_frame.append(top_n_assignments(cost, n_here))
-        obs_per_frame.append(obs)
-
+    hyps_per_frame, obs_per_frame = _build_hypotheses(
+        local, gmms, kept, n_hypotheses=n_hypotheses, theta_min=theta_min,
+        init_frame=init_frame)
     init_positions = {m: local[init_frame, m] for m in kept}
     result = viterbi_select(
         kept, hyps_per_frame, obs_per_frame, init_positions,
@@ -576,11 +652,15 @@ class GMMLabeler:
         marker_idxs: list[int],
         *,
         n_components: int = 3,
+        anchor_valid: np.ndarray | None = None,
     ) -> "GMMLabeler":
+        """See ``relabel_sequence`` for the ``anchor_valid`` contract."""
         name_to_idx = {l: i for i, l in enumerate(labels)}
         origin_i, x_i, y_i = (name_to_idx[a] for a in anchor_labels)
         R, o = rigid_frames(markers_mm, origin_i, x_i, y_i)
         local = to_local(markers_mm, R, o)
+        if anchor_valid is not None:
+            local = mask_untrustworthy_frames(local, anchor_valid)
         gmms = fit_marker_gmms(local, marker_idxs, ref_frames, n_components=n_components)
         return cls(gmms, [m for m in marker_idxs if m in gmms], anchor_labels)
 
@@ -593,22 +673,19 @@ class GMMLabeler:
         theta_min: float = -30.0,
         process_var: float = 1.0,
         obs_var: float = 25.0,
+        anchor_valid: np.ndarray | None = None,
         init_frame: int = 0,
     ) -> np.ndarray:
         name_to_idx = {l: i for i, l in enumerate(labels)}
         origin_i, x_i, y_i = (name_to_idx[a] for a in self.anchor_labels)
         R, o = rigid_frames(markers_mm, origin_i, x_i, y_i)
         local = to_local(markers_mm, R, o)
+        if anchor_valid is not None:
+            local = mask_untrustworthy_frames(local, anchor_valid)
 
-        T = markers_mm.shape[0]
-        hyps_per_frame, obs_per_frame = [], []
-        for t in range(T):
-            obs = local[t, self.marker_idxs]
-            cost = -loglik_matrix(obs, self.gmms, self.marker_idxs, theta_min=theta_min)
-            n_here = 1 if t == init_frame else n_hypotheses
-            hyps_per_frame.append(top_n_assignments(cost, n_here))
-            obs_per_frame.append(obs)
-
+        hyps_per_frame, obs_per_frame = _build_hypotheses(
+            local, self.gmms, self.marker_idxs, n_hypotheses=n_hypotheses,
+            theta_min=theta_min, init_frame=init_frame)
         init_positions = {m: local[init_frame, m] for m in self.marker_idxs}
         result = viterbi_select(
             self.marker_idxs, hyps_per_frame, obs_per_frame, init_positions,

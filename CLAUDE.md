@@ -313,3 +313,87 @@ distances it checked (including the local vs. global forearm reference),
 what they were compared against, and exactly where in the chain a marker
 was accepted or thrown out. Reach for it whenever a frame's verdict looks
 surprising.
+
+## Work in progress 2026-09-10 (strategyGMM — spatial-GMM + Viterbi marker labeler)
+
+New `vicon2mano/gmm_labeler.py`, on branch `feat/gmm-labeler`. Implements
+Alexanderson, O'Sullivan & Beskow, "Real-time labeling of non-rigid motion
+capture marker sets" (Computers & Graphics, 2017) as a **model-free**
+alternative to `mano_relabel.py`'s MANO-based relabelling — no kinematic
+fit involved, just per-marker spatial priors + temporal continuity. Aimed
+at the cascade's documented "known open limitation": adjacent-finger label
+swaps (`Middle1`/`Ring1`, `Middle2`/`Index2`) that no distance check catches
+because nothing in the cascade compares fingers to each other.
+
+**Pieces** (all hand-rolled, no new dependency — matches this repo's
+existing preference, see `correspondence._cluster_two`):
+- `rigid_frames`/`to_local`/`to_world`: per-frame rigid coordinate frame
+  from 3 anchor markers (modelled on `mano_relabel._palm_frames`, built
+  directly from raw marker columns — no MANO fit needed).
+- `fit_gmm_diag`/`fit_marker_gmms`: diagonal-covariance GMM via EM, one
+  per marker, trained on trusted/reference frames only.
+- `top_n_assignments`: k-best linear assignment (Murty's algorithm
+  reduction to repeated `scipy.optimize.linear_sum_assignment` calls).
+- `MarkerKalman`/`viterbi_select`: constant-velocity Kalman filter bank +
+  Viterbi selection of the most probable hypothesis sequence through time
+  (paper's Section 3.2 algorithm).
+- `relabel_sequence`/`GMMLabeler`: sequence-level driver, `{slot: source}`
+  output compatible with `mano_relabel.apply_relabel`.
+- `mask_untrustworthy_frames` / `anchor_valid=` (threaded through
+  `GMMLabeler.fit`/`.relabel` and `relabel_sequence`): NaNs out every
+  marker's local coordinate on frames where the anchor markers themselves
+  aren't trustworthy — see real-data finding below for why this exists.
+
+**Scope note vs. the original plan:** `get_assignment`'s `labeler=` slot
+(`correspondence.py`) assumes a fully order-agnostic raw point cloud (like
+`DeepLabeler`, which voxelises everything with no anchor dependency).
+strategyGMM needs 3 already-trustworthy anchor markers every frame, so it
+doesn't fit that contract — it's a targeted repair driver (parallel to
+`relabel_with_mano.py`), not a `get_assignment` strategy.
+
+**Tests:** `tests/test_gmm_labeler.py`, 17 tests — rigid-frame round-trip
+and rigid-motion invariance, GMM EM recovery on synthetic clusters, top-N
+assignment validated against brute-force enumeration, Kalman convergence,
+a synthetic identity-swap Viterbi must resolve via temporal continuity
+alone, and an end-to-end synthetic two-finger recording with an injected
+column swap (recovered correctly, zero false positives outside the swap
+window). Full suite: 105 passed.
+
+**Real-data validation (P7/Trial1_handsonly, `Ring1`↔`Pinky1`,
+`scripts/validate_gmm_labeler.py` + `scripts/animate_gmm_relabel.py`,
+sharing loader/fit logic via `scripts/_gmm_validation_common.py`):**
+started from the swap `relabel_with_mano.py` already documents fixing at
+frame 42789. Found two real, useful things before getting a clean result:
+
+1. Frame 42789 sits inside a much longer cascade-flagged run —
+   `[41195, 42829]`, 1635 frames — and at its start the raw data shows a
+   **rolling mislabelling cascade across `Palm1`/`Palm2`/`Thumb1`/`Ring1`/
+   `Pinky1` simultaneously**, not a clean pairwise swap. The anchor
+   markers (`Palm2`/`Palm3`/`Thumb1`) were themselves corrupted for most
+   of that run (1558/1635 frames), which silently wrecked every other
+   marker's local coordinate — exactly the failure `mask_untrustworthy_frames`
+   now guards against, gating on the cascade's own CORRECT verdict for
+   the anchors.
+2. Even after anchor-gating, `Palm2`/`Palm3`/`Thumb1` turned out to be a
+   poor anchor choice for this trial specifically: the cascade calls them
+   untrustworthy on ~83% of the *entire* recording (`Thumb1` flagged
+   often), leaving little valid data either to train on or to evaluate
+   against, and the placeholder Kalman noise parameters
+   (`process_var=25`, `obs_var=100`, unmeasured mm² guesses) produced a
+   noisy, flip-flopping verdict rather than a clean transition.
+
+`scripts/animate_gmm_relabel.py` produces a before/after side-by-side 3-D
+animation (`results/gmm_labeler/p7_ring1_pinky1_before_after.gif`) marking
+swapped/corrected frames explicitly in the title of each panel — confirms
+the mechanics (relabelling, colour-coding, anchor-trust flagging) work
+end-to-end on real data, independent of whether this particular trial's
+verdict is trustworthy yet.
+
+**Next steps (not yet done):** pick a more stable anchor triple for P7
+(e.g. plain `Palm1`/`Palm2`/`Palm3`, or per-trial anchor selection based
+on which markers the cascade actually trusts most), and calibrate
+`process_var`/`obs_var` against this recording's real frame-to-frame
+jitter (the paper's own Section 3.2 describes tuning these manually
+against training data — not yet done here). Then re-run the validation
+against a case with a cleaner, non-cascading swap to get a real precision
+number, rather than the exploratory P7 episode above.

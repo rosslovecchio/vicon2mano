@@ -38,6 +38,16 @@ def test_rigid_frame_axes_orthonormal():
         np.testing.assert_allclose(R[t] @ R[t].T, np.eye(3), atol=1e-8)
 
 
+def test_mask_untrustworthy_frames_nans_out_bad_anchor_frames_only():
+    local = np.arange(2 * 3 * 3, dtype=float).reshape(2, 3, 3)
+    anchor_valid = np.array([True, False])
+    out = gl.mask_untrustworthy_frames(local, anchor_valid)
+    np.testing.assert_array_equal(out[0], local[0])
+    assert np.isnan(out[1]).all()
+    # input untouched
+    assert not np.isnan(local).any()
+
+
 def test_local_frame_is_invariant_to_rigid_motion():
     # A marker with a fixed offset from the anchor triangle must land at the
     # same local coordinates regardless of how the whole rigid body is
