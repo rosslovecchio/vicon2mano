@@ -435,10 +435,81 @@ mark each frame explicitly: `[swap injected]` on the before panel,
 panel when ground truth is available. Output in `results/gmm_labeler/`
 (gitignored, regenerable).
 
+### Whole-trial run, with no cascade at all (`scripts/relabel_trial_gmm.py`)
+
+strategyGMM no longer consults the quality cascade for anything. Every
+input it needs is derived from the marker geometry itself, which matters
+because the cascade is deliberately tuned to over-flag (see its section
+above) and that made it a poor gate.
+
+**Anchor plate: learn it, then find it.** `learn_anchor_triangle` takes
+the *modal* pairwise distances of `Palm1`/`Palm2`/`Palm3` (the rigid
+plate's true geometry is the value that repeats; the median lands between
+the right and wrong configurations and matches neither).
+`locate_anchor_triangle` then searches each frame's whole point cloud for
+a triple matching that triangle — so a frame whose palm labels were
+swapped still yields a usable frame, with the anchors *repaired* rather
+than merely rejected. Coverage on P7/Trial1_handsonly: **20% → 72.8% of
+frames**, of which 25,447 needed repaired anchors. The modal triangle
+(32.57/40.36/24.38 mm) was later confirmed independently by consensus.
+
+**Reference bone lengths need consensus, not marginal modes.** The first
+whole-trial run had *every* anchor-valid frame (34,688/34,688) proposing a
+reassignment — the signature of a model trained on bad data. Cause: the
+per-bone modal reference is only valid where that bone is correct in most
+frames, and on this trial `Ring1`/`Pinky1` are mislabelled in the
+*majority* of frames, so their modes locked onto the wrong configuration
+(`Palm2-Ring1` = 34 mm, shorter than `Palm2-Pinky1` = 54 mm, which is
+anatomically impossible). `consensus_bone_lengths` fixes this with RANSAC
+over frames: each frame's whole bone-length vector is a hypothesis, scored
+by how many other frames agree on *every* bone at once. Wrong
+configurations do not agree with each other — each swap produces a
+different distance vector — so only correct frames pile into one large
+consensus. `Palm2-Ring1` → 50 mm, `Palm2-Middle1` 74 → 51 mm. The
+inliers double as the GMM training set: geometrically verified clean, no
+external labels involved.
+
+**Model-free veto.** A frame's reassignment is applied only if it does not
+worsen that frame's total bone-length error against the consensus
+reference — an independent check on the model that proposed it, in the
+spirit of `relabel_with_mano.py`'s accept-only-if-verification-agrees
+contract. It earns its keep immediately: P7 frame 1427 proposes a
+`Thumb1`↔`Thumb2` swap that would send the touched bones from 0.9 mm to
+34.3 mm of error (they are adjacent joints ~34 mm apart, so swapping them
+is exactly one bone-length wrong), and it is rejected.
+
+**Whole-trial result, P7/Trial1_handsonly** (47,656 frames, 2 passes,
+~20 min):
+
+    anchor frame located          34,688 frames (72.8%), 25,447 repaired
+    consensus-clean frames         3,260 (6.8%)  <- training set
+    marker-instances reassigned  137,163 (26.4% of usable slots)
+    frames rejected by the veto   20,356
+    bone error, all bones         14.39mm -> 12.95mm  (17.2% improved)
+    bones touching a reassignment 21.00mm -> 15.40mm  (66.9% improved)
+
+Read that honestly: the accepted repairs measurably improve geometry where
+they act, but **only 6.8% of this trial is fully self-consistent to begin
+with** — P7/Trial1_handsonly is severely mislabelled throughout, not just
+around frame 42789, which matches the cascade independently rating these
+markers 10–30% correct. A recording this broken cannot be fully repaired
+by relabelling alone, and the veto having to reject 20k frames is the
+method correctly declining to guess.
+
+**Animation.** `scripts/relabel_trial_gmm.py` writes a Plotly player in the
+same style as `results/mano_relabelling_pass1` (finger-coloured markers
+with digits, skeleton lines, per-marker status rings, Play/Pause + frame
+slider) to `results/gmm_relabelling/`. Rings: green = label kept, blue =
+reassigned, none = no anchor frame that frame. Titles carry the per-frame
+reassignment count and bone error before/after.
+`scripts/animate_gmm_relabel.py` covers the smaller before/after
+comparison case as `.gif` + a self-contained `.html` scrubbing player
+(the `animate_fit.py` `_HTML_TEMPLATE` mechanism).
+
 **Next steps (not yet done):** run the injected-swap protocol across all
-finger-marker pairs and several participants to get a per-pair confusion
+finger-marker pairs and several participants for a per-pair confusion
 matrix (adjacent pairs like `Middle1`/`Ring1` should be the hard ones —
-that's the cascade's documented open limitation this whole strategy
-targets); then wire strategyGMM into a repair driver with the same
-accept-only-if-the-cascade-agrees contract `relabel_with_mano.py` uses,
-so it can be run over a whole trial rather than a hand-picked window.
+the cascade's documented open limitation this strategy targets); and try a
+trial that is *not* majority-corrupted, where the consensus training set
+would be far larger than 6.8% of frames, to see what the method's ceiling
+actually is.

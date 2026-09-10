@@ -97,8 +97,13 @@ def _finger_chains(labels: list[str]) -> list[tuple[int, int]]:
 
 def modal_bone_lengths(markers: np.ndarray, bones: list[tuple[int, int]],
                         *, bin_mm: float = 0.5, refine_mm: float = 2.0) -> np.ndarray:
-    """Reference length per bone, by the same modal argument as the anchor
-    triangle: the true (rigid) length is the value that repeats."""
+    """Reference length per bone from each bone's *marginal* mode.
+
+    Works only where a bone is correctly labelled in most frames. Kept for
+    comparison and diagnostics; :func:`consensus_bone_lengths` is what the
+    pipeline uses, because that assumption fails badly on real data (see
+    its docstring).
+    """
     out = np.full(len(bones), np.nan)
     for k, (i, j) in enumerate(bones):
         v = np.linalg.norm(markers[:, i] - markers[:, j], axis=1)
@@ -110,6 +115,57 @@ def modal_bone_lengths(markers: np.ndarray, bones: list[tuple[int, int]],
         near = v[np.abs(v - mode) < refine_mm]
         out[k] = near.mean() if near.size else mode
     return out
+
+
+def consensus_bone_lengths(
+    markers: np.ndarray, bones: list[tuple[int, int]], *,
+    tol_mm: float = 4.0, n_hypotheses: int = 400, n_compare: int = 3000,
+    seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reference lengths from the largest mutually-consistent set of frames.
+
+    RANSAC over frames: every candidate frame's whole bone-length vector is
+    one hypothesis, scored by how many other frames agree with it on *every*
+    bone at once; the winner's inliers are then averaged.
+
+    Why not the per-bone mode (:func:`modal_bone_lengths`): that assumes each
+    bone is labelled correctly in most frames, and on real data it is not.
+    On P7/Trial1_handsonly, `Ring1` is mislabelled in the *majority* of
+    frames, so its marginal mode locks onto the wrong configuration --
+    Palm2-Ring1 reads 34mm, which is shorter than Palm2-Pinky1 (54mm) and
+    anatomically impossible. Consensus fixes it (50mm) because wrong
+    configurations do not agree with *each other*: each different swap
+    produces a different distance vector, so only correctly-labelled frames
+    pile up into one large mutually-consistent set.
+
+    Returns ``(ref_lengths, inlier_frames)``. The inliers are frames whose
+    every bone matches the reference -- i.e. frames that are geometrically
+    self-consistent, and so the natural training set for the GMMs, with no
+    external quality verdict involved.
+    """
+    i_idx = np.array([b[0] for b in bones])
+    j_idx = np.array([b[1] for b in bones])
+    D = np.linalg.norm(markers[:, i_idx] - markers[:, j_idx], axis=2)   # (T, B)
+    full = np.flatnonzero(np.isfinite(D).all(axis=1))
+    if full.size == 0:
+        return np.full(len(bones), np.nan), full
+
+    rng = np.random.default_rng(seed)
+    hyp = full if full.size <= n_hypotheses else full[
+        rng.choice(full.size, size=n_hypotheses, replace=False)]
+    comp = full if full.size <= n_compare else full[
+        np.linspace(0, full.size - 1, n_compare).astype(int)]
+    Dc = D[comp]
+
+    best_score, best_h = -1, int(hyp[0])
+    for h in hyp:
+        score = int((np.abs(Dc - D[h]) <= tol_mm).all(axis=1).sum())
+        if score > best_score:
+            best_score, best_h = score, int(h)
+
+    inliers = full[(np.abs(D[full] - D[best_h]) <= tol_mm).all(axis=1)]
+    ref = D[inliers].mean(axis=0) if inliers.size else D[best_h]
+    return ref, inliers
 
 
 def bone_error(markers: np.ndarray, bones: list[tuple[int, int]],
@@ -152,8 +208,25 @@ def run(participant: str, trial: str, *, n_out: int, n_hypotheses: int,
     R, origin = gl.rigid_frames_from_triangle(markers, triangle)
     local = gl.to_local(markers, R, origin)     # NaN where no anchor frame
 
-    # ---- 2. two-pass training ----
-    train = np.flatnonzero(found)
+    # ---- 2. reference geometry + training frames, both by consensus ----
+    #
+    # Training on "every anchor-valid frame" does not work on a recording
+    # this corrupted: the majority of those frames are themselves
+    # mislabelled, so the GMM learns the wrong prior and then "corrects"
+    # every frame toward it (measured: 34688/34688 anchor-valid frames
+    # proposed a change, and the bone-length veto had to throw out 79% of
+    # them). Consensus inliers are frames whose every bone length agrees
+    # with the largest mutually-consistent set -- geometrically verified
+    # clean, with no cascade and no manual labels.
+    bones = _finger_chains(labels)
+    ref_len, inliers = consensus_bone_lengths(markers, bones)
+    print(f"  consensus reference from {len(inliers)} self-consistent frames "
+          f"({len(inliers) / T:.1%})")
+
+    train = np.intersect1d(inliers, np.flatnonzero(found))
+    if train.size < 100:
+        raise SystemExit(f"Only {train.size} frames are both anchor-valid and "
+                          f"geometrically self-consistent; cannot train.")
     init_frame = int(train[0])
     mapping = None
     for p in range(1, passes + 1):
@@ -173,10 +246,22 @@ def run(participant: str, trial: str, *, n_out: int, n_hypotheses: int,
         print(f"    {int(moved_frames.sum())} frames with >=1 reassignment "
               f"({moved_frames.mean():.1%})  [{time.time() - t0 / 1:.0f}s]")
         if p < passes:
-            # refit on frames this pass found self-consistent
-            train = np.flatnonzero(found & ~moved_frames)
-            if len(train) < 100:
-                print("    too few self-consistent frames; keeping pass-1 model")
+            # Refit on frames that are consensus-clean *after* this pass's
+            # relabelling -- the repair should enlarge the self-consistent
+            # set, which in turn sharpens the priors.
+            provisional = markers.copy()
+            kept_arr_p = np.array(kept)
+            for t in np.flatnonzero(found):
+                snap = markers[t]
+                for slot, src in enumerate(mapping[t]):
+                    if src >= 0:
+                        provisional[t, kept_arr_p[slot]] = snap[kept_arr_p[src]]
+            err_p = bone_error(provisional, bones, ref_len)
+            clean = np.isfinite(err_p).all(axis=1) & (np.nanmax(err_p, axis=1) <= 4.0)
+            train = np.intersect1d(np.flatnonzero(clean), np.flatnonzero(found))
+            print(f"    consensus-clean after pass {p}: {train.size} frames")
+            if train.size < 100:
+                print("    too few; keeping this pass's model")
                 break
             init_frame = int(train[0])
 
@@ -193,9 +278,6 @@ def run(participant: str, trial: str, *, n_out: int, n_hypotheses: int,
     # Thumb1<->Thumb2 swap that sends the touched bones from 0.9mm to
     # 34.3mm of error (they are adjacent joints ~34mm apart, so swapping
     # them is exactly one bone-length wrong).
-    bones = _finger_chains(labels)
-    ref_len = modal_bone_lengths(markers, bones)
-
     relabelled = markers.copy()
     status = np.full((T, N), NO_FRAME, dtype=np.int8)
     kept_arr = np.array(kept)
