@@ -479,3 +479,139 @@ def viterbi_select(
         result[t] = chosen_assign[t][slot]
         slot = backptr[t][slot] if t > 0 else slot
     return result
+
+
+# ---------------------------------------------------------------------------
+# 5. Sequence-level driver: relabel already-present, fixed-column markers
+# ---------------------------------------------------------------------------
+#
+# Unlike DeepLabeler (which voxelises the whole raw, order-agnostic point
+# cloud), this operates on a recording whose columns are already labelled
+# and mostly correct -- the anchor markers used for the rigid local frame
+# must themselves be trustworthy every frame. That fits this repo's actual
+# failure mode (documented in CLAUDE.md): the cascade's distance checks
+# already establish which markers are the stable wrist/palm anchors, and
+# the open problem is two *already-labelled* adjacent-finger markers
+# swapping identity, not recovering labels from a wholly anonymous cloud.
+
+
+def relabel_sequence(
+    markers_mm: np.ndarray,        # (T, N, 3)
+    labels: list[str],
+    anchor_labels: tuple[str, str, str],   # (origin, x, y) label names
+    ref_frames: np.ndarray,
+    marker_idxs: list[int],        # columns to model + potentially swap
+    *,
+    n_hypotheses: int = 5,
+    n_components: int = 3,
+    theta_min: float = -30.0,
+    process_var: float = 1.0,
+    obs_var: float = 25.0,
+    init_frame: int = 0,
+) -> np.ndarray:
+    """Per-frame identity assignment for ``marker_idxs`` via GMM + Viterbi.
+
+    Returns ``(T, len(marker_idxs))``: entry ``[t, i]`` is the index (into
+    ``marker_idxs``) of the column whose *observed position* should occupy
+    slot ``i`` at frame ``t``. Feed the result through
+    ``mano_relabel.apply_relabel`` (same ``{slot: source}`` convention,
+    after converting to marker-index space) to actually permute positions.
+
+    Markers with no fitted GMM (too few reference samples -- see
+    ``fit_marker_gmms``) are dropped from ``marker_idxs`` before assignment;
+    check the returned array's second dimension against the input.
+    """
+    name_to_idx = {l: i for i, l in enumerate(labels)}
+    origin_i, x_i, y_i = (name_to_idx[a] for a in anchor_labels)
+    R, o = rigid_frames(markers_mm, origin_i, x_i, y_i)
+    local = to_local(markers_mm, R, o)
+
+    gmms = fit_marker_gmms(local, marker_idxs, ref_frames, n_components=n_components)
+    kept = [m for m in marker_idxs if m in gmms]
+    if not kept:
+        return np.zeros((markers_mm.shape[0], 0), dtype=int)
+
+    T = markers_mm.shape[0]
+    hyps_per_frame = []
+    obs_per_frame = []
+    for t in range(T):
+        obs = local[t, kept]                          # (K, 3), K == len(kept)
+        ll = loglik_matrix(obs, gmms, kept, theta_min=theta_min)
+        cost = -ll
+        n_here = 1 if t == init_frame else n_hypotheses
+        hyps_per_frame.append(top_n_assignments(cost, n_here))
+        obs_per_frame.append(obs)
+
+    init_positions = {m: local[init_frame, m] for m in kept}
+    result = viterbi_select(
+        kept, hyps_per_frame, obs_per_frame, init_positions,
+        process_var=process_var, obs_var=obs_var,
+    )
+    return np.stack(result)   # (T, len(kept))
+
+
+class GMMLabeler:
+    """Fitted per-participant GMM model, reusable across trials.
+
+    Usage::
+
+        labeler = GMMLabeler.fit(markers_mm, labels, anchor_labels,
+                                  ref_frames, marker_idxs)
+        mapping_seq = labeler.relabel(markers_mm, labels)   # (T, M) source idx
+    """
+
+    def __init__(self, gmms: dict[int, GMMParams], marker_idxs: list[int],
+                 anchor_labels: tuple[str, str, str]):
+        self.gmms = gmms
+        self.marker_idxs = marker_idxs
+        self.anchor_labels = anchor_labels
+
+    @classmethod
+    def fit(
+        cls,
+        markers_mm: np.ndarray,
+        labels: list[str],
+        anchor_labels: tuple[str, str, str],
+        ref_frames: np.ndarray,
+        marker_idxs: list[int],
+        *,
+        n_components: int = 3,
+    ) -> "GMMLabeler":
+        name_to_idx = {l: i for i, l in enumerate(labels)}
+        origin_i, x_i, y_i = (name_to_idx[a] for a in anchor_labels)
+        R, o = rigid_frames(markers_mm, origin_i, x_i, y_i)
+        local = to_local(markers_mm, R, o)
+        gmms = fit_marker_gmms(local, marker_idxs, ref_frames, n_components=n_components)
+        return cls(gmms, [m for m in marker_idxs if m in gmms], anchor_labels)
+
+    def relabel(
+        self,
+        markers_mm: np.ndarray,
+        labels: list[str],
+        *,
+        n_hypotheses: int = 5,
+        theta_min: float = -30.0,
+        process_var: float = 1.0,
+        obs_var: float = 25.0,
+        init_frame: int = 0,
+    ) -> np.ndarray:
+        name_to_idx = {l: i for i, l in enumerate(labels)}
+        origin_i, x_i, y_i = (name_to_idx[a] for a in self.anchor_labels)
+        R, o = rigid_frames(markers_mm, origin_i, x_i, y_i)
+        local = to_local(markers_mm, R, o)
+
+        T = markers_mm.shape[0]
+        hyps_per_frame, obs_per_frame = [], []
+        for t in range(T):
+            obs = local[t, self.marker_idxs]
+            cost = -loglik_matrix(obs, self.gmms, self.marker_idxs, theta_min=theta_min)
+            n_here = 1 if t == init_frame else n_hypotheses
+            hyps_per_frame.append(top_n_assignments(cost, n_here))
+            obs_per_frame.append(obs)
+
+        init_positions = {m: local[init_frame, m] for m in self.marker_idxs}
+        result = viterbi_select(
+            self.marker_idxs, hyps_per_frame, obs_per_frame, init_positions,
+            process_var=process_var, obs_var=obs_var,
+        )
+        return np.stack(result)

@@ -222,3 +222,88 @@ def test_viterbi_select_resolves_a_swap_that_spatial_hypotheses_alone_cannot():
         obs_var=1.0,
     )
     np.testing.assert_array_equal(result[1], np.array([0, 1]))
+
+
+# ---------------------------------------------------------------------------
+# Step 5: relabel_sequence / GMMLabeler end-to-end on synthetic data
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_two_finger_recording(rng, T=40, swap_start=15, swap_len=6):
+    """3 anchors (rigid triangle, moving) + 2 "finger" markers (Index1,
+    Middle1) each orbiting a fixed local offset -- close enough together
+    that a naive nearest-neighbour match at the swap frames is ambiguous,
+    but each keeps its own small-radius orbit, which is what the GMM
+    should have learned from the (swap-free) reference frames.
+    """
+    labels = ["Wrist", "IndexMCPref", "MiddleMCPref", "Index1", "Middle1"]
+    off_index = np.array([20.0, 5.0, 0.0])
+    off_middle = np.array([20.0, -5.0, 0.0])   # 10mm apart -- deliberately close
+
+    markers = np.zeros((T, 5, 3))
+    for t in range(T):
+        # slowly translating/rotating rigid triangle
+        theta = 0.05 * t
+        c, s = np.cos(theta), np.sin(theta)
+        Rw = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+        shift = np.array([t * 2.0, 0.0, 0.0])
+        anchors = (np.array([[0, 0, 0], [100, 0, 0], [0, 100, 0]], dtype=float) @ Rw.T) + shift
+        jitter_i = rng.normal(scale=1.0, size=3)
+        jitter_m = rng.normal(scale=1.0, size=3)
+        idx_world = anchors[0] + (off_index + jitter_i) @ Rw.T
+        mid_world = anchors[0] + (off_middle + jitter_m) @ Rw.T
+        markers[t, :3] = anchors
+        markers[t, 3] = idx_world
+        markers[t, 4] = mid_world
+
+    # Ground truth identity is Index1/Middle1 throughout; inject an actual
+    # column swap during [swap_start, swap_start+swap_len) to simulate a
+    # mislabelling episode the cascade's distance checks would miss (both
+    # markers stay plausible relative to the rigid anchors).
+    swapped = markers.copy()
+    for t in range(swap_start, swap_start + swap_len):
+        swapped[t, 3], swapped[t, 4] = markers[t, 4].copy(), markers[t, 3].copy()
+
+    ref_frames = np.array([t for t in range(T) if not (swap_start <= t < swap_start + swap_len)])
+    return labels, swapped, markers, ref_frames
+
+
+def test_relabel_sequence_recovers_a_synthetic_finger_swap():
+    rng = np.random.default_rng(11)
+    labels, swapped, truth, ref_frames = _synthetic_two_finger_recording(rng)
+    marker_idxs = [3, 4]   # Index1, Middle1
+
+    result = gl.relabel_sequence(
+        swapped, labels, ("Wrist", "IndexMCPref", "MiddleMCPref"),
+        ref_frames, marker_idxs,
+        n_hypotheses=2, n_components=1, process_var=5.0, obs_var=4.0,
+    )
+    # result[t, i] indexes into marker_idxs: 0 keeps Index1, 1 means "the
+    # slot's occupant is actually the other column's observation".
+    corrected_is_swap = result[:, 0] == 1
+    true_is_swap = np.zeros(swapped.shape[0], dtype=bool)
+    true_is_swap[15:21] = True
+    # Allow the boundary frames to disagree (Viterbi may lag by a frame or
+    # two before committing to a transition); the bulk of the swapped
+    # window must be recovered.
+    core = slice(16, 20)
+    np.testing.assert_array_equal(corrected_is_swap[core], true_is_swap[core])
+    assert not corrected_is_swap[:14].any()   # no false positives before the swap
+    assert not corrected_is_swap[22:].any()   # or after it
+
+
+def test_gmm_labeler_fit_and_relabel_matches_relabel_sequence():
+    rng = np.random.default_rng(12)
+    labels, swapped, _truth, ref_frames = _synthetic_two_finger_recording(rng)
+    marker_idxs = [3, 4]
+    anchor_labels = ("Wrist", "IndexMCPref", "MiddleMCPref")
+
+    direct = gl.relabel_sequence(
+        swapped, labels, anchor_labels, ref_frames, marker_idxs,
+        n_hypotheses=2, n_components=1, process_var=5.0, obs_var=4.0,
+    )
+    labeler = gl.GMMLabeler.fit(swapped, labels, anchor_labels, ref_frames,
+                                marker_idxs, n_components=1)
+    via_class = labeler.relabel(swapped, labels, n_hypotheses=2,
+                                process_var=5.0, obs_var=4.0)
+    np.testing.assert_array_equal(direct, via_class)
