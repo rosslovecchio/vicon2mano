@@ -78,6 +78,128 @@ def to_local(markers_mm: np.ndarray, R: np.ndarray, origin: np.ndarray) -> np.nd
     return np.einsum("tab,tnb->tna", R, delta)
 
 
+def learn_anchor_triangle(
+    markers_mm: np.ndarray,       # (T, N, 3)
+    anchor_idxs: tuple[int, int, int],
+    *,
+    bin_mm: float = 0.5,
+    refine_mm: float = 1.5,
+) -> np.ndarray:
+    """The 3 mutual distances of the anchor plate, learned from the data.
+
+    Returns ``[d01, d02, d12]`` in mm. Uses the *modal* value of each
+    pairwise distance (tallest ``bin_mm`` histogram bin, then the mean of
+    everything within ``refine_mm`` of it) rather than the median: on a
+    recording where the anchor markers are themselves mislabelled for a
+    substantial share of frames, the median lands between the correct and
+    incorrect configurations and matches neither. The correct geometry is
+    the single most *concentrated* value -- the plate is rigid, so its
+    true distances repeat to within measurement noise, while mislabelled
+    configurations scatter over tens of mm.
+
+    Needs no external verdict (no cascade, no manual reference frames):
+    the plate's own rigidity is the ground truth.
+    """
+    pairs = ((0, 1), (0, 2), (1, 2))
+    out = []
+    for a, b in pairs:
+        v = np.linalg.norm(markers_mm[:, anchor_idxs[a]] - markers_mm[:, anchor_idxs[b]], axis=1)
+        v = v[np.isfinite(v)]
+        if v.size == 0:
+            out.append(np.nan)
+            continue
+        hist, edges = np.histogram(v, bins=np.arange(0, v.max() + bin_mm, bin_mm))
+        mode = edges[int(np.argmax(hist))] + bin_mm / 2
+        near = v[np.abs(v - mode) < refine_mm]
+        out.append(float(near.mean()) if near.size else float(mode))
+    return np.array(out)
+
+
+def locate_anchor_triangle(
+    markers_mm: np.ndarray,        # (T, N, 3)
+    ref_d: np.ndarray,             # [d01, d02, d12] from learn_anchor_triangle
+    labelled: tuple[int, int, int],
+    *,
+    tol_mm: float = 2.5,
+) -> np.ndarray:
+    """Find, per frame, which 3 markers actually form the anchor plate.
+
+    Returns ``(T, 3)`` int array of marker indices (``-1`` where no triple
+    in the cloud matches the reference triangle within ``tol_mm``).
+
+    Rather than trusting that the columns named ``Palm1/2/3`` really hold
+    the palm plate -- on real data they demonstrably do not, see the
+    P7/Trial1_handsonly rolling-mislabelling episode -- this searches the
+    whole frame's point cloud for a triple whose three mutual distances
+    match the rigid plate's. That both *validates* the frame and *repairs*
+    the anchors when their labels were swapped, with no dependency on the
+    quality cascade or any other external verdict.
+
+    ``labelled`` (the nominal anchor columns) is preferred whenever it
+    matches, so a correctly-labelled frame keeps its own anchors and the
+    frame-to-frame anchor identity stays stable; only when the labelled
+    triple fails does the best-matching alternative get used.
+    """
+    T, N, _ = markers_mm.shape
+    out = np.full((T, 3), -1, dtype=int)
+
+    # All ordered triples, precomputed once. N is ~20 for a hand marker
+    # set, so this is ~8k rows -- small enough to score by brute force per
+    # frame with numpy, and the whole search costs well under a minute for
+    # a 47k-frame trial.
+    tri = np.array([(a, b, c)
+                    for a in range(N) for b in range(N) for c in range(N)
+                    if a != b and b != c and a != c])
+    ta, tb, tc = tri[:, 0], tri[:, 1], tri[:, 2]
+
+    for t in range(T):
+        pts = markers_mm[t]
+        d = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=-1)
+        err = (np.abs(d[ta, tb] - ref_d[0])
+               + np.abs(d[ta, tc] - ref_d[1])
+               + np.abs(d[tb, tc] - ref_d[2]))
+        ok = ((np.abs(d[ta, tb] - ref_d[0]) <= tol_mm)
+              & (np.abs(d[ta, tc] - ref_d[1]) <= tol_mm)
+              & (np.abs(d[tb, tc] - ref_d[2]) <= tol_mm))
+        if not ok.any():
+            continue
+        lab_row = np.flatnonzero((ta == labelled[0]) & (tb == labelled[1])
+                                  & (tc == labelled[2]))
+        if lab_row.size and ok[lab_row[0]]:
+            out[t] = labelled                 # labels were right -- keep them
+        else:
+            cand = np.flatnonzero(ok)
+            out[t] = tri[cand[np.argmin(err[cand])]]
+    return out
+
+
+def rigid_frames_from_triangle(
+    markers_mm: np.ndarray,        # (T, N, 3)
+    triangle: np.ndarray,          # (T, 3) from locate_anchor_triangle
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-frame rigid frame built from a *per-frame* anchor triple.
+
+    Same construction as :func:`rigid_frames`, but the 3 anchor markers may
+    differ frame to frame (because ``locate_anchor_triangle`` re-identified
+    them). Frames with no located triangle come back NaN.
+    """
+    T = markers_mm.shape[0]
+    R = np.full((T, 3, 3), np.nan)
+    origin = np.full((T, 3), np.nan)
+    found = triangle[:, 0] >= 0
+    idx = np.flatnonzero(found)
+    if idx.size == 0:
+        return R, origin
+    o = markers_mm[idx, triangle[idx, 0]]
+    xp = markers_mm[idx, triangle[idx, 1]]
+    yp = markers_mm[idx, triangle[idx, 2]]
+    x = _normalise(xp - o)
+    z = _normalise(np.cross(x, yp - o))
+    R[idx] = np.stack([x, np.cross(z, x), z], axis=1)
+    origin[idx] = o
+    return R, origin
+
+
 def mask_untrustworthy_frames(local_mm: np.ndarray, anchor_valid: np.ndarray) -> np.ndarray:
     """NaN out every marker's local position at frames with bad anchors.
 
@@ -566,6 +688,40 @@ def _build_hypotheses(
     return hyps_per_frame, obs_per_frame
 
 
+def relabel_local(
+    local_mm: np.ndarray,          # (T, N, 3) already in the rigid local frame
+    gmms: dict[int, GMMParams],
+    marker_idxs: list[int],
+    *,
+    n_hypotheses: int = 5,
+    theta_min: float = -30.0,
+    process_var: float = 1.0,
+    obs_var: float = 25.0,
+    init_frame: int = 0,
+) -> np.ndarray:
+    """Hypothesis generation + Viterbi selection on precomputed local coords.
+
+    The lowest-level public entry point, for callers that build the local
+    frame themselves -- notably one built from a *per-frame* anchor triple
+    (``locate_anchor_triangle`` + ``rigid_frames_from_triangle``), which
+    the fixed-anchor-label API cannot express.
+
+    Returns ``(T, len(kept))``; ``[t, i]`` is the index into ``kept`` of
+    the marker whose observed position belongs in slot ``i`` at frame
+    ``t``, or -1 where that slot had no usable observation.
+    """
+    kept = [m for m in marker_idxs if m in gmms]
+    if not kept:
+        return np.zeros((local_mm.shape[0], 0), dtype=int)
+    hyps_per_frame, obs_per_frame = _build_hypotheses(
+        local_mm, gmms, kept, n_hypotheses=n_hypotheses, theta_min=theta_min,
+        init_frame=init_frame)
+    init_positions = {m: local_mm[init_frame, m] for m in kept}
+    return np.stack(viterbi_select(
+        kept, hyps_per_frame, obs_per_frame, init_positions,
+        process_var=process_var, obs_var=obs_var))
+
+
 def relabel_sequence(
     markers_mm: np.ndarray,        # (T, N, 3)
     labels: list[str],
@@ -611,19 +767,9 @@ def relabel_sequence(
         local = mask_untrustworthy_frames(local, anchor_valid)
 
     gmms = fit_marker_gmms(local, marker_idxs, ref_frames, n_components=n_components)
-    kept = [m for m in marker_idxs if m in gmms]
-    if not kept:
-        return np.zeros((markers_mm.shape[0], 0), dtype=int)
-
-    hyps_per_frame, obs_per_frame = _build_hypotheses(
-        local, gmms, kept, n_hypotheses=n_hypotheses, theta_min=theta_min,
-        init_frame=init_frame)
-    init_positions = {m: local[init_frame, m] for m in kept}
-    result = viterbi_select(
-        kept, hyps_per_frame, obs_per_frame, init_positions,
-        process_var=process_var, obs_var=obs_var,
-    )
-    return np.stack(result)   # (T, len(kept))
+    return relabel_local(local, gmms, marker_idxs, n_hypotheses=n_hypotheses,
+                         theta_min=theta_min, process_var=process_var,
+                         obs_var=obs_var, init_frame=init_frame)
 
 
 class GMMLabeler:
@@ -682,13 +828,7 @@ class GMMLabeler:
         local = to_local(markers_mm, R, o)
         if anchor_valid is not None:
             local = mask_untrustworthy_frames(local, anchor_valid)
-
-        hyps_per_frame, obs_per_frame = _build_hypotheses(
-            local, self.gmms, self.marker_idxs, n_hypotheses=n_hypotheses,
-            theta_min=theta_min, init_frame=init_frame)
-        init_positions = {m: local[init_frame, m] for m in self.marker_idxs}
-        result = viterbi_select(
-            self.marker_idxs, hyps_per_frame, obs_per_frame, init_positions,
-            process_var=process_var, obs_var=obs_var,
-        )
-        return np.stack(result)
+        return relabel_local(local, self.gmms, self.marker_idxs,
+                             n_hypotheses=n_hypotheses, theta_min=theta_min,
+                             process_var=process_var, obs_var=obs_var,
+                             init_frame=init_frame)

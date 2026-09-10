@@ -38,6 +38,90 @@ def test_rigid_frame_axes_orthonormal():
         np.testing.assert_allclose(R[t] @ R[t].T, np.eye(3), atol=1e-8)
 
 
+def _plate_recording(rng, T=200, bad=(50, 60)):
+    """3 rigid plate markers + 1 distractor, with the plate's labels
+    swapped (0<->1) for frames in ``bad``. Whole body translates/rotates."""
+    plate = np.array([[0.0, 0.0, 0.0], [30.0, 0.0, 0.0], [0.0, 40.0, 0.0]])
+    distractor = np.array([80.0, 80.0, 10.0])
+    out = np.zeros((T, 4, 3))
+    for t in range(T):
+        th = 0.02 * t
+        c, s = np.cos(th), np.sin(th)
+        Rw = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+        shift = np.array([t * 1.5, 0.0, 0.0])
+        pts = np.vstack([plate, distractor]) @ Rw.T + shift
+        pts += rng.normal(scale=0.05, size=pts.shape)
+        out[t] = pts
+    for t in range(*bad):
+        out[t, 0], out[t, 1] = out[t, 1].copy(), out[t, 0].copy()
+    return out
+
+
+def test_learn_anchor_triangle_recovers_the_plate_geometry():
+    rng = np.random.default_rng(20)
+    markers = _plate_recording(rng)
+    ref = gl.learn_anchor_triangle(markers, (0, 1, 2))
+    # d01 = 30, d02 = 40, d12 = 50 (3-4-5 triangle)
+    np.testing.assert_allclose(ref, [30.0, 40.0, 50.0], atol=0.6)
+
+
+def test_learn_anchor_triangle_uses_the_mode_not_the_median():
+    # 60% of frames have a corrupted (stretched) plate, scattered over a
+    # wide range. The median would land inside the corrupted bulk; only the
+    # mode finds the one *repeated* value, which is the real geometry.
+    rng = np.random.default_rng(21)
+    T = 500
+    markers = np.zeros((T, 3, 3))
+    markers[:, 1, 0] = 30.0
+    markers[:, 2, 1] = 40.0
+    corrupt = rng.random(T) < 0.6
+    markers[corrupt, 1, 0] = rng.uniform(60, 140, corrupt.sum())
+    ref = gl.learn_anchor_triangle(markers, (0, 1, 2))
+    assert abs(ref[0] - 30.0) < 1.0
+    assert abs(np.median(np.linalg.norm(markers[:, 1] - markers[:, 0], axis=1)) - 30.0) > 20.0
+
+
+def test_locate_anchor_triangle_finds_and_repairs_swapped_anchors():
+    rng = np.random.default_rng(22)
+    markers = _plate_recording(rng, bad=(50, 60))
+    ref = gl.learn_anchor_triangle(markers, (0, 1, 2))
+    tri = gl.locate_anchor_triangle(markers, ref, (0, 1, 2), tol_mm=2.0)
+
+    assert (tri[:, 0] >= 0).all()                       # located every frame
+    good = np.r_[0:50, 60:200]
+    assert (tri[good] == np.array([0, 1, 2])).all()     # labels kept when right
+    # In the swapped block the labelled triple no longer matches the
+    # reference triangle's *ordered* distances, so a different (repaired)
+    # triple is chosen.
+    assert not (tri[50:60] == np.array([0, 1, 2])).all()
+
+
+def test_locate_anchor_triangle_reports_minus_one_when_nothing_matches():
+    rng = np.random.default_rng(23)
+    markers = rng.normal(scale=200.0, size=(5, 6, 3))   # no rigid structure
+    tri = gl.locate_anchor_triangle(markers, np.array([30.0, 40.0, 50.0]),
+                                     (0, 1, 2), tol_mm=0.05)
+    assert (tri == -1).all()
+
+
+def test_rigid_frames_from_triangle_matches_fixed_anchor_version():
+    rng = np.random.default_rng(24)
+    markers = _plate_recording(rng, bad=(0, 0))         # no corruption
+    tri = np.tile(np.array([0, 1, 2]), (markers.shape[0], 1))
+    R_tri, o_tri = gl.rigid_frames_from_triangle(markers, tri)
+    R_fix, o_fix = gl.rigid_frames(markers, 0, 1, 2)
+    np.testing.assert_allclose(R_tri, R_fix, atol=1e-9)
+    np.testing.assert_allclose(o_tri, o_fix, atol=1e-9)
+
+
+def test_rigid_frames_from_triangle_is_nan_where_no_triangle_located():
+    markers = np.zeros((3, 4, 3))
+    tri = np.array([[0, 1, 2], [-1, -1, -1], [0, 1, 2]])
+    R, o = gl.rigid_frames_from_triangle(markers, tri)
+    assert np.isnan(R[1]).all() and np.isnan(o[1]).all()
+    assert not np.isnan(o[0]).any()
+
+
 def test_mask_untrustworthy_frames_nans_out_bad_anchor_frames_only():
     local = np.arange(2 * 3 * 3, dtype=float).reshape(2, 3, 3)
     anchor_valid = np.array([True, False])
