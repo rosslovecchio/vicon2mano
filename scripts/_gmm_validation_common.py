@@ -26,9 +26,27 @@ OUT_DIR = REPO_ROOT / "results" / "gmm_labeler"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 CASCADE_CORRECT = 2
-ANCHOR_LABEL_NAMES = ("Palm2", "Palm3", "Thumb1")
+# Palm1/Palm2/Palm3 are the true rigid palm plate (CLAUDE.md's cascade
+# "palm gate"). The original choice (Palm2/Palm3/Thumb1) was swapped in
+# for this one because it matches the cascade's own de-facto anchor set,
+# but on P7/Trial1_handsonly specifically the cascade distrusts Thumb1
+# often enough (~78% of the whole recording) that joint anchor validity
+# with Palm1/Palm2/Palm3 is nearly 2x higher (21.4% vs ~12% of frames) --
+# still physically correct (all 3 on the same rigid segment, unlike mixing
+# in a Forearm marker, which is a different, non-rigidly-attached segment).
+ANCHOR_LABEL_NAMES = ("Palm1", "Palm2", "Palm3")
 TARGET_LABEL_NAMES = ("Ring1", "Pinky1")
 DOCUMENTED_SWAP_FRAME = 42789
+
+# Empirically measured on cascade-verified frames of this trial: Ring1/
+# Pinky1 move ~0.26mm/frame at the median, ~0.9mm/frame at the 90th
+# percentile, in the Palm1/2/3 local frame. The paper's Section 3.2 calls
+# for tuning these against the training data rather than guessing -- the
+# first draft's process_var=25/obs_var=100 (implying 5-10mm/frame, 20-40x
+# too loose) barely penalised an incorrect transition at all, which is
+# why that run's verdict flip-flopped so much.
+DEFAULT_PROCESS_VAR = 0.5    # mm^2, per-step motion
+DEFAULT_OBS_VAR = 1.0        # mm^2, measurement/reconstruction noise
 
 
 def _contiguous_run(bad_mask: np.ndarray, t: int) -> tuple[int, int]:
@@ -98,7 +116,7 @@ def load_p7_ring1_pinky1(*, buf: int = 500, max_ref: int = 3000) -> TrialContext
 
 def fit_and_relabel_window(
     ctx: TrialContext, lo: int, hi: int, *, n_hypotheses: int = 5,
-    process_var: float = 25.0, obs_var: float = 100.0,
+    process_var: float = DEFAULT_PROCESS_VAR, obs_var: float = DEFAULT_OBS_VAR,
 ) -> tuple[np.ndarray, int]:
     """Fit on ``ctx.ref_frames`` (anchor-gated), relabel window [lo, hi).
 

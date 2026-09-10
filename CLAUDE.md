@@ -389,11 +389,56 @@ the mechanics (relabelling, colour-coding, anchor-trust flagging) work
 end-to-end on real data, independent of whether this particular trial's
 verdict is trustworthy yet.
 
-**Next steps (not yet done):** pick a more stable anchor triple for P7
-(e.g. plain `Palm1`/`Palm2`/`Palm3`, or per-trial anchor selection based
-on which markers the cascade actually trusts most), and calibrate
-`process_var`/`obs_var` against this recording's real frame-to-frame
-jitter (the paper's own Section 3.2 describes tuning these manually
-against training data — not yet done here). Then re-run the validation
-against a case with a cleaner, non-cascading swap to get a real precision
-number, rather than the exploratory P7 episode above.
+**Both of those were then fixed:**
+
+- **Anchors → `Palm1`/`Palm2`/`Palm3`.** The original `Palm2`/`Palm3`/
+  `Thumb1` triple inherited the cascade's own de-facto palm-gate set, but
+  the cascade distrusts `Thumb1` on ~78% of this recording, so joint
+  anchor validity was ~12% of frames vs 21.4% for the plain palm plate.
+  Mixing in a `Forearm` marker scores higher still (~59%) but is
+  physically wrong — the forearm is a different, non-rigidly-attached
+  segment, so the "rigid" frame would articulate at the wrist.
+- **Kalman noise calibrated against real jitter.** `Ring1`/`Pinky1` move
+  **~0.26 mm/frame at the median, ~0.9 mm at p90** in the palm-local
+  frame. The first draft's `process_var=25` / `obs_var=100` implied
+  5–10 mm/frame — 20–40× too loose, so the transition term barely
+  penalised an incorrect swap and the spatial GMM term flip-flopped
+  unopposed. Now `DEFAULT_PROCESS_VAR=0.5`, `DEFAULT_OBS_VAR=1.0`
+  (mm², in `scripts/_gmm_validation_common.py`). The paper's Section 3.2
+  explicitly calls for tuning these against training data; guessing them
+  is what produced the noisy first result.
+
+With both fixes, the exploratory P7 episode window reports **no swap and
+no flip-flopping** — matching the cascade's own verdict on the clean part
+of that window, and correctly declining to guess inside the flagged run
+where only 109/1635 frames have trustworthy anchors.
+
+**Ground-truth validation (`scripts/validate_gmm_injected_swap.py`):**
+the P7 episode has no clean ground truth to score against, so instead:
+take the longest cascade-clean run (anchors + both targets CORRECT →
+frames [1428, 3093), 1665 frames), hold a 300-frame window out of GMM
+training entirely, inject a known `Ring1`↔`Pinky1` swap into the middle
+100 frames, and score the recovery. Real hand motion, real Vicon noise,
+real occlusion gaps; only the swap is synthetic.
+
+    Accuracy 100.0%  precision 100.0%  recall 100.0%
+    TP 100  FP 0  FN 0  TN 200
+    detected transitions [1528, 1628] — the exact injected boundaries
+
+**Animations** (`scripts/animate_gmm_relabel.py`, `render_before_after`)
+render side-by-side before/after 3-D players to both `.gif` and a
+self-contained `.html` scrubbing player — same `_HTML_TEMPLATE` mechanism
+as `scripts/animate_fit.py` (base64 JPEG frames, play/pause, scrub,
+goto-frame, arrow-key/space shortcuts, no external assets). Panel titles
+mark each frame explicitly: `[swap injected]` on the before panel,
+`[corrected — OK]` / `[MISS]` / `[FALSE ALARM]` colour-coded on the after
+panel when ground truth is available. Output in `results/gmm_labeler/`
+(gitignored, regenerable).
+
+**Next steps (not yet done):** run the injected-swap protocol across all
+finger-marker pairs and several participants to get a per-pair confusion
+matrix (adjacent pairs like `Middle1`/`Ring1` should be the hard ones —
+that's the cascade's documented open limitation this whole strategy
+targets); then wire strategyGMM into a repair driver with the same
+accept-only-if-the-cascade-agrees contract `relabel_with_mano.py` uses,
+so it can be run over a whole trial rather than a hand-picked window.
