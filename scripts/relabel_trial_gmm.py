@@ -493,8 +493,15 @@ def main(argv=None):
     ap.add_argument("--n-out", type=int, default=200,
                     help="frames sampled into the animation")
     ap.add_argument("--n-hypotheses", type=int, default=5)
-    ap.add_argument("--tol-mm", type=float, default=2.5,
-                    help="anchor-triangle match tolerance")
+    ap.add_argument("--tol-mm", type=float, default=4.5,
+                    help="anchor-triangle match tolerance. The plate is not "
+                         "perfectly rigid (mount flex, marker wobble): the "
+                         "best-achievable triangle error on P7 is ~1.2mm per "
+                         "distance at the median and ~2.4mm at p90, so 2.5mm "
+                         "rejected 27%% of frames for no good reason. 4.5mm "
+                         "takes coverage 73.4%% -> 97.5%% without changing the "
+                         "trainable-clean-frame count; the bone-length veto is "
+                         "the backstop against a loose match.")
     ap.add_argument("--passes", type=int, default=2,
                     help="training passes (2 = bootstrap refit on "
                          "self-consistent frames)")
