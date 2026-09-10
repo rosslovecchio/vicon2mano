@@ -1,0 +1,224 @@
+"""Tests for vicon2mano.gmm_labeler (strategyGMM).
+
+Built up step by step alongside the module: this file currently covers
+step 1 (rigid local frame) and step 2 (per-marker GMM fitting). Hypothesis
+generation (top-N assignment) and temporal selection (Kalman + Viterbi)
+get their own test sections as those pieces land.
+"""
+
+from __future__ import annotations
+
+import itertools
+
+import numpy as np
+
+from vicon2mano import gmm_labeler as gl
+
+
+# ---------------------------------------------------------------------------
+# Step 1: rigid local frame
+# ---------------------------------------------------------------------------
+
+
+def test_rigid_frame_roundtrip():
+    rng = np.random.default_rng(0)
+    T, N = 5, 4
+    markers = rng.normal(size=(T, N, 3)) * 50 + 100
+    R, o = gl.rigid_frames(markers, origin_idx=0, x_idx=1, y_idx=2)
+    local = gl.to_local(markers, R, o)
+    world = gl.to_world(local, R, o)
+    np.testing.assert_allclose(world, markers, atol=1e-8)
+
+
+def test_rigid_frame_axes_orthonormal():
+    rng = np.random.default_rng(1)
+    markers = rng.normal(size=(3, 3, 3)) * 10
+    R, _ = gl.rigid_frames(markers, 0, 1, 2)
+    for t in range(R.shape[0]):
+        np.testing.assert_allclose(R[t] @ R[t].T, np.eye(3), atol=1e-8)
+
+
+def test_local_frame_is_invariant_to_rigid_motion():
+    # A marker with a fixed offset from the anchor triangle must land at the
+    # same local coordinates regardless of how the whole rigid body is
+    # translated/rotated in world space -- this is the entire point of
+    # working in the local frame.
+    rng = np.random.default_rng(2)
+    anchors_frame0 = rng.normal(size=(3, 3)) * 20
+    offset = np.array([5.0, -3.0, 2.0])
+
+    def rotate(theta):
+        c, s = np.cos(theta), np.sin(theta)
+        return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+
+    frames = []
+    for theta, shift in [(0.0, np.zeros(3)), (0.7, np.array([30.0, -10.0, 5.0]))]:
+        Rw = rotate(theta)
+        anchors = anchors_frame0 @ Rw.T + shift
+        marker = anchors[0] + offset @ Rw.T   # rigidly attached to the anchor triangle
+        frames.append(np.vstack([anchors, marker]))
+    markers = np.stack(frames)   # (2, 4, 3): anchors 0-2, marker 3
+
+    R, o = gl.rigid_frames(markers, origin_idx=0, x_idx=1, y_idx=2)
+    local = gl.to_local(markers, R, o)
+    np.testing.assert_allclose(local[0, 3], local[1, 3], atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Step 2: per-marker GMM fitting
+# ---------------------------------------------------------------------------
+
+
+def test_fit_gmm_diag_recovers_single_cluster_mean():
+    rng = np.random.default_rng(3)
+    true_mean = np.array([10.0, -5.0, 2.0])
+    samples = rng.normal(loc=true_mean, scale=0.5, size=(500, 3))
+    gmm = gl.fit_gmm_diag(samples, n_components=1, n_iter=30)
+    np.testing.assert_allclose(gmm.means[0], true_mean, atol=0.2)
+
+
+def test_fit_gmm_diag_recovers_two_well_separated_clusters():
+    rng = np.random.default_rng(4)
+    mean_a, mean_b = np.array([0.0, 0.0, 0.0]), np.array([50.0, 50.0, 50.0])
+    a = rng.normal(loc=mean_a, scale=1.0, size=(300, 3))
+    b = rng.normal(loc=mean_b, scale=1.0, size=(300, 3))
+    samples = np.vstack([a, b])
+    gmm = gl.fit_gmm_diag(samples, n_components=2, n_iter=50)
+
+    recovered = sorted(gmm.means.tolist(), key=lambda m: m[0])
+    expected = sorted([mean_a.tolist(), mean_b.tolist()], key=lambda m: m[0])
+    np.testing.assert_allclose(recovered, expected, atol=1.0)
+
+
+def test_gmm_loglik_is_higher_near_the_mean():
+    gmm = gl.GMMParams(
+        weights=np.array([1.0]),
+        means=np.array([[0.0, 0.0, 0.0]]),
+        variances=np.array([[1.0, 1.0, 1.0]]),
+    )
+    near = gl.gmm_loglik(np.array([0.1, 0.0, 0.0]), gmm)
+    far = gl.gmm_loglik(np.array([10.0, 0.0, 0.0]), gmm)
+    assert near > far
+
+
+def test_fit_marker_gmms_skips_markers_with_too_few_samples():
+    T, N = 30, 2
+    local = np.full((T, N, 3), np.nan)
+    rng = np.random.default_rng(5)
+    local[:, 0] = rng.normal(size=(T, 3))     # plenty of samples
+    local[:5, 1] = rng.normal(size=(5, 3))    # below min_samples default (20)
+
+    gmms = gl.fit_marker_gmms(local, [0, 1], np.arange(T), min_samples=20)
+    assert 0 in gmms
+    assert 1 not in gmms
+
+
+# ---------------------------------------------------------------------------
+# Step 3: top-N assignment (Murty's algorithm)
+# ---------------------------------------------------------------------------
+
+
+def _brute_force_top_n(cost: np.ndarray, n: int):
+    """Reference implementation: enumerate every M-subset-of-K injection."""
+    M, K = cost.shape
+    best = []
+    for cols in itertools.permutations(range(K), M):
+        total = sum(cost[i, c] for i, c in enumerate(cols))
+        best.append((total, np.array(cols)))
+    best.sort(key=lambda x: x[0])
+    return best[:n]
+
+
+def test_top_n_assignments_matches_hungarian_for_n1():
+    from scipy.optimize import linear_sum_assignment
+
+    rng = np.random.default_rng(6)
+    cost = rng.normal(size=(4, 4))
+    (assign, total), = gl.top_n_assignments(cost, 1)
+    r, c = linear_sum_assignment(cost)
+    expected = np.full(4, -1, dtype=int)
+    expected[r] = c
+    np.testing.assert_array_equal(assign, expected)
+    np.testing.assert_allclose(total, cost[r, c].sum())
+
+
+def test_top_n_assignments_matches_brute_force_ranking():
+    rng = np.random.default_rng(7)
+    cost = rng.normal(size=(4, 4))
+    got = gl.top_n_assignments(cost, 6)
+    expected = _brute_force_top_n(cost, 6)
+
+    got_costs = [round(c, 6) for _, c in got]
+    exp_costs = [round(c, 6) for c, _ in expected]
+    assert got_costs == exp_costs
+
+
+def test_top_n_assignments_handles_rectangular_more_observations_than_markers():
+    rng = np.random.default_rng(8)
+    cost = rng.normal(size=(3, 5))   # 3 markers, 5 observations
+    got = gl.top_n_assignments(cost, 4)
+    assert all(a.shape == (3,) for a, _ in got)
+    # scores strictly non-decreasing (best-first ordering)
+    costs = [c for _, c in got]
+    assert costs == sorted(costs)
+
+
+def test_top_n_assignments_is_non_decreasing_in_cost():
+    rng = np.random.default_rng(9)
+    cost = rng.normal(size=(6, 6))
+    got = gl.top_n_assignments(cost, 15)
+    costs = [c for _, c in got]
+    assert costs == sorted(costs)
+    # all distinct assignments
+    keys = [tuple(a.tolist()) for a, _ in got]
+    assert len(keys) == len(set(keys))
+
+
+# ---------------------------------------------------------------------------
+# Step 4: Kalman filter + Viterbi hypothesis selection
+# ---------------------------------------------------------------------------
+
+
+def test_marker_kalman_converges_to_a_stationary_marker():
+    kf = gl.MarkerKalman(np.array([0.0, 0.0, 0.0]), process_var=0.01, obs_var=1.0)
+    true_pos = np.array([5.0, -2.0, 1.0])
+    for _ in range(50):
+        kf.predict()
+        kf.update(true_pos)
+    np.testing.assert_allclose(kf.x[:3], true_pos, atol=0.5)
+
+
+def test_marker_kalman_residual_loglik_prefers_closer_observation():
+    kf = gl.MarkerKalman(np.array([0.0, 0.0, 0.0]), process_var=0.01, obs_var=1.0)
+    kf.predict()
+    ll_near, _ = kf.residual_loglik(np.array([0.1, 0.0, 0.0]))
+    ll_far, _ = kf.residual_loglik(np.array([10.0, 0.0, 0.0]))
+    assert ll_near > ll_far
+
+
+def test_viterbi_select_resolves_a_swap_that_spatial_hypotheses_alone_cannot():
+    # Two markers, A and B, sit close enough that at t=1 both possible
+    # pairings look spatially equal (a synthetic stand-in for the
+    # Middle1/Ring1-style ambiguity the cascade's distance checks miss).
+    # Temporal continuity from t=0 must be what breaks the tie: A and B
+    # barely move, so the identity-preserving hypothesis should win even
+    # though top_n_assignments hands both hypotheses to the selector.
+    marker_order = [0, 1]
+    obs_t0 = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
+    obs_t1 = np.array([[0.2, 0.0, 0.0], [10.2, 0.0, 0.0]])
+
+    hyps_t0 = [(np.array([0, 1]), 0.0)]  # identity at t0 (seed)
+    # t1: hypothesis 0 keeps identity; hypothesis 1 swaps A<->B. Spatially
+    # near-identical cost since the two observations barely moved from a
+    # symmetric-looking configuration once GMMs are ignored here.
+    hyps_t1 = [(np.array([0, 1]), 0.0), (np.array([1, 0]), 0.0)]
+
+    result = gl.viterbi_select(
+        marker_order,
+        [hyps_t0, hyps_t1],
+        [obs_t0, obs_t1],
+        init_positions={0: obs_t0[0], 1: obs_t0[1]},
+        process_var=0.001,
+        obs_var=1.0,
+    )
+    np.testing.assert_array_equal(result[1], np.array([0, 1]))
