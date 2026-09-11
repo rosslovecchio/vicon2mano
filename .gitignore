@@ -27,3 +27,6 @@ results/
 *.jpeg
 *.svg
 *.webp
+
+# setuptools build artifact (was committed by accident early on)
+vicon2mano.egg-info/

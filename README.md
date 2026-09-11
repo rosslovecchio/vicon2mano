@@ -58,14 +58,14 @@ save_npz(result, "output.npz")
 
 ## Marker quality screening (optional, recommended for real recordings)
 
-Before fitting a real Vicon recording, `scripts/label_marker_quality.py`
+Before fitting a real Vicon recording, `vicon2mano/strategies/cascade/quality_cascade.py`
 labels every marker in every frame `correct` / `incorrect` / `missing` via
 a trust-chain cascade (forearm rigidity/drift → palm rigidity + forearm
 anchor → finger chains), so occlusion-fill jumps and label swaps get
 screened out rather than silently absorbed into a downstream fit:
 
 ```bash
-python scripts/label_marker_quality.py \
+python vicon2mano/strategies/cascade/quality_cascade.py \
     --csv recording.csv \
     --ref-frames "1000-1500,20000-20500" \
     --out quality.csv
@@ -74,7 +74,7 @@ python scripts/label_marker_quality.py \
 `visualize_data.ipynb` / `visualize_data.py` drive it interactively —
 loading recordings, plotting % correct over time, animating a trial with
 markers colored by verdict, and stepping through the reasoning for one
-specific frame (`label_marker_quality.debug_frame_cascade`). See
+specific frame (`quality_cascade.debug_frame_cascade`). See
 `CLAUDE.md` for the full design rationale and known limitations.
 
 ## MANO joint order

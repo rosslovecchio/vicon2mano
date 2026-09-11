@@ -1,0 +1,1 @@
+"""Template/distance-descriptor matching."""

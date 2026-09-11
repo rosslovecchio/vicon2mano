@@ -24,8 +24,8 @@ for p in (REPO_ROOT, REPO_ROOT / "scripts"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from vicon2mano.loader import load_csv
-import label_marker_quality as lmq
+from vicon2mano.core.loader import load_csv
+from vicon2mano.strategies.cascade import quality_cascade as lmq
 
 # %% Configuration
 DATA_ROOT = Path(r"D:\ExperimentsJune25")

@@ -22,7 +22,7 @@ dev   = ["pytest", "pytest-cov", "ruff"]
 train = ["h5py>=3.8", "pandas>=1.5", "matplotlib>=3.7"]
 
 [project.scripts]
-vicon2mano = "vicon2mano.cli:main"
+vicon2mano = "vicon2mano.core.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["vicon2mano*"]
