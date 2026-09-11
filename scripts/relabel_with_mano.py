@@ -427,8 +427,10 @@ def _prepare_trial(participant: str, trial: str, *, min_correct_pct: float,
     # from its own confidently-fixed markers rather than from arbitrary ones.
     n_confident = 0
     n_iters_run = 0
+    final_mapping: dict[int, dict[int, int]] = {}
+    converged = None
     if fit_on == "label-agnostic":
-        res_t, pred, n_iters_run = _iterate_label_agnostic(
+        res_t, pred, n_iters_run, final_mapping, converged = _iterate_label_agnostic(
             markers, labels, status, targets, pred, res_t, m2j, offsets,
             res_c.betas, mano_dir=str(MANO_DIR), side=side,
             max_dist_mm=max_dist_mm, max_iters=passes, min_trusted=min_trusted)
@@ -467,7 +469,8 @@ def _prepare_trial(participant: str, trial: str, *, min_correct_pct: float,
                 bones=bones, status=status, pct=pct, m2j=m2j, offsets=offsets,
                 spreads=spreads, frame_idx=frame_idx, targets=targets,
                 res_t=res_t, pred=pred, ref=ref, static_markers=static_markers,
-                n_confident=n_confident, n_iters_run=n_iters_run)
+                n_confident=n_confident, n_iters_run=n_iters_run,
+                fit_on=fit_on, final_mapping=final_mapping, converged=converged)
 
 
 def _iterate_label_agnostic(markers, labels, status, targets, pred, res_t, m2j,
@@ -481,11 +484,33 @@ def _iterate_label_agnostic(markers, labels, status, targets, pred, res_t, m2j,
     the label-agnostic step. Each further iteration applies the previous
     mapping, refits pose (betas frozen) on the resulting full frames, and
     reassigns again. Stops early once every frame's mapping is unchanged
-    from the iteration before.
+    from the iteration before, or once a mapping repeats one already seen
+    (an oscillation between two or more states rather than progress).
 
     Frames with fewer than ``min_trusted`` cascade-CORRECT markers are
     skipped every iteration (mirrors ``_assign_and_verify``'s under-
     constrained-fit guard) and keep their pass-1 prediction.
+
+    ``mr.relabel_frame`` is called with the *same* mask (every present
+    marker in the frame) as both ``candidate_mask`` and ``slot_mask``, so
+    its Hungarian assignment is already a validated one-to-one matching
+    over that frame's present markers — see its docstring. A slot whose
+    best candidate exceeds ``max_dist_mm`` is simply absent from the
+    returned mapping (not forced into a bad match), and any slot absent
+    from the mapping keeps its original observed position when the
+    mapping is later applied via ``mr.apply_relabel`` — so a partial
+    mapping can never duplicate or invent an observation, it only ever
+    permutes a validated subset of the frame's markers.
+
+    Returns (res_t, pred, n_iters_run, final_mapping_by_frame, converged).
+    ``converged`` is True (stable), False (hit max_iters without
+    stabilizing), or the string "cycle" (an earlier iteration's mapping
+    recurred — oscillating rather than converging, so iteration stopped
+    early rather than looping until max_iters for no further benefit).
+    ``final_mapping_by_frame`` is the mapping that ``pred`` was produced
+    from, i.e. the last one actually applied to build the refit input —
+    callers must use this mapping for the final output, not recompute a
+    different (e.g. flagged-only) one from ``pred``.
     """
     max_dist_m = max_dist_mm / 1000.0
     present = np.isfinite(markers[targets]).all(axis=-1)          # (len(targets), N)
@@ -493,7 +518,9 @@ def _iterate_label_agnostic(markers, labels, status, targets, pred, res_t, m2j,
     eligible = n_trusted >= min_trusted
 
     mapping_by_frame: dict[int, dict[int, int]] = {}
+    history: list[dict[int, dict[int, int]]] = [mapping_by_frame]
     n_iters_run = 0
+    converged: bool | str = False
     for it in range(1, max_iters + 1):
         n_iters_run = it
         new_mapping_by_frame: dict[int, dict[int, int]] = {}
@@ -507,30 +534,45 @@ def _iterate_label_agnostic(markers, labels, status, targets, pred, res_t, m2j,
                 new_mapping_by_frame[int(t)] = mapping
                 all_dists.extend(dists.values())
 
-        n_observed = int(present.sum())
         n_assigned = sum(len(m) for m in new_mapping_by_frame.values())
-        n_changed = sum(
+        n_changed_frames = sum(
             1 for t, m in new_mapping_by_frame.items()
             if mapping_by_frame.get(t) != m
         ) + sum(1 for t in mapping_by_frame if t not in new_mapping_by_frame)
         dist_mm = np.array(all_dists) * 1000.0
         dist_summary = (f"mean {dist_mm.mean():.1f}mm p95 {np.percentile(dist_mm, 95):.1f}mm"
                         if dist_mm.size else "n/a")
-        print(f"  label-agnostic iter {it}/{max_iters}: {n_observed} observed markers "
-              f"across {int(eligible.sum())} eligible frames, {n_assigned} assigned "
-              f"({dist_summary}), {n_changed} frame(s) changed since previous iter")
+        print(f"[MANO] label-agnostic iteration {it}/{max_iters}: "
+              f"present candidates {int(present.sum())} across {int(eligible.sum())} "
+              f"eligible frames, valid assignments {n_assigned} ({dist_summary}), "
+              f"changed frames {n_changed_frames}")
 
-        converged = new_mapping_by_frame == mapping_by_frame
+        if new_mapping_by_frame == mapping_by_frame:
+            mapping_by_frame = new_mapping_by_frame
+            converged = True
+            print(f"[MANO] label-agnostic: converged after {it} iteration(s)")
+            break
+
+        cycled = any(new_mapping_by_frame == past for past in history)
         mapping_by_frame = new_mapping_by_frame
-        if converged:
-            print(f"  label-agnostic: assignments stable after {it}/{max_iters} iterations")
+        history.append(mapping_by_frame)
+        if cycled:
+            converged = "cycle"
+            print(f"[MANO] label-agnostic: detected a repeating (oscillating) "
+                  f"assignment at iteration {it} — stopping rather than cycling "
+                  f"to {max_iters}")
             break
 
         # Build the refit input frame by frame: a slot that was reassigned
         # this iteration contributes its new (permuted) position; every
         # other slot contributes its original position only if the cascade
         # already trusts it — an un-reassigned, cascade-INCORRECT slot never
-        # feeds the fit, same rule as the seed fit uses.
+        # feeds the fit, same rule as the seed fit uses. A reassigned slot's
+        # OLD position is never retained as a trusted observation under its
+        # old label in this working copy: `working` is rebuilt fresh from
+        # `markers` each iteration (not accumulated onto the previous
+        # `working`), so a moved CORRECT slot contributes only its new
+        # position, not both.
         working = markers.copy()
         working[status != CORRECT] = np.nan
         for t, mapping in mapping_by_frame.items():
@@ -542,12 +584,15 @@ def _iterate_label_agnostic(markers, labels, status, targets, pred, res_t, m2j,
                               side=side, betas=betas)
         pred = mr.predict_marker_positions(res_t.joints, offsets, m2j, len(labels))
     else:
-        print(f"  label-agnostic: did not converge within {max_iters} iterations")
+        converged = False
+        print(f"[MANO] label-agnostic: reached max iterations ({max_iters}) "
+              f"without convergence")
 
     total_moved = sum(len(m) for m in mapping_by_frame.values())
-    print(f"  label-agnostic: {total_moved} marker-instances reassigned across "
-          f"{len(mapping_by_frame)} frames after {n_iters_run} iteration(s)")
-    return res_t, pred, n_iters_run
+    print(f"[MANO] label-agnostic: final mapping has {total_moved} marker-instance "
+          f"moves across {len(mapping_by_frame)} frames after {n_iters_run} "
+          f"iteration(s) (converged={converged!r})")
+    return res_t, pred, n_iters_run, mapping_by_frame, converged
 
 
 def _assign_and_verify(ctx, *, max_dist_mm, min_trusted: int = 6,
@@ -572,33 +617,70 @@ def _assign_and_verify(ctx, *, max_dist_mm, min_trusted: int = 6,
                   f"unverified (P10, ratio 1.75, had only 18% of moves verify "
                   f"against 86% on P7 at ratio 0.40)")
 
-    # ---- reassign flagged markers ----
+    # ---- reassign markers ----
+    #
+    # "correct"/"all": recompute a flagged-only assignment right here, from
+    # the final pose fit's prediction. Unchanged from before.
+    #
+    # "label-agnostic": do NOT recompute anything here. `ctx["final_mapping"]`
+    # is the exact mapping `_iterate_label_agnostic` already converged (or
+    # stopped) on, over *every present marker*, not just flagged ones — it
+    # is what `ctx["pred"]` was actually produced from. Recomputing a
+    # flagged-only mapping from `pred` here would silently discard the whole
+    # point of the mode (a moved CORRECT-labelled marker would never be
+    # considered, since it was never "flagged") and would also disagree with
+    # the mapping the final refit iteration was actually evaluated against.
     out_status = status.copy().astype(np.int8)
     relabelled = markers.copy()
     n_moves = 0
     n_skipped_untrusted = 0
+    n_orig_correct_moved = 0
+    n_orig_incorrect_moved = 0
     moves_by_pair: dict[tuple[str, str], int] = {}
-    for k, t in enumerate(targets):
-        flagged = status[t] == INCORRECT
-        if not flagged.any():
-            continue
-        # The pose was fitted from this frame's CORRECT markers alone. With
-        # too few of them the fit is under-constrained, so its predictions
-        # are not evidence about anything and reassigning from them would be
-        # inventing structure. Matters most when --min-correct-pct is low.
-        if int((status[t] == CORRECT).sum()) < min_trusted:
-            n_skipped_untrusted += 1
-            continue
-        mapping, _dists = mr.relabel_frame(
-            markers[t] * 1e-3, pred[k], flagged, max_dist_m=max_dist_mm / 1000.0)
-        if not mapping:
-            continue
-        mr.apply_relabel(relabelled, t, mapping)
-        for slot, src in mapping.items():
-            out_status[t, slot] = RELABELLED
-            key = (labels[slot], labels[src])
-            moves_by_pair[key] = moves_by_pair.get(key, 0) + 1
-        n_moves += len(mapping)
+
+    if ctx.get("fit_on") == "label-agnostic":
+        final_mapping = ctx.get("final_mapping") or {}
+        for t, mapping in final_mapping.items():
+            if not mapping:
+                continue
+            mr.apply_relabel(relabelled, t, mapping)
+            for slot, src in mapping.items():
+                out_status[t, slot] = RELABELLED
+                key = (labels[slot], labels[src])
+                moves_by_pair[key] = moves_by_pair.get(key, 0) + 1
+                if status[t, slot] == CORRECT:
+                    n_orig_correct_moved += 1
+                else:
+                    n_orig_incorrect_moved += 1
+            n_moves += len(mapping)
+        print(f"[MANO] label-agnostic final mapping applied: "
+              f"frames changed {len(final_mapping)}, marker instances moved "
+              f"{n_moves}, originally-CORRECT moved {n_orig_correct_moved}, "
+              f"originally-INCORRECT moved {n_orig_incorrect_moved}")
+    else:
+        for k, t in enumerate(targets):
+            flagged = status[t] == INCORRECT
+            if not flagged.any():
+                continue
+            # The pose was fitted from this frame's CORRECT markers alone.
+            # With too few of them the fit is under-constrained, so its
+            # predictions are not evidence about anything and reassigning
+            # from them would be inventing structure. Matters most when
+            # --min-correct-pct is low.
+            if int((status[t] == CORRECT).sum()) < min_trusted:
+                n_skipped_untrusted += 1
+                continue
+            mapping, _dists = mr.relabel_frame(
+                markers[t] * 1e-3, pred[k], flagged, max_dist_m=max_dist_mm / 1000.0)
+            if not mapping:
+                continue
+            mr.apply_relabel(relabelled, t, mapping)
+            for slot, src in mapping.items():
+                out_status[t, slot] = RELABELLED
+                key = (labels[slot], labels[src])
+                moves_by_pair[key] = moves_by_pair.get(key, 0) + 1
+                n_orig_incorrect_moved += 1
+            n_moves += len(mapping)
 
     n_flagged = int((status[targets] == INCORRECT).sum())
     print(f"\n  relabelled {n_moves} marker-instances "
@@ -624,6 +706,8 @@ def _assign_and_verify(ctx, *, max_dist_mm, min_trusted: int = 6,
           f"({after - before:+d} marker-instances)")
     print(f"  of {n_moves} relabelled markers, {now_ok} ({now_ok/max(1,n_moves):.1%}) "
           f"now verify as CORRECT")
+    print(f"[MANO] cascade: before {before/tot:.1%}  after {after/tot:.1%}  "
+          f"delta {(after-before)/tot*100:+.2f} percentage points")
 
     # Accept the repair only if it actually improved the cascade verdict.
     # Same rule fitter._refine_outliers uses for its rescue stage: a proposed
@@ -635,12 +719,16 @@ def _assign_and_verify(ctx, *, max_dist_mm, min_trusted: int = 6,
     if regressed:
         print(f"  REJECTED: repair made it worse ({before/tot:.1%} -> {after/tot:.1%}); "
               f"keeping the original labelling")
+        print("[MANO] repair REJECTED: cascade correctness decreased")
         relabelled = markers.copy()
         status_after = status
         pct_after = pct
         out_status = status.copy().astype(np.int8)
         moved = np.zeros_like(out_status, dtype=bool)
         after, n_moves, now_ok = before, 0, 0
+        n_orig_correct_moved = n_orig_incorrect_moved = 0
+    else:
+        print("[MANO] repair ACCEPTED")
 
     # Was each repair actually good? The cascade's own verdict is too harsh to
     # answer that, because a failing bone flags *both* its endpoints: a marker
@@ -705,7 +793,10 @@ def _assign_and_verify(ctx, *, max_dist_mm, min_trusted: int = 6,
                              ratio=rel["ratio"], verdict=rel["verdict"],
                              p95_err_mm=rel["p95_err_mm"], spacing_mm=rel["spacing_mm"],
                              rejected=bool(regressed),
-                             n_iters_run=ctx.get("n_iters_run", 0)))
+                             n_iters_run=ctx.get("n_iters_run", 0),
+                             converged=ctx.get("converged"),
+                             orig_correct_moved=n_orig_correct_moved,
+                             orig_incorrect_moved=n_orig_incorrect_moved))
 
 
 # ---- animation -------------------------------------------------------------
