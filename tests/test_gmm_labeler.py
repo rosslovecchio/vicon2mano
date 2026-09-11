@@ -401,3 +401,107 @@ def test_gmm_labeler_fit_and_relabel_matches_relabel_sequence():
     via_class = labeler.relabel(swapped, labels, n_hypotheses=2,
                                 process_var=5.0, obs_var=4.0)
     np.testing.assert_array_equal(direct, via_class)
+
+
+# ---------------------------------------------------------------------------
+# Step 6: regime-segmented anchor location
+# ---------------------------------------------------------------------------
+
+
+def _regime_recording(rng, T=600, swap_at=200, swap_until=400):
+    """4 markers; the anchor triple is columns 0,1,2 with a 3-4-5 geometry.
+    Between ``swap_at`` and ``swap_until`` column 2 is swapped with the
+    distractor column 3, so that regime's geometry is wrong -- but the
+    physical triple is still present, under columns (0, 1, 3).
+    """
+    base = np.array([[0.0, 0.0, 0.0], [30.0, 0.0, 0.0], [0.0, 40.0, 0.0],
+                     [70.0, 70.0, 15.0]])
+    out = np.zeros((T, 4, 3))
+    for t in range(T):
+        th = 0.01 * t
+        c, s = np.cos(th), np.sin(th)
+        R = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+        out[t] = base @ R.T + np.array([t * 0.8, 0.0, 0.0])
+        out[t] += rng.normal(scale=0.05, size=(4, 3))
+    for t in range(swap_at, swap_until):
+        out[t, 2], out[t, 3] = out[t, 3].copy(), out[t, 2].copy()
+    return out
+
+
+def test_segment_by_jumps_splits_at_regime_boundaries():
+    rng = np.random.default_rng(30)
+    markers = _regime_recording(rng)
+    segs = gl.segment_by_jumps(markers, (0, 1, 2), jump_mm=3.0, min_len=20)
+    starts = sorted(int(s[0]) for s in segs)
+    # boundaries at the swap in and the swap out
+    assert any(abs(s - 200) <= 1 for s in starts)
+    assert any(abs(s - 400) <= 1 for s in starts)
+
+
+def test_learn_reference_geometry_picks_the_recurring_one():
+    # The correct geometry (3-4-5) appears in two separate regimes; the
+    # corrupted one appears in a single (longer) regime. Recurrence across
+    # independent regimes must win over raw length.
+    rng = np.random.default_rng(31)
+    markers = _regime_recording(rng, T=900, swap_at=150, swap_until=750)
+    segs = gl.segment_by_jumps(markers, (0, 1, 2), jump_mm=3.0, min_len=20)
+    ref = gl.learn_reference_geometry(markers, (0, 1, 2), segs)
+    np.testing.assert_allclose(ref, [30.0, 40.0, 50.0], atol=1.5)
+
+
+def test_solve_segment_anchors_repairs_a_swapped_regime():
+    rng = np.random.default_rng(32)
+    markers = _regime_recording(rng)
+    segs = gl.segment_by_jumps(markers, (0, 1, 2), jump_mm=3.0, min_len=20)
+    ref = gl.learn_reference_geometry(markers, (0, 1, 2), segs)
+    tri = gl.solve_segment_anchors(markers, segs, ref, (0, 1, 2), tol_mm=2.0)
+
+    # clean regimes keep their own labels
+    np.testing.assert_array_equal(tri[100], [0, 1, 2])
+    np.testing.assert_array_equal(tri[500], [0, 1, 2])
+    # the swapped regime is repaired onto the physical triple (0, 1, 3)
+    assert set(tri[300]) == {0, 1, 3}
+
+
+def test_solve_segment_anchors_refuses_when_no_triple_persists():
+    # Pure noise: no triple holds the reference geometry across a regime,
+    # so every frame must come back -1 rather than taking a coincidental
+    # per-frame match (this is the frame-13410 failure mode).
+    rng = np.random.default_rng(33)
+    markers = rng.normal(scale=60.0, size=(300, 8, 3))
+    segs = [np.arange(300)]
+    tri = gl.solve_segment_anchors(markers, segs, np.array([30.0, 40.0, 50.0]),
+                                    (0, 1, 2), tol_mm=1.0, min_persist=0.8)
+    assert (tri == -1).all()
+
+
+def test_solve_segment_anchors_prefers_labelled_columns_when_persistent():
+    rng = np.random.default_rng(34)
+    markers = _regime_recording(rng, swap_at=0, swap_until=0)   # never swapped
+    segs = gl.segment_by_jumps(markers, (0, 1, 2), jump_mm=3.0, min_len=20)
+    ref = gl.learn_reference_geometry(markers, (0, 1, 2), segs)
+    tri = gl.solve_segment_anchors(markers, segs, ref, (0, 1, 2), tol_mm=2.0)
+    found = tri[:, 0] >= 0
+    assert found.any()
+    assert (tri[found] == np.array([0, 1, 2])).all()
+
+
+def test_solve_segment_anchors_refuses_a_short_regime_repair():
+    # A 40-frame regime whose labelled triple is wrong: the correct triple
+    # is present and matches 100% of the regime, but 40 frames is far too
+    # little evidence to justify a wholesale relabel against ~9k candidate
+    # triples (the P7 frame 38315 failure). Keeping the labelled triple
+    # needs no such evidence, so only the *repair* is length-gated.
+    rng = np.random.default_rng(35)
+    markers = _regime_recording(rng, T=500, swap_at=200, swap_until=240)
+    segs = gl.segment_by_jumps(markers, (0, 1, 2), jump_mm=3.0, min_len=20)
+    ref = gl.learn_reference_geometry(markers, (0, 1, 2), segs)
+
+    lax = gl.solve_segment_anchors(markers, segs, ref, (0, 1, 2),
+                                    tol_mm=2.0, min_repair_len=10)
+    assert set(lax[220]) == {0, 1, 3}          # repair taken when ungated
+
+    strict = gl.solve_segment_anchors(markers, segs, ref, (0, 1, 2),
+                                       tol_mm=2.0, min_repair_len=200)
+    assert (strict[220] == -1).all()           # refused: regime too short
+    np.testing.assert_array_equal(strict[100], [0, 1, 2])   # clean regime kept

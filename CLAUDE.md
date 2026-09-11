@@ -437,79 +437,100 @@ panel when ground truth is available. Output in `results/gmm_labeler/`
 
 ### Whole-trial run, with no cascade at all (`scripts/relabel_trial_gmm.py`)
 
-strategyGMM no longer consults the quality cascade for anything. Every
-input it needs is derived from the marker geometry itself, which matters
-because the cascade is deliberately tuned to over-flag (see its section
-above) and that made it a poor gate.
+strategyGMM derives everything from marker geometry -- no cascade, no manual
+labels. Reference bone lengths come from `consensus_bone_lengths` (RANSAC
+over frames: each frame's whole bone-length vector is a hypothesis scored by
+how many others agree on *every* bone. Wrong configurations don't agree with
+*each other*, so only correct frames form a large consensus. Needed because
+`Ring1`/`Pinky1` are mislabelled in the *majority* of P7 frames, so their
+marginal modes lock onto the wrong geometry -- `Palm2-Ring1` reads 34mm,
+shorter than `Palm2-Pinky1` at 54mm, anatomically impossible; consensus
+gives 50mm).
 
-**Anchor plate: learn it, then find it.** `learn_anchor_triangle` takes
-the *modal* pairwise distances of `Palm1`/`Palm2`/`Palm3` (the rigid
-plate's true geometry is the value that repeats; the median lands between
-the right and wrong configurations and matches neither).
-`locate_anchor_triangle` then searches each frame's whole point cloud for
-a triple matching that triangle — so a frame whose palm labels were
-swapped still yields a usable frame, with the anchors *repaired* rather
-than merely rejected. Coverage on P7/Trial1_handsonly: **20% → 72.8% of
-frames**, of which 25,447 needed repaired anchors. The modal triangle
-(32.57/40.36/24.38 mm) was later confirmed independently by consensus.
+**There is no rigid plate** -- the palm markers are taped to skin. But the
+recording is not drifting either: frame to frame the palm distances move
+**0.06mm** (median, p99 1.2mm) while occasionally jumping up to **119mm**
+and then *holding*. It is **piecewise stable across labelling regimes**,
+max std 0.46mm inside a regime. The assumption is local rigidity within a
+regime, not global rigidity.
 
-**Reference bone lengths need consensus, not marginal modes.** The first
-whole-trial run had *every* anchor-valid frame (34,688/34,688) proposing a
-reassignment — the signature of a model trained on bad data. Cause: the
-per-bone modal reference is only valid where that bone is correct in most
-frames, and on this trial `Ring1`/`Pinky1` are mislabelled in the
-*majority* of frames, so their modes locked onto the wrong configuration
-(`Palm2-Ring1` = 34 mm, shorter than `Palm2-Pinky1` = 54 mm, which is
-anatomically impossible). `consensus_bone_lengths` fixes this with RANSAC
-over frames: each frame's whole bone-length vector is a hypothesis, scored
-by how many other frames agree on *every* bone at once. Wrong
-configurations do not agree with each other — each swap produces a
-different distance vector — so only correct frames pile into one large
-consensus. `Palm2-Ring1` → 50 mm, `Palm2-Middle1` 74 → 51 mm. The
-inliers double as the GMM training set: geometrically verified clean, no
-external labels involved.
+`segment_by_jumps` -> `learn_reference_geometry` -> `solve_segment_anchors`
+implement that: split at the jumps (165 regimes on P7), take the geometry
+recurring across the most *independent* regimes (frame count is the wrong
+criterion -- one 1930-frame corrupted regime outlasts the good ones), then
+solve each regime's anchor **once by pooling over all its frames**. Pooling
+is what makes it decisive: the true triple matches ~100% of a regime's
+frames while the best coincidental rival reaches ~20%, a gap no single
+frame can show.
 
-**Model-free veto.** A frame's reassignment is applied only if it does not
-worsen that frame's total bone-length error against the consensus
-reference — an independent check on the model that proposed it, in the
-spirit of `relabel_with_mano.py`'s accept-only-if-verification-agrees
-contract. It earns its keep immediately: P7 frame 1427 proposes a
-`Thumb1`↔`Thumb2` swap that would send the touched bones from 0.9 mm to
-34.3 mm of error (they are adjacent joints ~34 mm apart, so swapping them
-is exactly one bone-length wrong), and it is rejected.
+**Why the single-frame search was replaced.** `locate_anchor_triangle`
+matched 3 distances in one frame, which is not a unique signature among 22
+markers: only **23% of located triangles were the real palm markers, 43%
+contained none of them**. Tightening did not help (46% correct even at
+1.5mm), nor did temporal persistence of a global reference (a spurious
+triple held for >1700 consecutive frames). **Correction to earlier notes in
+this file: the "coverage 20% -> 72.8% -> 97.3%" figures were inflated --
+most of that coverage was coincidental matches, which is also why those runs
+proposed changes on 83-94% of frames and the veto rejected ~28k of them.**
 
-**Whole-trial result, P7/Trial1_handsonly** (47,656 frames, 2 passes,
-~20 min):
+**Three verification bugs found by spot-checking single frames** (13410,
+10057, 38315 -- worth re-reading when a verdict looks surprising):
 
-    anchor frame located          34,688 frames (72.8%), 25,447 repaired
-    consensus-clean frames         3,260 (6.8%)  <- training set
-    marker-instances reassigned  137,163 (26.4% of usable slots)
-    frames rejected by the veto   20,356
-    bone error, all bones         14.39mm -> 12.95mm  (17.2% improved)
-    bones touching a reassignment 21.00mm -> 15.40mm  (66.9% improved)
+1. *The animation title reported the proposal, not the outcome* -- vetoed
+   frames read "(anchors repaired) reassigned 0" with identical before/after
+   error. Now reports `(repair proposed but VETOED -- unchanged)`.
+2. *The veto was circular.* An anchor repair forces `Palm1-Palm2`,
+   `Palm2-Palm3`, `Palm1-Palm3` to match by construction, so scoring them
+   handed every repair a free ~67mm "improvement". Frame 38315: 529->478
+   ACCEPT with them, 461->476 REJECT without. The veto now excludes the
+   anchor's own bones.
+3. *Persistence was length-blind.* Frame 38315 anchored at "100%" over a
+   **35-frame** regime and wrecked the hand; accepted regimes had median
+   length 39. A *repair* now requires `min_repair_len=200` frames; keeping
+   the labelled triple needs no such evidence.
 
-Read that honestly: the accepted repairs measurably improve geometry where
-they act, but **only 6.8% of this trial is fully self-consistent to begin
-with** — P7/Trial1_handsonly is severely mislabelled throughout, not just
-around frame 42789, which matches the cascade independently rating these
-markers 10–30% correct. A recording this broken cannot be fully repaired
-by relabelling alone, and the veto having to reject 20k frames is the
-method correctly declining to guess.
+Plus an absolute floor (`--max-residual-mm`, default 8): a frame still that
+far from anatomically valid has not been repaired, however much it improved.
 
-**Animation.** `scripts/relabel_trial_gmm.py` writes a Plotly player in the
-same style as `results/mano_relabelling_pass1` (finger-coloured markers
-with digits, skeleton lines, per-marker status rings, Play/Pause + frame
-slider) to `results/gmm_relabelling/`. Rings: green = label kept, blue =
-reassigned, none = no anchor frame that frame. Titles carry the per-frame
-reassignment count and bone error before/after.
-`scripts/animate_gmm_relabel.py` covers the smaller before/after
-comparison case as `.gif` + a self-contained `.html` scrubbing player
-(the `animate_fit.py` `_HTML_TEMPLATE` mechanism).
+**Whole-trial result, P7/Trial1_handsonly** (47,656 frames, 2 passes, ~5min):
 
-**Next steps (not yet done):** run the injected-swap protocol across all
-finger-marker pairs and several participants for a per-pair confusion
-matrix (adjacent pairs like `Middle1`/`Ring1` should be the hard ones —
-the cascade's documented open limitation this strategy targets); and try a
-trial that is *not* majority-corrupted, where the consensus training set
-would be far larger than 6.8% of frames, to see what the method's ceiling
-actually is.
+    anchor solved                  7,730 frames (16.2%), 1,150 repaired
+    regimes refused                162 of 165
+    consensus-clean (training)     3,260 frames (6.8%)
+    marker-instances reassigned    3,453 (3.0% of usable slots)
+    frames rejected by the veto    3,797
+    non-anchor bones touching a reassignment  17.96mm -> 4.43mm (81.2% better)
+
+High precision, low recall: it acts on ~500 of 47,656 frames, but where it
+acts it takes the touched bones to 4.4mm -- near anatomically valid. The
+spot-checked frames now resolve correctly: 13410 refused (no anchor
+findable), 38315 refused (regime too short), 10057 anchored correctly but
+left untouched by the residual floor, since repairing it still left ~19.7mm.
+
+**The remaining bottleneck is the training set, not the anchor.** The 3,260
+consensus-clean frames have **<1mm distance-std between every marker pair
+including fingertips** -- they are all one near-static pose. Same dead-prior
+condition measured directly for static training (99.3% of likelihood cells
+clamped at the floor; correct-pair loglik -27.7 vs -4.5 for range-of-motion
+training). Frame 10057 is the consequence: a correct anchor whose fingers
+still do not resolve.
+
+**Cohort context** (consensus-clean % per trial): nothing exceeds 15%.
+P7 6.8/6.8/2.7/5.3, P9 7.9/0.9/3.1/0.1, P10 14.2/9.1/15.1/6.4,
+P11 10.5/0.5/13.5/2.4. "Hands only" trials are 2-10x cleaner than HOI.
+Occlusion is *not* the problem -- median visibility is 22/22 markers and no
+frame was lost for want of markers.
+
+**Statics do not help train the prior.** A static is one pose (0.1mm spread)
+where markers actually vary by 9.1mm; and both statics checked are
+themselves mislabelled (P10: `Palm2-Thumb1`=129mm; P9's palm plate sits
+under `Index1`/`Middle1`/`Palm3`).
+
+**Animation.** Plotly player in the same style as
+`results/mano_relabelling_pass1` -> `results/gmm_relabelling/`. Rings: green
+= label kept, blue = reassigned, none = no anchor that frame.
+
+**Next steps:** give the prior real pose coverage -- a few hundred
+hand-labelled frames spanning poses would break the ceiling directly. Label
+where strategyGMM disagrees with the on-disk labels, starting with
+P10/Trial2 Hands only (15.1%, the cleanest trial in the cohort).

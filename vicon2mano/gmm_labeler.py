@@ -30,6 +30,7 @@ preference for dependency-free numeric routines (see
 from __future__ import annotations
 
 import heapq
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -832,3 +833,169 @@ class GMMLabeler:
                              n_hypotheses=n_hypotheses, theta_min=theta_min,
                              process_var=process_var, obs_var=obs_var,
                              init_frame=init_frame)
+
+# ---------------------------------------------------------------------------
+# 6. Regime-segmented anchor location
+# ---------------------------------------------------------------------------
+#
+# Supersedes `locate_anchor_triangle`, which matched 3 mutual distances in a
+# single frame. That is not a unique signature among ~22 markers: measured on
+# P7/Trial1_handsonly only 23% of located triangles were the real palm markers
+# and 43% contained none of them (frame 13410 anchored on Pinky2/Pinky3/Index3,
+# a triple that matches by coincidence in 20% of nearby frames). Tightening the
+# tolerance does not fix it (46% correct even at 1.5mm), and neither does
+# demanding temporal persistence of a *global* reference.
+#
+# The right model came from two measurements:
+#
+#   * There is no rigid plate. The palm markers are taped to skin, so a single
+#     fixed reference geometry for the whole recording is wrong in principle.
+#   * But the recording is piecewise stable. Frame to frame the palm distances
+#     move by 0.06mm at the median (p99 1.2mm), while occasionally jumping by
+#     up to 119mm and then *holding* the new value. Within one such regime the
+#     geometry has a max std of 0.46mm (p90 0.90mm).
+#
+# So the assumption is not global rigidity but *local* rigidity within a
+# labelling regime -- much weaker, and empirically verified. Segment at the
+# jumps, then solve each segment's anchor identity by pooling over all its
+# frames at once. Pooling is what makes the answer unambiguous: over a segment
+# the true triple matches ~100% of frames while the best coincidental rival
+# reaches ~20%, a separation no single frame can provide.
+
+def segment_by_jumps(
+    markers_mm: np.ndarray,        # (T, N, 3)
+    idxs: tuple[int, int, int],
+    *,
+    jump_mm: float = 3.0,
+    min_len: int = 30,
+) -> list[np.ndarray]:
+    """Split the recording into regimes of stable anchor geometry.
+
+    A boundary is any frame where one of the three mutual distances moves
+    by more than ``jump_mm``, or becomes non-finite. Segments shorter than
+    ``min_len`` are dropped: pooling is the whole point, so a regime too
+    short to pool over cannot be solved confidently anyway.
+    """
+    a, b, c = idxs
+    d = np.stack([
+        np.linalg.norm(markers_mm[:, a] - markers_mm[:, b], axis=1),
+        np.linalg.norm(markers_mm[:, a] - markers_mm[:, c], axis=1),
+        np.linalg.norm(markers_mm[:, b] - markers_mm[:, c], axis=1),
+    ], axis=1)
+    step = np.abs(np.diff(d, axis=0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        worst = np.nanmax(np.where(np.isfinite(step), step, np.nan), axis=1)
+    moved = ~(worst <= jump_mm)                           # NaN -> boundary
+    bounds = np.flatnonzero(moved) + 1
+    return [s for s in np.split(np.arange(len(markers_mm)), bounds) if len(s) >= min_len]
+
+
+def learn_reference_geometry(
+    markers_mm: np.ndarray,
+    idxs: tuple[int, int, int],
+    segments: list[np.ndarray],
+    *,
+    tol_mm: float = 2.0,
+) -> np.ndarray:
+    """The anchor geometry that recurs across the most *independent* regimes.
+
+    Each segment votes once with its own pooled median geometry, weighted by
+    its length; the largest cluster of agreeing segments wins. Recurrence
+    across regimes separated by mislabelling episodes is strong evidence of
+    the true anatomy, in a way that any single stretch -- however long --
+    is not.
+    """
+    a, b, c = idxs
+    geoms, weights = [], []
+    for s in segments:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            g = np.array([
+                np.nanmedian(np.linalg.norm(markers_mm[s, a] - markers_mm[s, b], axis=1)),
+                np.nanmedian(np.linalg.norm(markers_mm[s, a] - markers_mm[s, c], axis=1)),
+                np.nanmedian(np.linalg.norm(markers_mm[s, b] - markers_mm[s, c], axis=1)),
+            ])
+        if np.isfinite(g).all():
+            geoms.append(g)
+            weights.append(len(s))
+    if not geoms:
+        return np.full(3, np.nan)
+    G, W = np.array(geoms), np.array(weights, dtype=float)
+    best, best_key = G[0], (-1, -1.0)
+    for g in G:
+        agree = (np.abs(G - g) <= tol_mm).all(axis=1)
+        # Rank by how many *independent regimes* agree, with total frames
+        # only as a tiebreak. Frame count alone is the wrong criterion: a
+        # single persistent mislabelling can easily outlast the correct
+        # stretches (P7 has a 1930-frame corrupted regime), whereas a
+        # geometry that keeps *reappearing* after intervening episodes is
+        # evidence no single stretch can manufacture.
+        key = (int(agree.sum()), float(W[agree].sum()))
+        if key > best_key:
+            best, best_key = np.average(G[agree], axis=0, weights=W[agree]), key
+    return best
+
+
+def solve_segment_anchors(
+    markers_mm: np.ndarray,
+    segments: list[np.ndarray],
+    ref_geom: np.ndarray,
+    labelled: tuple[int, int, int],
+    *,
+    tol_mm: float = 2.0,
+    n_sample: int = 60,
+    min_persist: float = 0.8,
+    min_repair_len: int = 200,
+) -> np.ndarray:
+    """Per-frame anchor triple, solved once per regime by pooling.
+
+    Returns ``(T, 3)``; ``-1`` for every frame of a segment whose best
+    candidate triple does not hold the reference geometry for at least
+    ``min_persist`` of the sampled frames, for regimes shorter than
+    ``min_repair_len`` that would need a *repaired* (non-labelled) anchor,
+    and for frames outside any segment.
+
+    Refusing is the point. On P7/Trial1_handsonly the segment containing
+    frame 13410 has no triple above 20% persistence -- the palm's three
+    physical markers are simply not identifiable there -- and the honest
+    output is "no anchor", not the coincidental match the single-frame
+    search used to return.
+    """
+    T, N, _ = markers_mm.shape
+    out = np.full((T, 3), -1, dtype=int)
+    tri = np.array([(a, b, c)
+                    for a in range(N) for b in range(N) for c in range(N)
+                    if a != b and b != c and a != c])
+    ta, tb, tc = tri[:, 0], tri[:, 1], tri[:, 2]
+    lab_row = np.flatnonzero((ta == labelled[0]) & (tb == labelled[1])
+                              & (tc == labelled[2]))
+
+    for seg in segments:
+        fr = seg[np.linspace(0, len(seg) - 1, min(n_sample, len(seg))).astype(int)]
+        hits = np.zeros(len(tri))
+        for t in fr:
+            pts = markers_mm[t]
+            d = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=-1)
+            ok = ((np.abs(d[ta, tb] - ref_geom[0]) <= tol_mm)
+                  & (np.abs(d[ta, tc] - ref_geom[1]) <= tol_mm)
+                  & (np.abs(d[tb, tc] - ref_geom[2]) <= tol_mm))
+            hits += np.nan_to_num(ok.astype(float))
+        frac = hits / len(fr)
+        # prefer the nominal columns when they are themselves persistent,
+        # so a correctly-labelled regime keeps its own identity
+        if lab_row.size and frac[lab_row[0]] >= min_persist:
+            out[seg] = labelled
+            continue
+        # Proposing a *different* triple is a much stronger claim than
+        # keeping the labelled one, so it needs stronger evidence. High
+        # persistence over a short regime is weak: with ~9k candidate
+        # triples, a coincidental match across 35 frames is cheap, and
+        # P7 frame 38315 duly anchored on Palm3/Thumb1/Thumb2 at "100%"
+        # over exactly 35 frames and wrecked the rest of the hand.
+        if len(seg) < min_repair_len:
+            continue
+        k = int(np.argmax(frac))
+        if frac[k] >= min_persist:
+            out[seg] = tri[k]
+    return out

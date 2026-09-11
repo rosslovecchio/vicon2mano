@@ -181,7 +181,8 @@ def bone_error(markers: np.ndarray, bones: list[tuple[int, int]],
 
 def run(participant: str, trial: str, *, n_out: int, n_hypotheses: int,
         tol_mm: float, passes: int, process_var: float, obs_var: float,
-        out_dir: Path) -> None:
+        out_dir: Path, min_persist: float = 0.8,
+        max_residual_mm: float = 8.0) -> None:
     trial_path, *_ = rwm.find_trial_csv(participant, trial)
     if trial_path is None:
         raise SystemExit(f"No CSV mapped to {participant}/{trial}")
@@ -195,15 +196,19 @@ def run(participant: str, trial: str, *, n_out: int, n_hypotheses: int,
     target_idxs = [by_name[n] for n in FINGER_NAMES if n in by_name]
 
     # ---- 1. anchor plate: learn its geometry, then find it every frame ----
-    ref_tri = gl.learn_anchor_triangle(markers, anchor_idxs)
-    print(f"  anchor triangle (modal, mm): {np.round(ref_tri, 2)}")
     t0 = time.time()
-    triangle = gl.locate_anchor_triangle(markers, ref_tri, anchor_idxs, tol_mm=tol_mm)
+    segments = gl.segment_by_jumps(markers, anchor_idxs)
+    ref_tri = gl.learn_reference_geometry(markers, anchor_idxs, segments)
+    triangle = gl.solve_segment_anchors(markers, segments, ref_tri, anchor_idxs,
+                                        tol_mm=tol_mm, min_persist=min_persist)
     found = triangle[:, 0] >= 0
     as_labelled = found & (triangle == np.array(anchor_idxs)).all(axis=1)
-    print(f"  anchor frame located on {found.mean():.1%} of frames "
+    print(f"  {len(segments)} regimes; reference geometry "
+          f"{np.round(ref_tri, 2)}")
+    print(f"  anchor solved on {found.mean():.1%} of frames "
           f"({found.sum()}), {int((found & ~as_labelled).sum())} with repaired "
-          f"anchors  [{time.time() - t0:.0f}s]")
+          f"anchors, {len(segments) - len(set(map(tuple, triangle[found])))} "
+          f"regimes refused  [{time.time() - t0:.0f}s]")
 
     R, origin = gl.rigid_frames_from_triangle(markers, triangle)
     local = gl.to_local(markers, R, origin)     # NaN where no anchor frame
@@ -219,6 +224,9 @@ def run(participant: str, trial: str, *, n_out: int, n_hypotheses: int,
     # with the largest mutually-consistent set -- geometrically verified
     # clean, with no cascade and no manual labels.
     bones = _finger_chains(labels)
+    anchor_set = set(anchor_idxs)
+    anchor_bone_idx = [k for k, (i, j) in enumerate(bones)
+                       if i in anchor_set and j in anchor_set]
     ref_len, inliers = consensus_bone_lengths(markers, bones)
     print(f"  consensus reference from {len(inliers)} self-consistent frames "
           f"({len(inliers) / T:.1%})")
@@ -307,7 +315,18 @@ def run(participant: str, trial: str, *, n_out: int, n_hypotheses: int,
             eb = bone_error(snapshot[None], bones, ref_len)[0]
             ea = bone_error(cand[None], bones, ref_len)[0]
             ok = np.isfinite(eb) & np.isfinite(ea)
-            if ok.any() and np.nansum(ea[ok]) > np.nansum(eb[ok]) + 1e-9:
+            # The anchor's own bones are forced to match the reference by
+            # the repair itself, so scoring them is circular -- it hands
+            # every anchor repair a free ~67mm "improvement" and lets bad
+            # frames through (P7 frame 38315: 529->478 ACCEPT with them,
+            # 461->476 REJECT without). Judge on the bones the repair did
+            # not get to choose.
+            ok[anchor_bone_idx] = False
+            worse = ok.any() and np.nansum(ea[ok]) > np.nansum(eb[ok]) + 1e-9
+            # ...and a frame still this far from anatomically valid has not
+            # been "repaired" in any useful sense, however much it improved.
+            still_bad = ok.any() and np.nanmean(ea[ok]) > max_residual_mm
+            if worse or still_bad:
                 n_rejected += 1
                 relabelled[t] = snapshot
                 status[t] = np.where(cand_status == NO_FRAME, NO_FRAME, UNCHANGED)
@@ -384,13 +403,24 @@ def build_figure(markers, labels, bones, status, found, as_labelled,
     half = 200
 
     def title(t):
+        # Report the OUTCOME, not the proposal. `as_labelled` says the
+        # anchor search preferred a different triple, but that repair is
+        # only real if the bone-length veto accepted it -- otherwise the
+        # frame is byte-identical to the input. Reporting the proposal
+        # made vetoed frames read as "(anchors repaired)  reassigned 0"
+        # with identical before/after error, which is a contradiction
+        # (seen on frame 13410).
         n_moved = int((status[t] == REASSIGNED).sum())
         if not found[t]:
             tag = "   (no anchor frame — untouched)"
-        elif as_labelled[t]:
-            tag = ""
-        else:
+        elif n_moved == 0 and not as_labelled[t]:
+            tag = "   (repair proposed but VETOED — unchanged)"
+        elif n_moved == 0:
+            tag = "   (no change proposed)"
+        elif not as_labelled[t]:
             tag = "   (anchors repaired)"
+        else:
+            tag = ""
         eb = np.nanmean(err_before[t]); ea = np.nanmean(err_after[t])
         bone = "" if not np.isfinite(eb) else \
             f"  bone err {ea:.1f}mm (was {eb:.1f}mm)"
@@ -493,7 +523,7 @@ def main(argv=None):
     ap.add_argument("--n-out", type=int, default=200,
                     help="frames sampled into the animation")
     ap.add_argument("--n-hypotheses", type=int, default=5)
-    ap.add_argument("--tol-mm", type=float, default=4.5,
+    ap.add_argument("--tol-mm", type=float, default=2.0,
                     help="anchor-triangle match tolerance. The plate is not "
                          "perfectly rigid (mount flex, marker wobble): the "
                          "best-achievable triangle error on P7 is ~1.2mm per "
@@ -502,6 +532,14 @@ def main(argv=None):
                          "takes coverage 73.4%% -> 97.5%% without changing the "
                          "trainable-clean-frame count; the bone-length veto is "
                          "the backstop against a loose match.")
+    ap.add_argument("--max-residual-mm", type=float, default=8.0,
+                    help="reject a frame's repair if the result is still "
+                         "further than this from anatomically valid, however "
+                         "much it improved")
+    ap.add_argument("--min-persist", type=float, default=0.8,
+                    help="fraction of a regime's frames a candidate anchor "
+                         "triple must match before it is accepted; below this "
+                         "the regime is refused rather than guessed at")
     ap.add_argument("--passes", type=int, default=2,
                     help="training passes (2 = bootstrap refit on "
                          "self-consistent frames)")
@@ -512,7 +550,8 @@ def main(argv=None):
     run(args.participant, args.trial, n_out=args.n_out,
         n_hypotheses=args.n_hypotheses, tol_mm=args.tol_mm, passes=args.passes,
         process_var=args.process_var, obs_var=args.obs_var,
-        out_dir=Path(args.out_dir))
+        out_dir=Path(args.out_dir), min_persist=args.min_persist,
+        max_residual_mm=args.max_residual_mm)
 
 
 if __name__ == "__main__":
