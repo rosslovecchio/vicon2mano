@@ -36,6 +36,12 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+# chi2.ppf(0.95, df=3): standard 95% gating threshold for a 3-DOF Gaussian
+# residual (Mahalanobis distance^2), used by MarkerKalman.gate_loglik to
+# score a marker left unmatched in a hypothesis. Hardcoded (rather than
+# importing scipy.stats for one constant) since it never changes.
+_CHI2_3DOF_95PCT = 7.814727903251179
+
 # ---------------------------------------------------------------------------
 # 1. Rigid local frame
 # ---------------------------------------------------------------------------
@@ -462,6 +468,33 @@ def top_n_assignments(
 # ---------------------------------------------------------------------------
 
 
+def _safe_logdet(S: np.ndarray) -> float:
+    """``log(det(S))`` for a covariance matrix that is supposed to be
+    positive-definite, guarding against the case where it silently isn't.
+
+    ``(I - KH)P`` (the covariance update ``MarkerKalman.update`` uses) is a
+    numerically fragile form -- unlike the Joseph-form update, it does not
+    guarantee ``P`` stays symmetric positive-definite under floating-point
+    roundoff. ``np.linalg.slogdet`` still returns a number when that
+    happens (``sign <= 0``), silently reinterpreting ``logdet`` as
+    ``log(|det(S)|)`` with the wrong sign implied, or ``-inf`` if
+    ``det(S) == 0`` -- either way turning every log-likelihood computed from
+    it into nonsense with no signal that anything went wrong. Long stress
+    tests (5000 predict/update cycles with periodic occlusion; a
+    100,000-frame permanent-occlusion run) never reproduced this in
+    practice, but ``gate_loglik`` now calls this on every occluded marker in
+    every hypothesis every frame -- far more often than ``residual_loglik``
+    alone ever was -- so failing loudly here is cheap insurance against a
+    silent nonsense score winning a Viterbi comparison undetected.
+    """
+    sign, logdet = np.linalg.slogdet(S)
+    if sign <= 0:
+        raise np.linalg.LinAlgError(
+            f"covariance is not positive-definite (slogdet sign={sign}); "
+            "the Kalman covariance update has lost numerical validity")
+    return logdet
+
+
 class MarkerKalman:
     """Constant-velocity Kalman filter for one marker's local-frame position.
 
@@ -472,8 +505,23 @@ class MarkerKalman:
     """
 
     def __init__(self, pos0: np.ndarray, *, process_var: float = 1.0, obs_var: float = 25.0):
-        self.x = np.concatenate([pos0, np.zeros(3)])
+        pos0 = np.asarray(pos0, dtype=float)
+        unknown = ~np.isfinite(pos0)
+        self.x = np.concatenate([np.where(unknown, 0.0, pos0), np.zeros(3)])
         self.P = np.eye(6) * 100.0
+        # A non-finite seed means the position is genuinely unknown at init
+        # (an occluded ``init_frame`` -- entirely normal on real Vicon data).
+        # Seeding 0 at the usual 100mm^2 uncertainty would instead *assert*
+        # the marker sits at the local origin; a large variance says
+        # "unknown", so the first real observation dominates immediately.
+        #
+        # Letting the NaN through was a crash, not just an inaccuracy: it
+        # propagated through predict/update into every transition score, and
+        # since `nan > -inf` is False the Viterbi node selected no bank at
+        # all and then subscripted None.
+        if unknown.any():
+            idx = np.flatnonzero(unknown)
+            self.P[idx, idx] = 1e6
         self.F = np.eye(6)
         self.F[0:3, 3:6] = np.eye(3)
         self.Q = np.eye(6) * process_var
@@ -492,12 +540,56 @@ class MarkerKalman:
         state, without committing an update. Returns ``(loglik, residual)``.
         """
         y = obs - self.H @ self.x
+        if not np.isfinite(y).all():
+            # No information: an unobservable residual scores as impossible
+            # rather than as NaN, which would poison every comparison it
+            # took part in.
+            return -np.inf, y
         S = self.H @ self.P @ self.H.T + self.R
-        sign, logdet = np.linalg.slogdet(S)
+        logdet = _safe_logdet(S)
         ll = -0.5 * (3 * np.log(2 * np.pi) + logdet + y @ np.linalg.solve(S, y))
         return float(ll), y
 
+    def gate_loglik(self) -> float:
+        """Score assigned to *not* matching this filter to any observation
+        this frame -- the log-density at the standard 95% chi-squared gate
+        boundary (3 DOF, Mahalanobis distance^2 = 7.8147) of this filter's
+        own current residual covariance, rather than a fixed constant.
+
+        This is the missing half of ``residual_loglik``: a real match
+        scores worse than leaving the marker unassigned once its residual
+        falls outside the 95% gate (implausible -- probably the wrong
+        marker), and better than leaving it unassigned everywhere inside
+        the gate (plausible). Deriving it from each filter's own ``S``
+        (rather than a fixed constant) is what makes that comparison
+        meaningful regardless of the filter's current uncertainty: both
+        this and ``residual_loglik`` share the same ``logdet(S)`` term, so
+        it cancels in the match-vs-drop comparison and the gap between them
+        depends only on how far inside the gate the residual sits, not on
+        whether the filter happens to be tightly converged or still wide
+        after a recent gap. A fixed constant would instead make the
+        match-vs-drop comparison arbitrarily easier or harder to win purely
+        as a side effect of the filter's unrelated current uncertainty.
+
+        Scoring an unmatched marker at a *fixed* 0, as before, made every
+        hypothesis strictly better the more markers it dropped: a real
+        match's log-density is generically negative for any non-trivial
+        covariance, so 0 beat it regardless of fit quality, independent of
+        this gating logic entirely.
+        """
+        S = self.H @ self.P @ self.H.T + self.R
+        logdet = _safe_logdet(S)
+        return -0.5 * (3 * np.log(2 * np.pi) + logdet + _CHI2_3DOF_95PCT)
+
     def update(self, obs: np.ndarray) -> None:
+        """Innovation update. A non-finite observation is skipped, leaving
+        the predicted state in place -- which is exactly the paper's
+        occlusion handling (Section 3.2: extrapolate the trajectory from the
+        predicted state, omit the innovation update), and keeps a single
+        gap from permanently poisoning the filter with NaN.
+        """
+        if not np.isfinite(obs).all():
+            return
         y = obs - self.H @ self.x
         S = self.H @ self.P @ self.H.T + self.R
         K = self.P @ self.H.T @ np.linalg.inv(S)
@@ -525,8 +617,24 @@ def _transition_score(
     """Sum of per-marker Kalman residual log-likelihoods for one candidate
     hypothesis, given filters already ``predict()``-ed to this frame.
 
+    An unmatched marker (occluded, or dropped by the assignment) scores
+    ``kf.gate_loglik()`` -- the density at each filter's own 95% gate
+    boundary -- rather than a fixed 0. Scoring it 0 made a hypothesis
+    strictly better, monotonically, the more markers it left unassigned:
+    a real match's log-density is generically negative for any non-trivial
+    covariance, so 0 beat it regardless of fit quality, and the comparison
+    never actually depended on geometry. See ``MarkerKalman.gate_loglik``
+    for why the gate boundary (not a global constant) is the right
+    reference value.
+
     Returns ``(score, predictions)`` where ``predictions`` is what each
-    filter predicted this step (used for extrapolating occluded markers).
+    filter predicted this step. Currently unused by the only call site
+    (``viterbi_select`` discards it as ``_preds``) -- it is not yet wired
+    into an extrapolation cap; ``MAX_OCCLUSION_FRAMES`` above is still dead
+    code, so an occluded marker's covariance can currently grow unbounded
+    rather than being capped and reinitialised per the paper's Section 3.2.
+    This return value is the natural hook for that fix when it lands, not
+    evidence it is already implemented.
     """
     score = 0.0
     preds: dict[int, np.ndarray] = {}
@@ -536,6 +644,7 @@ def _transition_score(
         preds[m] = pred
         j = assign[i]
         if j < 0:
+            score += kf.gate_loglik()
             continue
         ll, _ = kf.residual_loglik(obs_local[j])
         score += ll
@@ -550,14 +659,28 @@ def viterbi_select(
     *,
     process_var: float = 1.0,
     obs_var: float = 25.0,
+    w_emission: float = 1.0,
 ) -> list[np.ndarray]:
     """Pick the most probable sequence of hypotheses via Viterbi + Kalman.
 
     ``hypotheses_per_frame[t]`` is the list of ``(assign, cost)`` candidates
-    for frame ``t`` from :func:`top_n_assignments` (``cost`` here is unused;
-    hypothesis scoring is spatial-only and already baked into which
-    candidates were generated -- selection combines emission (spatial) and
-    transition (temporal) scores per the paper's Viterbi trellis).
+    for frame ``t`` from :func:`top_n_assignments`, where ``cost`` is the
+    assignment's total *negative* spatial log-likelihood (see
+    ``_build_hypotheses``, which negates :func:`loglik_matrix`). Its
+    negation is the paper's emission score (Eq. 1) and is added to every
+    trellis node, alongside the Kalman transition score (Eq. 3).
+
+    Both terms are required. With emission omitted, selection reduces to
+    pure temporal smoothness: the GMM only *nominates* the N candidates and
+    has no vote on which of them wins, so a swap that persists is scored
+    exactly as well as the truth (it is just as smooth), and the filter bank
+    can never be pulled back out of a wrong-but-stable track -- which is the
+    one thing the spatial model exists to do (paper Sections 3.1-3.2).
+
+    ``w_emission`` scales the spatial term against the temporal one. The
+    paper uses them 1:1; Section 5 suggests exposing exactly this knob to
+    trade smoothness against spatial likelihood when the training set does
+    not cover a pose.
 
     Maintains one filter bank (dict[marker] -> MarkerKalman) per *live
     Viterbi path*, one per hypothesis slot at the current frame -- not one
@@ -570,14 +693,41 @@ def viterbi_select(
     T = len(hypotheses_per_frame)
     if T == 0:
         return []
+    if not hypotheses_per_frame[0]:
+        # No hypotheses at the trellis start means no filter banks, which
+        # would leave every later node without a predecessor to select.
+        raise ValueError(
+            "viterbi_select: frame 0 has no hypotheses; nothing to initialise "
+            "the filter bank from")
 
     # Initialise one filter bank per hypothesis slot at frame 0.
+    def _seed_position(m: int, i: int, assign: np.ndarray) -> np.ndarray:
+        """The position to seed marker ``m``'s filter from at t=0.
+
+        Falls back to this hypothesis' own t=0 observation when the caller
+        didn't supply an explicit seed, and to "genuinely unknown" (NaN,
+        which ``MarkerKalman.__init__`` inflates to a wide starting
+        uncertainty) when there is no observation to fall back to either --
+        never to a bare ``np.zeros(3)``, which would silently assert the
+        marker sits at the local origin with *normal* confidence instead of
+        flagging it as unknown. That mismatch was reachable only via a
+        direct ``viterbi_select`` call with an incomplete ``init_positions``
+        (``relabel_local`` always supplies every ``kept`` marker), but
+        nothing enforced completeness, so a future caller or driver could
+        have hit it silently.
+        """
+        if m in init_positions:
+            return init_positions[m]
+        j = assign[i]
+        if j >= 0:
+            return observations_per_frame[0][j]
+        return np.full(3, np.nan)
+
     banks: list[dict[int, MarkerKalman]] = []
     emission0 = []
-    for assign, _cost in hypotheses_per_frame[0]:
+    for assign, cost in hypotheses_per_frame[0]:
         bank = {
-            m: MarkerKalman(init_positions.get(m, observations_per_frame[0][assign[i]]
-                             if assign[i] >= 0 else np.zeros(3)),
+            m: MarkerKalman(_seed_position(m, i, assign),
                              process_var=process_var, obs_var=obs_var)
             for i, m in enumerate(marker_order)
         }
@@ -586,7 +736,10 @@ def viterbi_select(
             if j >= 0:
                 bank[m].update(observations_per_frame[0][j])
         banks.append(bank)
-        emission0.append(0.0)   # no prior transition at t=0
+        # No prior transition at t=0, so the first frame is scored on the
+        # spatial model alone -- the paper's "initialize from the spatial
+        # domain" property, and what lets the trellis start without a pose.
+        emission0.append(-w_emission * cost)
 
     path_score = emission0
     backptr: list[list[int]] = [[]]
@@ -597,7 +750,7 @@ def viterbi_select(
         new_banks: list[dict[int, MarkerKalman]] = []
         new_scores: list[float] = []
         new_backptr: list[int] = []
-        for assign, _cost in hypotheses_per_frame[t]:
+        for assign, cost in hypotheses_per_frame[t]:
             best_score, best_src, best_bank = -np.inf, 0, None
             for src, bank in enumerate(banks):
                 predicted = {m: kf.copy() for m, kf in bank.items()}
@@ -605,8 +758,22 @@ def viterbi_select(
                     kf.predict()
                 trans, _preds = _transition_score(predicted, marker_order, obs, assign)
                 total = path_score[src] + trans
-                if total > best_score:
+                if not np.isfinite(total):
+                    # Treat an unscorable predecessor as impossible rather
+                    # than letting it win by accident. `nan > -inf` is False,
+                    # so a NaN score used to leave `best_bank` as None for
+                    # every src and crash on the update below; `-inf` still
+                    # loses every comparison but keeps the node well-formed.
+                    total = -np.inf
+                if best_bank is None or total > best_score:
                     best_score, best_src, best_bank = total, src, predicted
+            # Emission is a property of the hypothesis, not of the incoming
+            # path, so it is constant over `src` and adding it here is
+            # equivalent to adding it inside the loop -- it cannot change
+            # which predecessor wins, only how this hypothesis ranks against
+            # its siblings at frame t, which is exactly the comparison that
+            # was missing.
+            best_score += -w_emission * cost
             for i, m in enumerate(marker_order):
                 j = assign[i]
                 if j >= 0:
@@ -649,7 +816,6 @@ def _build_hypotheses(
     *,
     n_hypotheses: int,
     theta_min: float,
-    init_frame: int,
 ) -> tuple[list[list[tuple[np.ndarray, float]]], list[np.ndarray]]:
     """Per-frame hypotheses + observation arrays, occlusion-safe.
 
@@ -666,6 +832,14 @@ def _build_hypotheses(
     ``obs_per_frame`` keeps the *full* (possibly-NaN) ``(K, 3)`` row per
     frame (not the compacted present-only subset) so hypothesis assignment
     values -- already in ``kept``-index space -- index directly into it.
+
+    Every frame gets the full ``n_hypotheses`` -- no frame is special-cased
+    to a single forced hypothesis. The trellis' own starting frame (see
+    :func:`relabel_local`) is scored on emission alone, with no prior
+    transition, which is the paper's actual initialisation procedure
+    (Section 3.2) and lets the best-first ranking from
+    :func:`top_n_assignments` win on its own merits rather than being
+    hard-pinned ahead of time.
     """
     hyps_per_frame: list[list[tuple[np.ndarray, float]]] = []
     obs_per_frame: list[np.ndarray] = []
@@ -675,8 +849,7 @@ def _build_hypotheses(
         finite = np.isfinite(obs_full).all(axis=1)
         present = np.flatnonzero(finite)
         cost = -loglik_matrix(obs_full[present], gmms, kept, theta_min=theta_min)
-        n_here = 1 if t == init_frame else n_hypotheses
-        raw = top_n_assignments(cost, n_here)
+        raw = top_n_assignments(cost, n_hypotheses)
         remapped = []
         for a, c in raw:
             if present.size:
@@ -699,6 +872,7 @@ def relabel_local(
     process_var: float = 1.0,
     obs_var: float = 25.0,
     init_frame: int = 0,
+    w_emission: float = 1.0,
 ) -> np.ndarray:
     """Hypothesis generation + Viterbi selection on precomputed local coords.
 
@@ -707,6 +881,27 @@ def relabel_local(
     (``locate_anchor_triangle`` + ``rigid_frames_from_triangle``), which
     the fixed-anchor-label API cannot express.
 
+    ``init_frame`` names the frame the trellis actually starts from, and
+    ``local_mm`` need not be trustworthy at index 0 -- a real trial's local
+    array commonly starts before any anchor was found, so the caller picks
+    whichever frame is known-good instead (e.g. the first consensus-clean
+    or anchor-valid frame). The single Viterbi trellis is run twice from
+    that shared starting point: once forward over ``[init_frame, T)`` and
+    once backward (time-reversed) over ``[0, init_frame]``, both seeded
+    from ``local_mm[init_frame]`` and scored purely on emission likelihood
+    at their own first step (no prior transition) -- the paper's own
+    initialisation procedure (Section 3.2). A constant-velocity model is
+    time-symmetric in position (only the sign of the estimated velocity
+    flips, which is never read out), so running the same Kalman/Viterbi
+    machinery on the reversed prefix is exact, not an approximation.
+
+    This replaces an earlier version that pinned ``init_frame`` to a single
+    forced hypothesis while the trellis itself unconditionally started at
+    array index 0 and was seeded from ``local_mm[init_frame]`` regardless
+    -- physically incoherent whenever ``init_frame != 0``, since the seed
+    position then belonged to a different real frame than the one the
+    trellis actually opened on.
+
     Returns ``(T, len(kept))``; ``[t, i]`` is the index into ``kept`` of
     the marker whose observed position belongs in slot ``i`` at frame
     ``t``, or -1 where that slot had no usable observation.
@@ -714,13 +909,29 @@ def relabel_local(
     kept = [m for m in marker_idxs if m in gmms]
     if not kept:
         return np.zeros((local_mm.shape[0], 0), dtype=int)
+    T = local_mm.shape[0]
+    if not (0 <= init_frame < T):
+        raise ValueError(f"init_frame={init_frame} is out of range for T={T}")
+
     hyps_per_frame, obs_per_frame = _build_hypotheses(
-        local_mm, gmms, kept, n_hypotheses=n_hypotheses, theta_min=theta_min,
-        init_frame=init_frame)
+        local_mm, gmms, kept, n_hypotheses=n_hypotheses, theta_min=theta_min)
     init_positions = {m: local_mm[init_frame, m] for m in kept}
-    return np.stack(viterbi_select(
-        kept, hyps_per_frame, obs_per_frame, init_positions,
-        process_var=process_var, obs_var=obs_var))
+
+    forward = viterbi_select(
+        kept, hyps_per_frame[init_frame:], obs_per_frame[init_frame:],
+        init_positions, process_var=process_var, obs_var=obs_var,
+        w_emission=w_emission)
+    backward = viterbi_select(
+        kept, hyps_per_frame[:init_frame + 1][::-1],
+        obs_per_frame[:init_frame + 1][::-1],
+        init_positions, process_var=process_var, obs_var=obs_var,
+        w_emission=w_emission)
+
+    # backward[0] == init_frame (shared with forward[0]); backward[1:] are
+    # init_frame-1, init_frame-2, ..., 0, so reversing that slice restores
+    # chronological order for the prefix.
+    result = list(reversed(backward[1:])) + forward
+    return np.stack(result)
 
 
 def relabel_sequence(
@@ -736,6 +947,7 @@ def relabel_sequence(
     process_var: float = 1.0,
     obs_var: float = 25.0,
     init_frame: int = 0,
+    w_emission: float = 1.0,
     anchor_valid: np.ndarray | None = None,
 ) -> np.ndarray:
     """Per-frame identity assignment for ``marker_idxs`` via GMM + Viterbi.
@@ -770,7 +982,8 @@ def relabel_sequence(
     gmms = fit_marker_gmms(local, marker_idxs, ref_frames, n_components=n_components)
     return relabel_local(local, gmms, marker_idxs, n_hypotheses=n_hypotheses,
                          theta_min=theta_min, process_var=process_var,
-                         obs_var=obs_var, init_frame=init_frame)
+                         obs_var=obs_var, init_frame=init_frame,
+                         w_emission=w_emission)
 
 
 class GMMLabeler:
@@ -822,6 +1035,7 @@ class GMMLabeler:
         obs_var: float = 25.0,
         anchor_valid: np.ndarray | None = None,
         init_frame: int = 0,
+        w_emission: float = 1.0,
     ) -> np.ndarray:
         name_to_idx = {l: i for i, l in enumerate(labels)}
         origin_i, x_i, y_i = (name_to_idx[a] for a in self.anchor_labels)
@@ -832,7 +1046,7 @@ class GMMLabeler:
         return relabel_local(local, self.gmms, self.marker_idxs,
                              n_hypotheses=n_hypotheses, theta_min=theta_min,
                              process_var=process_var, obs_var=obs_var,
-                             init_frame=init_frame)
+                             init_frame=init_frame, w_emission=w_emission)
 
 # ---------------------------------------------------------------------------
 # 6. Regime-segmented anchor location

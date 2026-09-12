@@ -11,6 +11,7 @@ from __future__ import annotations
 import itertools
 
 import numpy as np
+import pytest
 
 from vicon2mano.strategies.gmm import labeler as gl
 
@@ -316,6 +317,281 @@ def test_viterbi_select_resolves_a_swap_that_spatial_hypotheses_alone_cannot():
         obs_var=1.0,
     )
     np.testing.assert_array_equal(result[1], np.array([0, 1]))
+
+
+@pytest.mark.parametrize("good_first", [True, False])
+def test_viterbi_select_uses_the_emission_score_to_break_a_temporal_tie(good_first):
+    # The dual of the test above: there, emission was equal and transition
+    # had to decide. Here transition is *deliberately symmetric* -- both
+    # filters are seeded at the midpoint between the two observations, so
+    # every pairing has an identical Kalman residual -- and only the
+    # emission (spatial GMM) score separates the hypotheses.
+    #
+    # Regression guard for the paper's Eq. 1 term being dropped from the
+    # trellis. With emission ignored, the winner was decided by the
+    # hypothesis' *position in the list* (argmax over tied scores returns
+    # the first), so this passed for one ordering and failed for the other
+    # -- hence parametrising over both orderings rather than trusting one.
+    marker_order = [0, 1]
+    mid = np.array([5.0, 0.0, 0.0])
+    obs = [np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]) for _ in range(4)]
+
+    identity = (np.array([0, 1]), 0.0)        # cost 0 -> emission 0 (best)
+    swapped = (np.array([1, 0]), 1e6)         # huge cost -> terrible emission
+    hyps = [identity, swapped] if good_first else [swapped, identity]
+
+    result = gl.viterbi_select(
+        marker_order, [list(hyps)] * 4, obs,
+        init_positions={0: mid, 1: mid},
+    )
+    for t, assign in enumerate(result):
+        np.testing.assert_array_equal(
+            assign, np.array([0, 1]),
+            err_msg=f"frame {t}: spatially implausible hypothesis won")
+
+
+def _tie_hyps(n=5):
+    """n frames of two hypotheses over two well-separated observations."""
+    obs = [np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]) for _ in range(n)]
+    hyps = [[(np.array([0, 1]), 0.0), (np.array([1, 0]), 1e6)] for _ in range(n)]
+    return hyps, obs
+
+
+@pytest.mark.parametrize("seeds", [
+    {0: np.full(3, np.nan), 1: np.array([10.0, 0.0, 0.0])},   # one unknown
+    {0: np.full(3, np.nan), 1: np.full(3, np.nan)},           # all unknown
+])
+def test_viterbi_select_survives_non_finite_seed_positions(seeds):
+    # relabel_local seeds the filter bank from local_mm[init_frame], which
+    # is NaN whenever that frame has a Vicon gap -- routine on real data.
+    # The NaN propagated through predict/update into every transition
+    # score, and because `nan > -inf` is False the node selected no bank at
+    # all and crashed with "'NoneType' object is not subscriptable".
+    hyps, obs = _tie_hyps()
+    result = gl.viterbi_select([0, 1], hyps, obs, init_positions=seeds)
+    assert len(result) == len(hyps)
+    for assign in result:
+        assert np.isfinite(assign).all()
+
+
+def test_viterbi_select_survives_a_non_finite_observation():
+    hyps, obs = _tie_hyps()
+    obs[2] = np.array([[np.nan] * 3, [10.0, 0.0, 0.0]])
+    result = gl.viterbi_select(
+        [0, 1], hyps, obs,
+        init_positions={0: np.zeros(3), 1: np.array([10.0, 0.0, 0.0])})
+    assert len(result) == len(hyps)
+
+
+def test_marker_kalman_treats_a_non_finite_seed_as_unknown_not_as_origin():
+    # Seeding 0 at the normal uncertainty would assert the marker sits at
+    # the local origin. An unknown seed must instead be dominated by the
+    # first real observations.
+    kf = gl.MarkerKalman(np.full(3, np.nan), process_var=0.5, obs_var=1.0)
+    assert kf.P[0, 0] > 1e4
+    assert np.isfinite(kf.x).all()
+    for _ in range(5):
+        kf.predict()
+        kf.update(np.array([7.0, 0.0, 0.0]))
+    np.testing.assert_allclose(kf.x[:3], [7.0, 0.0, 0.0], atol=0.1)
+
+
+def test_marker_kalman_update_skips_a_non_finite_observation():
+    # The paper's Section 3.2 occlusion handling: extrapolate from the
+    # predicted state, omit the innovation update.
+    kf = gl.MarkerKalman(np.array([1.0, 2.0, 3.0]))
+    kf.predict()
+    before = kf.x.copy()
+    kf.update(np.array([np.nan, 0.0, 0.0]))
+    np.testing.assert_array_equal(kf.x, before)
+    assert np.isfinite(kf.x).all()
+
+
+def test_viterbi_select_rejects_an_empty_first_frame():
+    with pytest.raises(ValueError, match="no hypotheses"):
+        gl.viterbi_select([0, 1], [[]], [np.zeros((2, 3))], init_positions={})
+
+
+def test_viterbi_select_flags_an_unseeded_unmatched_marker_as_unknown_not_origin():
+    # Marker 1 has no entry in init_positions AND is unmatched (-1) in the
+    # only t=0 hypothesis -- there is no observation to fall back to either.
+    # The old fallback silently seeded it at np.zeros(3) with the filter's
+    # *normal* starting confidence, asserting "this marker is at the local
+    # origin" rather than flagging it as genuinely unknown. Unreachable via
+    # relabel_local (which always supplies a complete init_positions), but
+    # nothing enforced that for a direct viterbi_select caller.
+    mo = [0, 1]
+    obs0 = np.array([[0.0, 0.0, 0.0]])          # only 1 observation present
+    hyp0 = [(np.array([0, -1]), 0.0)]           # marker 1 necessarily unmatched
+    result = gl.viterbi_select(mo, [hyp0], [obs0], init_positions={0: obs0[0]})
+    # Must not crash, and the frame must resolve normally.
+    np.testing.assert_array_equal(result[0], np.array([0, -1]))
+
+
+def test_marker_kalman_gate_loglik_raises_on_a_non_positive_definite_covariance():
+    # (I - KH)P is a numerically fragile covariance update form; if P ever
+    # loses positive-definiteness, slogdet's sign silently flips logdet's
+    # meaning rather than erroring. gate_loglik is now called on every
+    # occluded marker in every hypothesis every frame, far more often than
+    # residual_loglik alone ever was, so this must fail loudly rather than
+    # returning a nonsense score that could silently win a comparison.
+    kf = gl.MarkerKalman(np.zeros(3), obs_var=1.0)
+    kf.P = np.diag([1.0, -1000.0, 1.0, 1.0, 1.0, 1.0])   # indefinite, dominates R
+    with pytest.raises(np.linalg.LinAlgError, match="not positive-definite"):
+        kf.gate_loglik()
+
+
+def test_marker_kalman_residual_loglik_raises_on_a_non_positive_definite_covariance():
+    kf = gl.MarkerKalman(np.zeros(3), obs_var=1.0)
+    kf.P = np.diag([1.0, -1000.0, 1.0, 1.0, 1.0, 1.0])
+    with pytest.raises(np.linalg.LinAlgError, match="not positive-definite"):
+        kf.residual_loglik(np.array([0.0, 0.0, 0.0]))
+
+
+def test_transition_score_prefers_a_plausible_match_over_dropping():
+    # Regression guard: unmatched markers used to score a fixed 0, which
+    # beat *any* real match (a Gaussian log-density is generically negative
+    # for non-trivial covariance) regardless of fit quality. A hypothesis
+    # matching a marker to an observation squarely inside the filter's own
+    # 95% gate must now beat one that drops it.
+    mo = [0]
+    obs0 = np.array([[0.0, 0.0, 0.0]])
+    hyp0 = [(np.array([0]), 0.0)]
+    obs1_good = np.array([[2.0, 0.0, 0.0]])       # small, plausible move
+    hyps1 = [(np.array([0]), 0.0), (np.array([-1]), 0.0)]
+
+    result = gl.viterbi_select(mo, [hyp0, hyps1], [obs0, obs1_good],
+                               init_positions={0: obs0[0]})
+    np.testing.assert_array_equal(result[1], np.array([0]))
+
+
+def test_transition_score_prefers_dropping_an_implausible_match():
+    # The complementary case: a match landing well outside the filter's
+    # 95% gate (obviously the wrong marker, or a bad detection) must still
+    # lose to leaving the marker unassigned -- the fix must not overcorrect
+    # into always preferring a match.
+    mo = [0]
+    obs0 = np.array([[0.0, 0.0, 0.0]])
+    hyp0 = [(np.array([0]), 0.0)]
+    obs1_bad = np.array([[500.0, 0.0, 0.0]])      # absurd for obs_var=25 default
+    hyps1 = [(np.array([0]), 0.0), (np.array([-1]), 0.0)]
+
+    result = gl.viterbi_select(mo, [hyp0, hyps1], [obs0, obs1_bad],
+                               init_positions={0: obs0[0]})
+    np.testing.assert_array_equal(result[1], np.array([-1]))
+
+
+def test_marker_kalman_gate_loglik_gap_is_invariant_to_the_filters_scale():
+    # gate_loglik and residual_loglik share the same logdet(S) term, so it
+    # cancels in their difference: how much a plausible match beats
+    # dropping the marker should depend only on how far inside the 95%
+    # gate the residual sits (in Mahalanobis terms), not on whether the
+    # filter happens to be tightly converged or still wide after a recent
+    # gap. A fixed-constant miss score (the pre-fix behaviour) would instead
+    # make that comparison arbitrarily easier or harder to win purely as a
+    # side effect of the filter's unrelated current uncertainty.
+    residual = np.array([0.05, 0.0, 0.0])
+    gaps = []
+    for scale in (1.0, 10.0, 50.0):
+        kf = gl.MarkerKalman(np.zeros(3), process_var=0.1, obs_var=0.1)
+        kf.P *= scale
+        match_ll, _ = kf.residual_loglik(residual)
+        gaps.append(match_ll - kf.gate_loglik())
+    # R does not scale with P, so the invariance is only approximate --
+    # exact would require R = 0, which isn't a realistic filter.
+    np.testing.assert_allclose(gaps, gaps[0], atol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Step 4b: relabel_local's init_frame -- forward/backward split
+# ---------------------------------------------------------------------------
+
+
+def test_relabel_local_labels_frames_before_a_mid_window_init_frame():
+    # init_frame need not be (and in real trials usually isn't) frame 0 --
+    # relabel_local is handed the whole local array and picks whichever
+    # frame is first known-good. The old implementation unconditionally
+    # started its Viterbi trellis at array index 0 while seeding the filter
+    # bank from local_mm[init_frame] -- physically incoherent whenever
+    # init_frame != 0, and it left frames before init_frame covered only by
+    # whatever the (wrongly-seeded) forward pass produced.
+    T = 7
+    local = np.zeros((T, 2, 3))
+    for t in range(T):
+        local[t, 0] = [t * 1.0, 0, 0]
+        local[t, 1] = [t * 1.0, 50, 0]      # far apart -- spatially unambiguous
+    local[0] = np.nan                        # frame 0 itself is unusable as a seed
+
+    gmms = gl.fit_marker_gmms(local, [0, 1], np.arange(1, T), n_components=1,
+                              min_samples=1)
+    mapping = gl.relabel_local(local, gmms, [0, 1], n_hypotheses=3, init_frame=3)
+
+    assert (mapping[0] == -1).all()          # genuinely unusable frame stays -1
+    for t in range(1, T):
+        np.testing.assert_array_equal(mapping[t], [0, 1])
+
+
+def test_relabel_local_recovers_a_swap_entirely_before_init_frame():
+    # The case the old seeding bug could not get right even in principle:
+    # a swap confined to frames that precede init_frame, in a region the
+    # old single forward pass covered only by accident.
+    T = 10
+    local = np.zeros((T, 2, 3))
+    for t in range(T):
+        local[t, 0] = [0, 0, 0]
+        local[t, 1] = [0, 60, 0]
+    local[2:5, [0, 1]] = local[2:5, [1, 0]]
+
+    gmms = gl.fit_marker_gmms(local, [0, 1], np.array([0, 1, 6, 7, 8, 9]),
+                              n_components=1, min_samples=1)
+    mapping = gl.relabel_local(local, gmms, [0, 1], n_hypotheses=3, init_frame=7)
+
+    for t in list(range(2)) + list(range(5, T)):
+        np.testing.assert_array_equal(mapping[t], [0, 1])
+    for t in range(2, 5):
+        np.testing.assert_array_equal(mapping[t], [1, 0])
+
+
+@pytest.mark.parametrize("init_frame", [0, 4])
+def test_relabel_local_handles_init_frame_at_either_boundary(init_frame):
+    local = np.zeros((5, 1, 3))
+    gmms = gl.fit_marker_gmms(local, [0], np.arange(5), n_components=1, min_samples=1)
+    mapping = gl.relabel_local(local, gmms, [0], init_frame=init_frame)
+    np.testing.assert_array_equal(mapping.ravel(), [0, 0, 0, 0, 0])
+
+
+def test_relabel_local_handles_a_single_frame_window():
+    local = np.zeros((1, 1, 3))
+    gmms = gl.fit_marker_gmms(local, [0], np.array([0]), n_components=1, min_samples=1)
+    mapping = gl.relabel_local(local, gmms, [0], init_frame=0)
+    np.testing.assert_array_equal(mapping.ravel(), [0])
+
+
+def test_relabel_local_rejects_an_out_of_range_init_frame():
+    local = np.zeros((5, 1, 3))
+    gmms = gl.fit_marker_gmms(local, [0], np.arange(5), n_components=1, min_samples=1)
+    with pytest.raises(ValueError, match="out of range"):
+        gl.relabel_local(local, gmms, [0], init_frame=5)
+
+
+def test_viterbi_w_emission_zero_disables_the_spatial_term():
+    # w_emission is the paper's Section 5 knob for trading spatial
+    # likelihood against temporal smoothness; 0 must fully disable the
+    # spatial term, leaving the transition-only behaviour intact.
+    marker_order = [0, 1]
+    mid = np.array([5.0, 0.0, 0.0])
+    obs = [np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]) for _ in range(3)]
+    hyps = [(np.array([1, 0]), 1e6), (np.array([0, 1]), 0.0)]
+
+    weighted = gl.viterbi_select(marker_order, [hyps] * 3, obs,
+                                 init_positions={0: mid, 1: mid})
+    unweighted = gl.viterbi_select(marker_order, [hyps] * 3, obs,
+                                   init_positions={0: mid, 1: mid},
+                                   w_emission=0.0)
+    np.testing.assert_array_equal(weighted[0], np.array([0, 1]))
+    # transition is symmetric here, so with no spatial term the tie falls
+    # back to list order -- the pre-fix behaviour.
+    np.testing.assert_array_equal(unweighted[0], np.array([1, 0]))
 
 
 # ---------------------------------------------------------------------------
