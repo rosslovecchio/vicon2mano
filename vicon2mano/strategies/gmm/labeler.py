@@ -1082,13 +1082,32 @@ def segment_by_jumps(
     *,
     jump_mm: float = 3.0,
     min_len: int = 30,
+    bridge: int = 5,
 ) -> list[np.ndarray]:
     """Split the recording into regimes of stable anchor geometry.
 
-    A boundary is any frame where one of the three mutual distances moves
-    by more than ``jump_mm``, or becomes non-finite. Segments shorter than
-    ``min_len`` are dropped: pooling is the whole point, so a regime too
-    short to pool over cannot be solved confidently anyway.
+    A boundary is a frame where one of the three mutual distances moves by
+    more than ``jump_mm``, or where the anchors are missing for longer than
+    ``bridge`` frames. Segments shorter than ``min_len`` are dropped:
+    pooling is the whole point, so a regime too short to pool over cannot be
+    solved confidently anyway.
+
+    **Brief gaps are not regime changes.** Treating every NaN as a boundary
+    (the original behaviour, i.e. ``bridge=0``) shattered the recording:
+    measured on P7/Trial1_handsonly, 9300 of 9507 boundaries came from gaps
+    and only 268 from a real jump, and 57% of those gaps are a *single*
+    frame. The fragments were then too short to clear ``min_repair_len`` in
+    :func:`solve_segment_anchors`, which is what held recall down. Bridging
+    gaps of <=5 frames takes the frames living in repair-eligible regimes
+    from 11k to 28k, with clear diminishing returns past ~10.
+
+    Only the anchor *distances* are carried across a gap, purely to decide
+    where the boundaries go -- no marker position is ever invented, and the
+    frames inside a bridged gap still have NaN local coordinates downstream.
+    The assumption is that a marker vanishing for a few frames and returning
+    is the same marker; that is safe at 1-2 frames and progressively less so,
+    which is why the default stops at 5 and the bone-length veto remains the
+    backstop.
     """
     a, b, c = idxs
     d = np.stack([
@@ -1096,11 +1115,24 @@ def segment_by_jumps(
         np.linalg.norm(markers_mm[:, a] - markers_mm[:, c], axis=1),
         np.linalg.norm(markers_mm[:, b] - markers_mm[:, c], axis=1),
     ], axis=1)
-    step = np.abs(np.diff(d, axis=0))
+    # Carry the last good geometry across gaps of at most `bridge` frames.
+    present = np.isfinite(d).all(axis=1)
+    filled = d.copy()
+    last, run = None, 0
+    for t in range(len(d)):
+        if present[t]:
+            last, run = d[t], 0
+        else:
+            run += 1
+            if last is not None and run <= bridge:
+                filled[t] = last
+
+    step = np.abs(np.diff(filled, axis=0))
+    finite_step = np.isfinite(step).all(axis=1)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
-        worst = np.nanmax(np.where(np.isfinite(step), step, np.nan), axis=1)
-    moved = ~(worst <= jump_mm)                           # NaN -> boundary
+        worst = np.where(finite_step, np.nanmax(step, axis=1), np.inf)
+    moved = ~(worst <= jump_mm)            # un-bridged gap -> inf -> boundary
     bounds = np.flatnonzero(moved) + 1
     return [s for s in np.split(np.arange(len(markers_mm)), bounds) if len(s) >= min_len]
 

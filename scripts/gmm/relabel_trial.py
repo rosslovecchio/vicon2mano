@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -121,7 +122,7 @@ def modal_bone_lengths(markers: np.ndarray, bones: list[tuple[int, int]],
 def consensus_bone_lengths(
     markers: np.ndarray, bones: list[tuple[int, int]], *,
     tol_mm: float = 4.0, n_hypotheses: int = 400, n_compare: int = 3000,
-    seed: int = 0,
+    seed: int = 0, min_bones: int = 12,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Reference lengths from the largest mutually-consistent set of frames.
 
@@ -147,25 +148,43 @@ def consensus_bone_lengths(
     i_idx = np.array([b[0] for b in bones])
     j_idx = np.array([b[1] for b in bones])
     D = np.linalg.norm(markers[:, i_idx] - markers[:, j_idx], axis=2)   # (T, B)
-    full = np.flatnonzero(np.isfinite(D).all(axis=1))
+    finite = np.isfinite(D)
+    full = np.flatnonzero(finite.all(axis=1))
     if full.size == 0:
         return np.full(len(bones), np.nan), full
 
+    # A *hypothesis* must define every bone, so it is drawn from the fully
+    # observed frames. Agreement, though, is judged only on the bones a
+    # frame actually has: requiring all of them excluded 42% of this trial
+    # over a median of a single missing marker, which needlessly starved
+    # the training pool. `min_bones` stops a frame with almost nothing
+    # present from "agreeing" vacuously.
     rng = np.random.default_rng(seed)
     hyp = full if full.size <= n_hypotheses else full[
         rng.choice(full.size, size=n_hypotheses, replace=False)]
-    comp = full if full.size <= n_compare else full[
-        np.linspace(0, full.size - 1, n_compare).astype(int)]
-    Dc = D[comp]
+    usable = np.flatnonzero(finite.sum(axis=1) >= min_bones)
+    comp = usable if usable.size <= n_compare else usable[
+        np.linspace(0, usable.size - 1, n_compare).astype(int)]
+
+    def agrees(frames: np.ndarray, h: int) -> np.ndarray:
+        dev = np.abs(D[frames] - D[h])
+        ok = finite[frames]
+        return ((dev <= tol_mm) | ~ok).all(axis=1) & (ok.sum(axis=1) >= min_bones)
 
     best_score, best_h = -1, int(hyp[0])
     for h in hyp:
-        score = int((np.abs(Dc - D[h]) <= tol_mm).all(axis=1).sum())
+        score = int(agrees(comp, h).sum())
         if score > best_score:
             best_score, best_h = score, int(h)
 
-    inliers = full[(np.abs(D[full] - D[best_h]) <= tol_mm).all(axis=1)]
-    ref = D[inliers].mean(axis=0) if inliers.size else D[best_h]
+    inliers = usable[agrees(usable, best_h)]
+    if inliers.size:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            ref = np.nanmean(np.where(finite[inliers], D[inliers], np.nan), axis=0)
+        ref = np.where(np.isfinite(ref), ref, D[best_h])
+    else:
+        ref = D[best_h]
     return ref, inliers
 
 

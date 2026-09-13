@@ -781,3 +781,36 @@ def test_solve_segment_anchors_refuses_a_short_regime_repair():
                                        tol_mm=2.0, min_repair_len=200)
     assert (strict[220] == -1).all()           # refused: regime too short
     np.testing.assert_array_equal(strict[100], [0, 1, 2])   # clean regime kept
+
+
+def test_segment_by_jumps_bridges_short_gaps():
+    # A 2-frame dropout in the anchors is not a regime change. With
+    # bridge=0 it splits the recording; with the default it must not.
+    rng = np.random.default_rng(40)
+    markers = _regime_recording(rng, T=400, swap_at=0, swap_until=0)
+    markers[150:152, :3] = np.nan          # brief anchor gap, no relabel
+
+    unbridged = gl.segment_by_jumps(markers, (0, 1, 2), min_len=20, bridge=0)
+    bridged = gl.segment_by_jumps(markers, (0, 1, 2), min_len=20, bridge=5)
+    assert len(unbridged) > len(bridged)
+    assert len(bridged) == 1               # one continuous regime
+    assert len(bridged[0]) == 400
+
+
+def test_segment_by_jumps_still_splits_on_a_long_gap():
+    rng = np.random.default_rng(41)
+    markers = _regime_recording(rng, T=400, swap_at=0, swap_until=0)
+    markers[150:170, :3] = np.nan          # 20 frames -- beyond the bridge
+    segs = gl.segment_by_jumps(markers, (0, 1, 2), min_len=20, bridge=5)
+    assert len(segs) > 1
+
+
+def test_segment_by_jumps_still_splits_on_a_real_jump_inside_a_gap_run():
+    # Bridging must not paper over a genuine relabel that happens to sit
+    # next to a short gap: the carried geometry is compared against the
+    # frame after the gap, so the jump is still seen.
+    rng = np.random.default_rng(42)
+    markers = _regime_recording(rng, T=400, swap_at=200, swap_until=400)
+    markers[199:201, :3] = np.nan
+    segs = gl.segment_by_jumps(markers, (0, 1, 2), min_len=20, bridge=5)
+    assert len(segs) > 1
