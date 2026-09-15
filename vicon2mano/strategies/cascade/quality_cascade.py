@@ -21,7 +21,7 @@ import numpy as np
 
 from vicon2mano.core.loader import load_c3d, load_csv
 from vicon2mano.core.dataset import (          # noqa: F401  (re-exported)
-    REF_CSV, find_trial_csv, is_frame_number, load_ref_ranges_csv,
+    REF_CSV, REPO_ROOT, find_trial_csv, is_frame_number, load_ref_ranges_csv,
     load_trial_sessions, find_session_file, parse_frame_spec,
     participant_sort_key, resolve_participants, slug, sniff_delimiter,
 )
@@ -1190,7 +1190,9 @@ def main(argv: list[str] | None = None) -> None:
                                           "nor --c3d is given (see find_trial_csv)")
     p.add_argument("--trial", help="trial name, matched against --ref-csv; also used to "
                                     "resolve --csv when neither --csv nor --c3d is given")
-    p.add_argument("--out", required=True, help="output CSV path")
+    p.add_argument("--out", help="output CSV path (default: "
+                                  "results/cascade/{participant}_{trial}_quality_cascade.csv, "
+                                  "when --participant/--trial are given)")
     p.add_argument("--bone-tol-mad", type=float, default=8.0)
     p.add_argument("--bone-tol-mm", type=float, default=15.0)
     p.add_argument("--speed-tol-mad", type=float, default=8.0)
@@ -1217,6 +1219,15 @@ def main(argv: list[str] | None = None) -> None:
         p.error("one of --ref-frames / --ref-csv is required")
     if args.ref_csv and not (args.participant and args.trial):
         p.error("--ref-csv requires --participant and --trial")
+
+    if not args.out:
+        if not (args.participant and args.trial):
+            p.error("--out is required, unless both --participant and "
+                     "--trial are given (to default it to "
+                     "results/cascade/{participant}_{trial}_quality_cascade.csv)")
+        out_dir = REPO_ROOT / "results" / "cascade"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        args.out = str(out_dir / f"{args.participant}_{slug(args.trial)}_quality_cascade.csv")
 
     if args.csv:
         markers, labels = load_csv(args.csv)

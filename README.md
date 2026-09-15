@@ -79,9 +79,12 @@ from `manual_frames.csv` via `find_trial_csv`, the same lookup the GMM/MANO
 ```bash
 python vicon2mano/strategies/cascade/quality_cascade.py \
     --ref-csv manual_frames.csv \
-    --participant P7 --trial "Trial 1 Hands only" \
-    --out quality.csv
+    --participant P7 --trial "Trial 1 Hands only"
 ```
+
+`--out` is likewise optional whenever `--participant`/`--trial` are given —
+it then defaults to
+`results/cascade/{participant}_{trial}_quality_cascade.csv`.
 
 `visualize_data.ipynb` / `visualize_data.py` drive it interactively —
 loading recordings, plotting % correct over time, animating a trial with

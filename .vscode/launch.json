@@ -5,12 +5,14 @@
     "version": "0.2.0",
     "configurations": [
         // One configuration per relabelling strategy (cascade / deep / gmm /
-        // mano), all pointed at the same P7 "Trial 1 Hands only" recording so
-        // their outputs are directly comparable. The python interpreter is
-        // the repo's own Windows venv (.viconvenv\Scripts\python.exe) --
-        // the previous entries below pointed at a Linux path from another
-        // machine (/home/codex/...) and at pre-reorganisation script
-        // locations (scripts/train_labeler.py); both are fixed here.
+        // mano); GMM/MANO/Deep are pointed at P7's "Trial 1 Hands only"
+        // recording, Cascade at P10's (both "Trial 1 Hands only") -- change
+        // --participant/--trial per config to point at a different trial.
+        // The python interpreter is the repo's own Windows venv
+        // (.viconvenv\Scripts\python.exe) -- the previous entries below
+        // pointed at a Linux path from another machine (/home/codex/...)
+        // and at pre-reorganisation script locations
+        // (scripts/train_labeler.py); both are fixed here.
 
         {
             "name": "Strategy: Cascade (quality cascade)",
@@ -27,12 +29,12 @@
                 // the same lookup gmm/mano's relabel_trial.py scripts use.
                 "--ref-csv",
                 "D:/ExperimentsJune25/manual_frames.csv",
+                // --out omitted too: defaults to
+                // results/cascade/{participant}_{trial}_quality_cascade.csv
                 "--participant",
-                "P8",
+                "P10",
                 "--trial",
-                "Trial 1 Hands only",
-                "--out",
-                "results/cascade/P8_Trial1_Hands_only_quality_cascade.csv"
+                "Trial 1 Hands only"
             ]
         },
         {
@@ -46,8 +48,8 @@
             "args": [
                 // deep_labeler has no --participant/--trial flags -- the
                 // trial is named by the CSV path itself (this is P7's
-                // "Trial 1 Hands only" recording, matching the other 3
-                // strategy configs here).
+                // "Trial 1 Hands only" recording, matching GMM/MANO below;
+                // Cascade above is currently pointed at P10 instead).
                 "--weights",
                 "vicon2mano/weights/deep_labeler.pt",
                 "--real-data",
