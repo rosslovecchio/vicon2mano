@@ -4,14 +4,102 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-        
+        // One configuration per relabelling strategy (cascade / deep / gmm /
+        // mano), all pointed at the same P7 "Trial 1 Hands only" recording so
+        // their outputs are directly comparable. The python interpreter is
+        // the repo's own Windows venv (.viconvenv\Scripts\python.exe) --
+        // the previous entries below pointed at a Linux path from another
+        // machine (/home/codex/...) and at pre-reorganisation script
+        // locations (scripts/train_labeler.py); both are fixed here.
+
+        {
+            "name": "Strategy: Cascade (quality cascade)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scripts/cascade/run_quality_cascade.py",
+            "python": "${workspaceFolder}/.viconvenv/Scripts/python.exe",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                // No --csv: quality_cascade.main() now resolves the trial
+                // CSV from --participant/--trial via manual_frames.csv
+                // (find_trial_csv) when neither --csv nor --c3d is given --
+                // the same lookup gmm/mano's relabel_trial.py scripts use.
+                "--ref-csv",
+                "D:/ExperimentsJune25/manual_frames.csv",
+                "--participant",
+                "P8",
+                "--trial",
+                "Trial 1 Hands only",
+                "--out",
+                "results/cascade/P8_Trial1_Hands_only_quality_cascade.csv"
+            ]
+        },
+        {
+            "name": "Strategy: Deep (deep_labeler eval)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scripts/deep/eval_labeler.py",
+            "python": "${workspaceFolder}/.viconvenv/Scripts/python.exe",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                // deep_labeler has no --participant/--trial flags -- the
+                // trial is named by the CSV path itself (this is P7's
+                // "Trial 1 Hands only" recording, matching the other 3
+                // strategy configs here).
+                "--weights",
+                "vicon2mano/weights/deep_labeler.pt",
+                "--real-data",
+                "D:/ExperimentsJune25/P7/P7/Trial1_handsonly.csv",
+                "--out-dir",
+                "vicon2mano/eval/deep_labeler"
+            ]
+        },
+        {
+            "name": "Strategy: GMM (relabel_trial)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scripts/gmm/relabel_trial.py",
+            "python": "${workspaceFolder}/.viconvenv/Scripts/python.exe",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--participant",
+                "P7",
+                "--trial",
+                "Trial 1 Hands only"
+            ]
+        },
+        {
+            "name": "Strategy: MANO (relabel_trial)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scripts/mano/relabel_trial.py",
+            "python": "${workspaceFolder}/.viconvenv/Scripts/python.exe",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--participant",
+                "P7",
+                "--trial",
+                "Trial 1 Hands only",
+                "--side",
+                "right"
+            ]
+        },
+
+        // --- pre-existing configs, fixed to the Windows venv and the
+        // post-reorganisation script paths (scripts/deep/...) ---
+
         {
             "name": "Python: Train Labeler",
             "type": "debugpy",
             "request": "launch",
-            "program": "scripts/train_labeler.py",
-            "python": "/home/codex/repos/vicon2mano/.viconvenv/bin/python",
+            "program": "scripts/deep/train_labeler.py",
+            "python": "${workspaceFolder}/.viconvenv/Scripts/python.exe",
             "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
             "args": [
                 "train",
                 "--real-data",
@@ -33,16 +121,17 @@
             "name": "Python: Eval Labeler",
             "type": "debugpy",
             "request": "launch",
-            "program": "scripts/eval_labeler.py",
-            "python": "/home/codex/repos/vicon2mano/.viconvenv/bin/python",
+            "program": "scripts/deep/eval_labeler.py",
+            "python": "${workspaceFolder}/.viconvenv/Scripts/python.exe",
             "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
             "args": [
                 "--weights",
                 "vicon2mano/weights/deep_labeler.pt",
                 "--real-data",
                 "data/Pxh8/Hands_only_Left/trajectories_synced.csv",
                 "--mano-dir",
-                "/home/codex/repos/mano_v1_2/models",
+                "../clean_kinematics/mano_v1_2/models",
                 "--out-dir",
                 "vicon2mano/eval/deep_labeler"
             ]

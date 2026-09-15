@@ -21,9 +21,9 @@ import numpy as np
 
 from vicon2mano.core.loader import load_c3d, load_csv
 from vicon2mano.core.dataset import (          # noqa: F401  (re-exported)
-    REF_CSV, is_frame_number, load_ref_ranges_csv, load_trial_sessions,
-    find_session_file, parse_frame_spec, participant_sort_key,
-    resolve_participants, slug, sniff_delimiter,
+    REF_CSV, find_trial_csv, is_frame_number, load_ref_ranges_csv,
+    load_trial_sessions, find_session_file, parse_frame_spec,
+    participant_sort_key, resolve_participants, slug, sniff_delimiter,
 )
 
 _FINGER_RE = re.compile(r"(thumb|index|middle|ring|pinky)[_]?(\d+)", re.IGNORECASE)
@@ -1185,8 +1185,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--ref-frames",
                     help='Known-correct frames, e.g. "1000-1500,20000-20500"')
     p.add_argument("--ref-csv", help="tab-separated manual-frames log (alternative to --ref-frames)")
-    p.add_argument("--participant", help="participant name, matched against --ref-csv")
-    p.add_argument("--trial", help="trial name, matched against --ref-csv")
+    p.add_argument("--participant", help="participant name, matched against --ref-csv; "
+                                          "also used to resolve --csv when neither --csv "
+                                          "nor --c3d is given (see find_trial_csv)")
+    p.add_argument("--trial", help="trial name, matched against --ref-csv; also used to "
+                                    "resolve --csv when neither --csv nor --c3d is given")
     p.add_argument("--out", required=True, help="output CSV path")
     p.add_argument("--bone-tol-mad", type=float, default=8.0)
     p.add_argument("--bone-tol-mm", type=float, default=15.0)
@@ -1195,7 +1198,21 @@ def main(argv: list[str] | None = None) -> None:
     args = p.parse_args(argv)
 
     if not args.csv and not args.c3d:
-        p.error("one of --csv / --c3d is required")
+        # Same lookup gmm/mano's relabel_trial.py scripts already use: the
+        # trial CSV's own path lives in manual_frames.csv next to the
+        # reference-frame ranges, so --participant/--trial alone (the same
+        # two values --ref-csv already requires) are enough to find it --
+        # no reason to also make the caller spell out the file path.
+        if not (args.participant and args.trial):
+            p.error("one of --csv / --c3d is required, unless both "
+                     "--participant and --trial are given (to resolve the "
+                     "CSV via manual_frames.csv/find_trial_csv)")
+        resolved, *_ = find_trial_csv(args.participant, args.trial)
+        if resolved is None:
+            p.error(f"no CSV found for participant={args.participant!r} "
+                     f"trial={args.trial!r} in manual_frames.csv "
+                     "-- pass --csv/--c3d explicitly instead")
+        args.csv = str(resolved)
     if not args.ref_frames and not args.ref_csv:
         p.error("one of --ref-frames / --ref-csv is required")
     if args.ref_csv and not (args.participant and args.trial):

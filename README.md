@@ -71,6 +71,18 @@ python vicon2mano/strategies/cascade/quality_cascade.py \
     --out quality.csv
 ```
 
+`--csv`/`--c3d` may be omitted if `--participant`/`--trial` are given instead
+(the same values `--ref-csv` needs) — the trial's CSV path is then resolved
+from `manual_frames.csv` via `find_trial_csv`, the same lookup the GMM/MANO
+`relabel_trial.py` scripts use:
+
+```bash
+python vicon2mano/strategies/cascade/quality_cascade.py \
+    --ref-csv manual_frames.csv \
+    --participant P7 --trial "Trial 1 Hands only" \
+    --out quality.csv
+```
+
 `visualize_data.ipynb` / `visualize_data.py` drive it interactively —
 loading recordings, plotting % correct over time, animating a trial with
 markers colored by verdict, and stepping through the reasoning for one
