@@ -21,9 +21,10 @@ import numpy as np
 
 from vicon2mano.core.loader import load_c3d, load_csv
 from vicon2mano.core.dataset import (          # noqa: F401  (re-exported)
-    REF_CSV, REPO_ROOT, find_trial_csv, is_frame_number, load_ref_ranges_csv,
-    load_trial_sessions, find_session_file, parse_frame_spec,
-    participant_sort_key, resolve_participants, slug, sniff_delimiter,
+    REF_CSV, REPO_ROOT, auto_reference, find_static_csv, find_trial_csv,
+    is_frame_number, load_ref_ranges_csv, load_trial_sessions,
+    find_session_file, parse_frame_spec, participant_sort_key,
+    resolve_participants, slug, sniff_delimiter,
 )
 
 _FINGER_RE = re.compile(r"(thumb|index|middle|ring|pinky)[_]?(\d+)", re.IGNORECASE)
@@ -1185,6 +1186,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--ref-frames",
                     help='Known-correct frames, e.g. "1000-1500,20000-20500"')
     p.add_argument("--ref-csv", help="tab-separated manual-frames log (alternative to --ref-frames)")
+    p.add_argument("--ref-static", action="store_true",
+                    help="derive reference frames from --participant's static/calibration "
+                         "recording instead of --ref-frames/--ref-csv: every frame in it "
+                         "where all markers are present is assumed correct. Uses "
+                         "find_static_csv's cascade-safe static (not the MANO-only one -- "
+                         "see its docstring for why the two can differ)")
     p.add_argument("--participant", help="participant name, matched against --ref-csv; "
                                           "also used to resolve --csv when neither --csv "
                                           "nor --c3d is given (see find_trial_csv)")
@@ -1215,10 +1222,12 @@ def main(argv: list[str] | None = None) -> None:
                      f"trial={args.trial!r} in manual_frames.csv "
                      "-- pass --csv/--c3d explicitly instead")
         args.csv = str(resolved)
-    if not args.ref_frames and not args.ref_csv:
-        p.error("one of --ref-frames / --ref-csv is required")
+    if not args.ref_frames and not args.ref_csv and not args.ref_static:
+        p.error("one of --ref-frames / --ref-csv / --ref-static is required")
     if args.ref_csv and not (args.participant and args.trial):
         p.error("--ref-csv requires --participant and --trial")
+    if args.ref_static and not args.participant:
+        p.error("--ref-static requires --participant")
 
     if not args.out:
         if not (args.participant and args.trial):
@@ -1234,16 +1243,49 @@ def main(argv: list[str] | None = None) -> None:
     else:
         markers, labels, _fps = load_c3d(args.c3d)
 
+    # --ref-static supplies static_markers -- a supplement to the
+    # bone-length reference only (see label_quality/build_reference), not a
+    # source of ref_frames: the static is a *different recording*, so its
+    # own frame numbers have no relationship to this trial's, and it
+    # contributes nothing to the temporal/speed check (build_reference
+    # deliberately excludes extra_markers from that -- there is no valid
+    # frame-to-frame delta between two unrelated recordings).
+    static_markers = None
+    if args.ref_static:
+        # A static/calibration take has the subject holding still, so
+        # (unlike a real trial) there is no genuine ambiguity within a
+        # frame to guard against -- if every marker is present, nothing
+        # else could have gone wrong that frame. That assumption is *not*
+        # free, though: the cascade's forearm-rigidity gate depends on the
+        # static's forearm geometry matching the trials', which failed for
+        # one participant already (see find_static_csv's docstring) -- this
+        # uses the cascade-safe static specifically to avoid repeating that.
+        static_csv = find_static_csv(args.participant)
+        if static_csv is None:
+            p.error(f"no cascade-safe static recording found for "
+                     f"participant={args.participant!r} in "
+                     "trial_filename_map.csv -- pass --ref-frames/--ref-csv instead")
+        static_raw, static_labels = load_csv(str(static_csv))
+        static_markers = align_markers_to_labels(static_raw, static_labels, labels)
+        complete = auto_reference(static_markers, need=static_markers.shape[0])
+        static_markers = static_markers[complete]
+        print(f"--ref-static: {static_csv} -> {complete.size}/{static_raw.shape[0]} "
+              f"complete frames used as an extra bone-length reference")
+
     if args.ref_csv:
         ref_frames = load_ref_ranges_csv(args.ref_csv, args.participant, args.trial)
-    else:
+    elif args.ref_frames:
         ref_frames = parse_frame_spec(args.ref_frames)
+    else:
+        ref_frames = np.zeros(0, dtype=int)   # --ref-static alone is enough
     ref_frames = ref_frames[(ref_frames >= 0) & (ref_frames < markers.shape[0])]
-    if ref_frames.size < 3:
-        p.error(f"Reference frames resolved to only {ref_frames.size} valid frame(s); need more")
+    have = ref_frames.size + (static_markers.shape[0] if static_markers is not None else 0)
+    if have < 3:
+        p.error(f"Reference frames resolved to only {have} valid frame(s) "
+                "(--ref-frames/--ref-csv plus --ref-static combined); need more")
 
     status, bones = label_quality(
-        markers, labels, ref_frames,
+        markers, labels, ref_frames, static_markers=static_markers,
         bone_tol_mad=args.bone_tol_mad, bone_tol_mm=args.bone_tol_mm,
         speed_tol_mad=args.speed_tol_mad, speed_tol_mm=args.speed_tol_mm,
     )

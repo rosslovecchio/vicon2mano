@@ -86,6 +86,23 @@ python vicon2mano/strategies/cascade/quality_cascade.py \
 it then defaults to
 `results/cascade/{participant}_{trial}_quality_cascade.csv`.
 
+`--ref-static` derives an extra bone-length reference from `--participant`'s
+static/calibration recording: since the subject holds still, every frame
+with all markers present is assumed correct. It can stand alone (no
+`--ref-frames`/`--ref-csv` needed) or supplement them:
+
+```bash
+python vicon2mano/strategies/cascade/quality_cascade.py \
+    --participant P10 --trial "Trial2 Hands only" --ref-static
+```
+
+It contributes to the bone-length check only, never the temporal one (a
+static is a different recording, with no frame-to-frame relationship to the
+trial), and uses `find_static_csv`'s cascade-safe static specifically — one
+participant's static (P9) is excluded because its forearm geometry doesn't
+match its trials (see that function's docstring), so `--ref-static` errors
+clearly for P9 rather than silently producing a bad reference.
+
 `visualize_data.ipynb` / `visualize_data.py` drive it interactively —
 loading recordings, plotting % correct over time, animating a trial with
 markers colored by verdict, and stepping through the reasoning for one

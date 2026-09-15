@@ -385,6 +385,28 @@ def find_trial_csv(participant: str, trial: str
     return trial_path, static_path, mano_static
 
 
+def find_static_csv(participant: str) -> Path | None:
+    """The participant's dedicated static/calibration recording, if any --
+    the *cascade-safe* one (``find_trial_csv``'s second return value), not
+    the MANO-calibration one (its third).
+
+    Those two differ for exactly one participant: P9's static was taken
+    after a Forearm marker fell off and was reattached, so its forearm
+    geometry no longer matches the trials. Folding it into the cascade
+    reference once collapsed 3 of P9's 4 trials to 0% correct (see
+    :data:`MANO_ONLY_STATIC`) -- MANO calibration only touches the 16 hand
+    markers, so the forearm disturbance doesn't matter there, but the
+    cascade's forearm-rigidity gate depends on it. This function returns
+    ``None`` for P9 rather than that unsafe file.
+
+    ``find_trial_csv`` needs a ``trial`` argument but the static lookup
+    itself doesn't depend on it (it globs the participant's directory), so
+    an empty string is passed through harmlessly.
+    """
+    _trial_path, static_path, _mano_static = find_trial_csv(participant, "")
+    return static_path
+
+
 def auto_reference(markers: np.ndarray, need: int = 300) -> np.ndarray:
     """Fallback reference frames: the longest fully-present stretches."""
     present = np.isfinite(markers).all(axis=(1, 2))
