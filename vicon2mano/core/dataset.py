@@ -22,7 +22,7 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-DATA_ROOT = Path(r"D:\ExperimentsJune25")
+DATA_ROOT = Path(r"C:\Users\RL000009\OneDrive - Vrije Universiteit Brussel\A-Skills\data_June25")
 REF_CSV = DATA_ROOT / "manual_frames.csv"
 TRIAL_MAP_CSV = DATA_ROOT / "trial_filename_map.csv"
 MANO_DIR = REPO_ROOT.parent / "clean_kinematics" / "mano_v1_2" / "models"
@@ -365,7 +365,7 @@ def find_trial_csv(participant: str, trial: str
     and P17 were absent, so ``--all`` silently skipped them. The map remains
     the source for *statics*, which the log does not track.
     """
-    pdir = DATA_ROOT / participant / participant
+    pdir = DATA_ROOT / participant
     sessions = load_trial_sessions(REF_CSV).get(participant, {})
     csv_name = sessions.get(trial)
     trial_path = find_session_file(pdir, csv_name) if csv_name else None
@@ -387,24 +387,28 @@ def find_trial_csv(participant: str, trial: str
 
 def find_static_csv(participant: str) -> Path | None:
     """The participant's dedicated static/calibration recording, if any --
-    the *cascade-safe* one (``find_trial_csv``'s second return value), not
-    the MANO-calibration one (its third).
+    the *cascade-safe* one, not the MANO-calibration one (``find_trial_csv``'s
+    third return value, used directly by MANO calibration callers).
 
-    Those two differ for exactly one participant: P9's static was taken
-    after a Forearm marker fell off and was reattached, so its forearm
-    geometry no longer matches the trials. Folding it into the cascade
-    reference once collapsed 3 of P9's 4 trials to 0% correct (see
-    :data:`MANO_ONLY_STATIC`) -- MANO calibration only touches the 16 hand
-    markers, so the forearm disturbance doesn't matter there, but the
-    cascade's forearm-rigidity gate depends on it. This function returns
-    ``None`` for P9 rather than that unsafe file.
+    Resolved via manual_frames.csv itself: a static recording gets its own
+    row there like any other trial, with ``Session`` == "Static" (matched
+    case-insensitively via the same normalisation ``find_trial_csv`` uses
+    for every other trial name -- no special-casing needed, "Static" is
+    just another session name in that column). A participant with no such
+    row -- P9, deliberately -- has no cascade-safe static: its static was
+    taken after a Forearm marker fell off and was reattached, so its
+    forearm geometry no longer matches the trials, and folding it into the
+    cascade reference once collapsed 3 of P9's 4 trials to 0% correct. The
+    log not carrying a "Static" row for P9 *is* that exclusion now, rather
+    than a separate hardcoded list.
 
-    ``find_trial_csv`` needs a ``trial`` argument but the static lookup
-    itself doesn't depend on it (it globs the participant's directory), so
-    an empty string is passed through harmlessly.
+    This used to read ``trial_filename_map.csv``'s "static" entries, a
+    second file tracking exactly the same fact by filename instead of by
+    manual_frames.csv row -- redundant, and it no longer exists at the
+    current ``DATA_ROOT`` at all, so that path always returned ``None``.
     """
-    _trial_path, static_path, _mano_static = find_trial_csv(participant, "")
-    return static_path
+    trial_path, _static_path, _mano_static = find_trial_csv(participant, "Static")
+    return trial_path
 
 
 def auto_reference(markers: np.ndarray, need: int = 300) -> np.ndarray:
