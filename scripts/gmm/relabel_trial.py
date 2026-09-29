@@ -41,7 +41,6 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-import warnings
 from pathlib import Path
 
 import numpy as np
@@ -56,6 +55,9 @@ from vicon2mano.core.loader import load_csv                # noqa: E402
 from vicon2mano.strategies.gmm import labeler as gl               # noqa: E402
 from vicon2mano.core import dataset as rwm
 from vicon2mano.core import viz
+from vicon2mano.core.bones import (                         # noqa: E402
+    modal_bone_lengths, consensus_bone_lengths, bone_error,
+)
 
 OUT_DIR = REPO_ROOT / "results" / "gmm"
 
@@ -97,112 +99,45 @@ def _finger_chains(labels: list[str]) -> list[tuple[int, int]]:
     return bones
 
 
-def modal_bone_lengths(markers: np.ndarray, bones: list[tuple[int, int]],
-                        *, bin_mm: float = 0.5, refine_mm: float = 2.0) -> np.ndarray:
-    """Reference length per bone from each bone's *marginal* mode.
+def load_prior_gmms(prior_csv: Path, target_by_name: dict[str, int]) -> dict[int, gl.GMMParams]:
+    """Marker GMMs from a separately labelled trial assumed fully correct.
 
-    Works only where a bone is correctly labelled in most frames. Kept for
-    comparison and diagnostics; :func:`consensus_bone_lengths` is what the
-    pipeline uses, because that assumption fails badly on real data (see
-    its docstring).
+    Unlike the in-trial bootstrap (``consensus_bone_lengths`` + repaired
+    anchors), a ground-truth trial needs no self-consistency filtering --
+    every finite frame is trustworthy by construction, and the anchor frame
+    comes straight from the labelled Palm1/2/3 columns (``rigid_frames``),
+    not the repair search in ``rigid_frames_from_triangle``. Returned GMMs
+    are keyed by marker index in ``target_by_name`` (the trial being
+    relabelled), not the prior file's own indexing, since the two trials'
+    marker columns are not guaranteed to be in the same order.
     """
-    out = np.full(len(bones), np.nan)
-    for k, (i, j) in enumerate(bones):
-        v = np.linalg.norm(markers[:, i] - markers[:, j], axis=1)
-        v = v[np.isfinite(v)]
-        if v.size < 50:
-            continue
-        hist, edges = np.histogram(v, bins=np.arange(0, v.max() + bin_mm, bin_mm))
-        mode = edges[int(np.argmax(hist))] + bin_mm / 2
-        near = v[np.abs(v - mode) < refine_mm]
-        out[k] = near.mean() if near.size else mode
-    return out
+    print(f"Loading prior trial {prior_csv}")
+    prior_markers, prior_labels = load_csv(str(prior_csv))
+    prior_by_name = {l.split(":")[-1]: i for i, l in enumerate(prior_labels)}
+    missing_anchor = [n for n in ANCHOR_NAMES if n not in prior_by_name]
+    if missing_anchor:
+        raise SystemExit(f"Prior CSV missing anchor marker(s) {missing_anchor}")
+    prior_anchor_idxs = tuple(prior_by_name[n] for n in ANCHOR_NAMES)
+    R_p, o_p = gl.rigid_frames(prior_markers, *prior_anchor_idxs)
+    local_p = gl.to_local(prior_markers, R_p, o_p)
+    ref_p = np.flatnonzero(np.isfinite(local_p[:, prior_anchor_idxs]).all(axis=(1, 2)))
+    prior_target_idxs = [prior_by_name[n] for n in FINGER_NAMES if n in prior_by_name]
+    gmm_p = gl.fit_marker_gmms(local_p, prior_target_idxs, ref_p, n_components=3)
 
-
-def consensus_bone_lengths(
-    markers: np.ndarray, bones: list[tuple[int, int]], *,
-    tol_mm: float = 4.0, n_hypotheses: int = 400, n_compare: int = 3000,
-    seed: int = 0, min_bones: int = 12,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Reference lengths from the largest mutually-consistent set of frames.
-
-    RANSAC over frames: every candidate frame's whole bone-length vector is
-    one hypothesis, scored by how many other frames agree with it on *every*
-    bone at once; the winner's inliers are then averaged.
-
-    Why not the per-bone mode (:func:`modal_bone_lengths`): that assumes each
-    bone is labelled correctly in most frames, and on real data it is not.
-    On P7/Trial1_handsonly, `Ring1` is mislabelled in the *majority* of
-    frames, so its marginal mode locks onto the wrong configuration --
-    Palm2-Ring1 reads 34mm, which is shorter than Palm2-Pinky1 (54mm) and
-    anatomically impossible. Consensus fixes it (50mm) because wrong
-    configurations do not agree with *each other*: each different swap
-    produces a different distance vector, so only correctly-labelled frames
-    pile up into one large mutually-consistent set.
-
-    Returns ``(ref_lengths, inlier_frames)``. The inliers are frames whose
-    every bone matches the reference -- i.e. frames that are geometrically
-    self-consistent, and so the natural training set for the GMMs, with no
-    external quality verdict involved.
-    """
-    i_idx = np.array([b[0] for b in bones])
-    j_idx = np.array([b[1] for b in bones])
-    D = np.linalg.norm(markers[:, i_idx] - markers[:, j_idx], axis=2)   # (T, B)
-    finite = np.isfinite(D)
-    full = np.flatnonzero(finite.all(axis=1))
-    if full.size == 0:
-        return np.full(len(bones), np.nan), full
-
-    # A *hypothesis* must define every bone, so it is drawn from the fully
-    # observed frames. Agreement, though, is judged only on the bones a
-    # frame actually has: requiring all of them excluded 42% of this trial
-    # over a median of a single missing marker, which needlessly starved
-    # the training pool. `min_bones` stops a frame with almost nothing
-    # present from "agreeing" vacuously.
-    rng = np.random.default_rng(seed)
-    hyp = full if full.size <= n_hypotheses else full[
-        rng.choice(full.size, size=n_hypotheses, replace=False)]
-    usable = np.flatnonzero(finite.sum(axis=1) >= min_bones)
-    comp = usable if usable.size <= n_compare else usable[
-        np.linspace(0, usable.size - 1, n_compare).astype(int)]
-
-    def agrees(frames: np.ndarray, h: int) -> np.ndarray:
-        dev = np.abs(D[frames] - D[h])
-        ok = finite[frames]
-        return ((dev <= tol_mm) | ~ok).all(axis=1) & (ok.sum(axis=1) >= min_bones)
-
-    best_score, best_h = -1, int(hyp[0])
-    for h in hyp:
-        score = int(agrees(comp, h).sum())
-        if score > best_score:
-            best_score, best_h = score, int(h)
-
-    inliers = usable[agrees(usable, best_h)]
-    if inliers.size:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            ref = np.nanmean(np.where(finite[inliers], D[inliers], np.nan), axis=0)
-        ref = np.where(np.isfinite(ref), ref, D[best_h])
-    else:
-        ref = D[best_h]
-    return ref, inliers
-
-
-def bone_error(markers: np.ndarray, bones: list[tuple[int, int]],
-               ref: np.ndarray) -> np.ndarray:
-    """(T, n_bones) absolute deviation from each bone's reference length."""
-    err = np.full((markers.shape[0], len(bones)), np.nan)
-    for k, (i, j) in enumerate(bones):
-        if not np.isfinite(ref[k]):
-            continue
-        err[:, k] = np.abs(np.linalg.norm(markers[:, i] - markers[:, j], axis=1) - ref[k])
-    return err
+    prior_gmms = {target_by_name[name]: gmm_p[prior_by_name[name]]
+                  for name in FINGER_NAMES
+                  if name in prior_by_name and prior_by_name[name] in gmm_p
+                  and name in target_by_name}
+    print(f"  prior trained on {len(ref_p)} ground-truth frames, "
+          f"{len(prior_gmms)}/{len(FINGER_NAMES)} markers modelled")
+    return prior_gmms
 
 
 def run(participant: str, trial: str, *, n_out: int, n_hypotheses: int,
         tol_mm: float, passes: int, process_var: float, obs_var: float,
         out_dir: Path, min_persist: float = 0.8,
-        max_residual_mm: float = 8.0) -> None:
+        max_residual_mm: float = 8.0, prior_csv: Path | None = None,
+        bone_veto: bool = True) -> None:
     trial_path, *_ = rwm.find_trial_csv(participant, trial)
     if trial_path is None:
         raise SystemExit(f"No CSV mapped to {participant}/{trial}")
@@ -256,14 +191,23 @@ def run(participant: str, trial: str, *, n_out: int, n_hypotheses: int,
         raise SystemExit(f"Only {train.size} frames are both anchor-valid and "
                           f"geometrically self-consistent; cannot train.")
     init_frame = int(train[0])
+
+    prior_gmms = load_prior_gmms(prior_csv, by_name) if prior_csv is not None else None
+
     mapping = None
     for p in range(1, passes + 1):
-        sample = train if len(train) <= 4000 else train[
-            np.linspace(0, len(train) - 1, 4000).astype(int)]
-        gmms = gl.fit_marker_gmms(local, target_idxs, sample, n_components=3)
-        kept = [m for m in target_idxs if m in gmms]
-        print(f"  pass {p}: training on {len(sample)} frames, "
-              f"{len(kept)}/{len(target_idxs)} markers modelled")
+        if p == 1 and prior_gmms is not None:
+            gmms = prior_gmms
+            kept = [m for m in target_idxs if m in gmms]
+            print(f"  pass 1: using external ground-truth prior, "
+                  f"{len(kept)}/{len(target_idxs)} markers modelled")
+        else:
+            sample = train if len(train) <= 4000 else train[
+                np.linspace(0, len(train) - 1, 4000).astype(int)]
+            gmms = gl.fit_marker_gmms(local, target_idxs, sample, n_components=3)
+            kept = [m for m in target_idxs if m in gmms]
+            print(f"  pass {p}: training on {len(sample)} frames, "
+                  f"{len(kept)}/{len(target_idxs)} markers modelled")
         t0 = time.time()
         mapping = gl.relabel_local(local, gmms, kept, n_hypotheses=n_hypotheses,
                                    process_var=process_var, obs_var=obs_var,
@@ -331,7 +275,7 @@ def run(participant: str, trial: str, *, n_out: int, n_hypotheses: int,
             for a in anchor_idxs:
                 cand_status[a] = UNCHANGED
 
-        if (cand_status == REASSIGNED).any():
+        if bone_veto and (cand_status == REASSIGNED).any():
             eb = bone_error(snapshot[None], bones, ref_len)[0]
             ea = bone_error(cand[None], bones, ref_len)[0]
             ok = np.isfinite(eb) & np.isfinite(ea)
@@ -382,7 +326,7 @@ def run(participant: str, trial: str, *, n_out: int, n_hypotheses: int,
     out_dir.mkdir(parents=True, exist_ok=True)
     slug = f"{participant}_{trial.replace(' ', '_')}"
     frame_idx = np.unique(np.linspace(0, T - 1, n_out).astype(int))
-    fig = build_figure(relabelled, labels, bones, status, found, as_labelled,
+    fig = build_figure(relabelled, markers, labels, bones, status, found, as_labelled,
                        frame_idx, participant, trial, err_before, err_after)
     out_html = out_dir / f"gmm_relabelled_{slug}.html"
     fig.write_html(str(out_html), include_plotlyjs=True, div_id="animfig",
@@ -414,13 +358,40 @@ def run(participant: str, trial: str, *, n_out: int, n_hypotheses: int,
     print(f"Saved {summary}")
 
 
-def build_figure(markers, labels, bones, status, found, as_labelled,
+def _bone_finger(i: int, j: int, labels: list[str]) -> str:
+    """Which finger a bone belongs to, for colouring -- e.g. the
+    Palm2-Thumb1 base bone is coloured as "thumb" (the finger it connects
+    to), not "palm", by checking both endpoints and preferring a named
+    finger over the palm/forearm fallback."""
+    for idx in (i, j):
+        low = labels[idx].lower()
+        for finger in ("thumb", "index", "middle", "ring", "pinky"):
+            if finger in low:
+                return finger
+    return "palm"
+
+
+def build_figure(corrected, original, labels, bones, status, found, as_labelled,
                   frame_idx, participant, trial, err_before, err_after):
-    """Plotly animation matching results/mano style."""
+    """Plotly animation matching results/mano style.
+
+    ``corrected`` (this trial's repaired positions -- ``relabelled`` in
+    ``run()``) drives the marker dots and the bold/solid skeleton;
+    ``original`` (the raw, unrepaired positions) drives the thin/dashed
+    skeleton toggled by the "original bones" button. Marker colour/label
+    text are fixed per column (``labels``) -- since a repair only ever
+    swaps *positions* between columns, not the column identities
+    themselves, a column's colour already reflects its corrected identity.
+    """
     fill_colors = [viz.marker_color(l) for l in labels]
     digit_text = [viz.marker_digit(l) for l in labels]
-    center = np.nanmean(markers, axis=(0, 1))
+    center = np.nanmean(corrected, axis=(0, 1))
     half = 200
+
+    bone_groups: dict[str, list[tuple[int, int]]] = {}
+    for i, j in bones:
+        bone_groups.setdefault(_bone_finger(i, j, labels), []).append((i, j))
+    group_names = list(bone_groups)
 
     def title(t):
         # Report the OUTCOME, not the proposal. `as_labelled` says the
@@ -448,7 +419,7 @@ def build_figure(markers, labels, bones, status, found, as_labelled,
                 f"reassigned {n_moved}{bone}{tag}")
 
     def trace_data(t):
-        fm = markers[t]
+        fm = corrected[t]
         ok = np.isfinite(fm).all(axis=-1)
         x = np.where(ok, fm[:, 0], np.nan)
         y = np.where(ok, fm[:, 1], np.nan)
@@ -457,10 +428,9 @@ def build_figure(markers, labels, bones, status, found, as_labelled,
                 for i, s in enumerate(status[t])]
         return x, y, z, ring
 
-    def bone_xyz(t):
-        fm = markers[t]
+    def group_bone_xyz(fm, group):
         xs, ys, zs = [], [], []
-        for i, j in bones:
+        for i, j in group:
             if np.isfinite(fm[i]).all() and np.isfinite(fm[j]).all():
                 xs += [fm[i, 0], fm[j, 0], None]
                 ys += [fm[i, 1], fm[j, 1], None]
@@ -469,7 +439,13 @@ def build_figure(markers, labels, bones, status, found, as_labelled,
 
     t0 = int(frame_idx[0])
     x0, y0, z0, ring0 = trace_data(t0)
-    bx0, by0, bz0 = bone_xyz(t0)
+
+    def marker_xyz(fm):
+        ok = np.isfinite(fm).all(axis=-1)
+        x = np.where(ok, fm[:, 0], np.nan)
+        y = np.where(ok, fm[:, 1], np.nan)
+        z = np.where(ok, fm[:, 2], np.nan)
+        return x, y, z
 
     ring_tr = go.Scatter3d(x=x0, y=y0, z=z0, mode="markers",
                            marker=dict(size=14, color=ring0),
@@ -479,9 +455,32 @@ def build_figure(markers, labels, bones, status, found, as_labelled,
                          text=digit_text, textposition="top center",
                          textfont=dict(size=10, color="#000000"),
                          hovertext=labels, hoverinfo="text", name="markers")
-    bone_tr = go.Scatter3d(x=bx0, y=by0, z=bz0, mode="lines",
-                           line=dict(color="lightgray", width=2),
-                           hoverinfo="skip", name="bones")
+    ox0, oy0, oz0 = marker_xyz(original[t0])
+    orig_mk_tr = go.Scatter3d(x=ox0, y=oy0, z=oz0, mode="markers",
+                              marker=dict(size=5, color=fill_colors, opacity=0.35),
+                              hovertext=[f"{l} (raw)" for l in labels], hoverinfo="text",
+                              name="markers (raw)")
+
+    # Two skeletons: the repaired one (bold, solid, one trace per finger so
+    # each bone can carry its own finger colour) and the raw/unrepaired one
+    # (thin, dashed, same colours) -- overlaid so a repair's effect on the
+    # geometry is visible directly, not just inferred from the status ring.
+    corrected_trs, original_trs = [], []
+    for name in group_names:
+        color = FINGER_PALETTE.get(name, "#444444")
+        cx, cy, cz = group_bone_xyz(corrected[t0], bone_groups[name])
+        corrected_trs.append(go.Scatter3d(
+            x=cx, y=cy, z=cz, mode="lines",
+            line=dict(color=color, width=6), hoverinfo="skip",
+            name=f"{name} (corrected)", legendgroup="bones-corrected",
+            legendgrouptitle=dict(text="Bones") if name == group_names[0] else None,
+            showlegend=False))
+        ox, oy, oz = group_bone_xyz(original[t0], bone_groups[name])
+        original_trs.append(go.Scatter3d(
+            x=ox, y=oy, z=oz, mode="lines",
+            line=dict(color=color, width=2, dash="dash"), hoverinfo="skip",
+            name=f"{name} (original)", legendgroup="bones-original",
+            visible=True, showlegend=False))
 
     finger_legend = [
         go.Scatter3d(x=[None], y=[None], z=[None], mode="markers",
@@ -496,21 +495,59 @@ def build_figure(markers, labels, bones, status, found, as_labelled,
         for n, c in [("label kept", STATUS_OUTLINE[UNCHANGED]),
                      ("reassigned", STATUS_OUTLINE[REASSIGNED])]
     ]
+    style_legend = [
+        go.Scatter3d(x=[None], y=[None], z=[None], mode="lines",
+                     line=dict(color="#444444", width=6), name="corrected (repaired)",
+                     legendgroup="style", legendgrouptitle=dict(text="Bone style")),
+        go.Scatter3d(x=[None], y=[None], z=[None], mode="lines",
+                     line=dict(color="#444444", width=2, dash="dash"), name="original (raw)",
+                     legendgroup="style"),
+    ]
+
+    # Data trace order: ring, corrected markers, original markers, then
+    # each finger's corrected bone then original bone traces. Indices below
+    # must track this order -- they drive which traces the two checkboxes
+    # (corrected / original) toggle together.
+    n_corrected = len(corrected_trs)
+    corrected_idx = [1] + list(range(3, 3 + n_corrected))
+    original_idx = [2] + list(range(3 + n_corrected, 3 + 2 * n_corrected))
 
     frames = []
     for k, t in enumerate(frame_idx):
         t = int(t)
         x, y, z, ring = trace_data(t)
-        bx, by, bz = bone_xyz(t)
-        frames.append(go.Frame(
-            name=str(k),
-            data=[go.Scatter3d(x=x, y=y, z=z, marker=dict(color=ring)),
-                  go.Scatter3d(x=x, y=y, z=z, marker=dict(color=fill_colors)),
-                  go.Scatter3d(x=bx, y=by, z=bz)],
-            layout=go.Layout(title=title(t))))
+        ox, oy, oz = marker_xyz(original[t])
+        frame_data = [go.Scatter3d(x=x, y=y, z=z, marker=dict(color=ring)),
+                      go.Scatter3d(x=x, y=y, z=z, marker=dict(color=fill_colors)),
+                      go.Scatter3d(x=ox, y=oy, z=oz, marker=dict(color=fill_colors))]
+        for name in group_names:
+            cx, cy, cz = group_bone_xyz(corrected[t], bone_groups[name])
+            frame_data.append(go.Scatter3d(x=cx, y=cy, z=cz))
+        for name in group_names:
+            ox2, oy2, oz2 = group_bone_xyz(original[t], bone_groups[name])
+            frame_data.append(go.Scatter3d(x=ox2, y=oy2, z=oz2))
+        frames.append(go.Frame(name=str(k), data=frame_data,
+                               layout=go.Layout(title=title(t))))
+
+    # Plotly's updatemenus have no native checkbox widget -- each of these
+    # two independent Show/Hide button pairs acts as one, toggling the
+    # markers+bones of that set (corrected or original) together via
+    # "restyle", orthogonal to the Play/Pause animation controls. Stacked
+    # in their own row (not side-by-side) so a wide 2-button menu can never
+    # visually overlap its neighbour and silently steal its clicks.
+    def checkbox(label: str, idx: list[int], y: float) -> dict:
+        return dict(type="buttons", direction="right", showactive=True,
+                    x=0.0, y=y, pad=dict(t=4, b=4),
+                    buttons=[
+                        dict(label=f"Show {label}", method="restyle",
+                             args=[{"visible": True}, idx]),
+                        dict(label=f"Hide {label}", method="restyle",
+                             args=[{"visible": False}, idx]),
+                    ])
 
     return go.Figure(
-        data=[ring_tr, mk_tr, bone_tr, *finger_legend, *status_legend],
+        data=[ring_tr, mk_tr, orig_mk_tr, *corrected_trs, *original_trs,
+             *finger_legend, *status_legend, *style_legend],
         frames=frames,
         layout=go.Layout(
             title=title(t0),
@@ -520,12 +557,17 @@ def build_figure(markers, labels, bones, status, found, as_labelled,
                 yaxis=dict(range=[center[1]-half, center[1]+half], title="Y (mm)"),
                 zaxis=dict(range=[center[2]-half, center[2]+half], title="Z (mm)"),
                 aspectmode="cube"),
-            updatemenus=[dict(type="buttons", showactive=False, buttons=[
-                dict(label="Play", method="animate", args=[None, {
-                    "frame": {"duration": 60, "redraw": True},
-                    "fromcurrent": True, "transition": {"duration": 0}}]),
-                dict(label="Pause", method="animate", args=[[None], {
-                    "frame": {"duration": 0}, "mode": "immediate"}])])],
+            margin=dict(t=160),
+            updatemenus=[
+                dict(type="buttons", showactive=False, x=0.0, y=1.24, buttons=[
+                    dict(label="Play", method="animate", args=[None, {
+                        "frame": {"duration": 60, "redraw": True},
+                        "fromcurrent": True, "transition": {"duration": 0}}]),
+                    dict(label="Pause", method="animate", args=[[None], {
+                        "frame": {"duration": 0}, "mode": "immediate"}])]),
+                checkbox("corrected", corrected_idx, 1.14),
+                checkbox("original", original_idx, 1.04),
+            ],
             sliders=[dict(currentvalue=dict(prefix="frame: "), steps=[
                 dict(method="animate", label=str(int(t)), args=[[str(k)], {
                     "frame": {"duration": 0, "redraw": True}, "mode": "immediate"}])
@@ -565,13 +607,29 @@ def main(argv=None):
                          "self-consistent frames)")
     ap.add_argument("--process-var", type=float, default=0.5)
     ap.add_argument("--obs-var", type=float, default=1.0)
+    ap.add_argument("--prior-csv", default=None,
+                    help="path to a separately labelled trial, assumed fully "
+                         "correct (e.g. a manually-labelled-and-filled export), "
+                         "whose marker GMMs seed pass 1 instead of this trial's "
+                         "own consensus-bootstrapped frames. Later passes (if "
+                         "--passes > 1) still refit on this trial's own "
+                         "consensus-clean frames as usual.")
+    ap.add_argument("--no-bone-veto", action="store_true",
+                    help="accept every proposed reassignment unconditionally, "
+                         "skipping step 3's independent bone-length check. "
+                         "Without the veto, a wrong proposal (e.g. a "
+                         "Thumb1<->Thumb2 swap) reaches the output uncaught -- "
+                         "use only to see the model's raw output, e.g. when "
+                         "judging an external --prior-csv on its own merits.")
     args = ap.parse_args(argv)
 
     run(args.participant, args.trial, n_out=args.n_out,
         n_hypotheses=args.n_hypotheses, tol_mm=args.tol_mm, passes=args.passes,
         process_var=args.process_var, obs_var=args.obs_var,
         out_dir=Path(args.out_dir), min_persist=args.min_persist,
-        max_residual_mm=args.max_residual_mm)
+        max_residual_mm=args.max_residual_mm,
+        prior_csv=Path(args.prior_csv) if args.prior_csv else None,
+        bone_veto=not args.no_bone_veto)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ own page rather than one ever-growing log.
 - Install: `pip install -e ".[dev,train]"` (train extras add h5py)
 - MANO weights: `../clean_kinematics/mano_v1_2/models/` (sibling repo);
   override with `--mano-dir`
-- Recordings: `D:\ExperimentsJune25` — see `vicon2mano/core/dataset.py`
+- Recordings: `C:\Users\RL000009\OneDrive - Vrije Universiteit Brussel\A-Skills\data_June25` — see `vicon2mano/core/dataset.py`
 - Extra runtime deps not in pyproject: `plotly`, `matplotlib`
 
 ```bash

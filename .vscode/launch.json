@@ -74,6 +74,58 @@
             ]
         },
         {
+            "name": "Strategy: GMM (relabel_trial, external prior)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scripts/gmm/relabel_trial.py",
+            "python": "${workspaceFolder}/.viconvenv/Scripts/python.exe",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                // Seeds pass 1 from P10/Trial2's manually-labelled-and-filled
+                // export (assumed fully correct) instead of this trial's own
+                // consensus-bootstrapped frames -- see --prior-csv in
+                // scripts/gmm/relabel_trial.py.
+                "--participant",
+                "P10",
+                "--trial",
+                "Trial2 Hands only",
+                "--prior-csv",
+                "C:/Users/RL000009/OneDrive - Vrije Universiteit Brussel/A-Skills/data_June25/P10/Trial2_handsonly_manuallylabelled_filled.csv",
+                "--passes",
+                "1",
+                "--out-dir",
+                "results/gmm/external_prior"
+            ]
+        },
+        {
+            "name": "Strategy: GMM (relabel_trial, external prior, no bone veto)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scripts/gmm/relabel_trial.py",
+            "python": "${workspaceFolder}/.viconvenv/Scripts/python.exe",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                // Same as "external prior" above, but with --no-bone-veto:
+                // every proposed reassignment is accepted unconditionally,
+                // so the output is the model's raw proposal, unfiltered by
+                // step 3's independent bone-length check. Use this to judge
+                // the external prior on its own merits, not the veto's.
+                "--participant",
+                "P10",
+                "--trial",
+                "Trial2 Hands only",
+                "--prior-csv",
+                "C:/Users/RL000009/OneDrive - Vrije Universiteit Brussel/A-Skills/data_June25/P10/Trial2_handsonly_manuallylabelled_filled.csv",
+                "--passes",
+                "1",
+                "--out-dir",
+                "results/gmm/external_prior_no_veto",
+                "--no-bone-veto"
+            ]
+        },
+        {
             "name": "Strategy: MANO (relabel_trial)",
             "type": "debugpy",
             "request": "launch",

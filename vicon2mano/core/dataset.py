@@ -411,6 +411,64 @@ def find_static_csv(participant: str) -> Path | None:
     return trial_path
 
 
+# A manually-labelled export lives alongside its raw trial, named by
+# convention -- "_manuallylabelled_filled.csv" if a gap-filled pass exists,
+# else "_manuallylabelled.csv". Kept in one place so
+# scripts/shared/analyze_manual_agreement.py (single trial) and
+# scripts/shared/aggregate_manual_agreement.py (all of them) can't disagree
+# about which suffix wins when both exist for the same trial.
+MANUAL_LABEL_SUFFIXES = ("_manuallylabelled_filled.csv", "_manuallylabelled.csv")
+
+
+def find_manual_csv(vicon_csv: Path) -> Path | None:
+    """The manually-labelled export next to ``vicon_csv``, if any."""
+    stem = vicon_csv.stem
+    for suffix in MANUAL_LABEL_SUFFIXES:
+        cand = vicon_csv.with_name(stem + suffix)
+        if cand.exists():
+            return cand
+    return None
+
+
+def find_manually_labelled_trials(
+    data_root: Path = DATA_ROOT,
+) -> list[tuple[str, str, Path, Path]]:
+    """Every (participant, trial_stem, vicon_csv, manual_csv) pair on disk
+    that has a manually-labelled export, across every participant directory.
+
+    Discovered directly from the filenames present (any
+    ``*_manuallylabelled*.csv``), not from ``manual_frames.csv`` -- a manual
+    export is evidence a trial was hand-reviewed regardless of whether that
+    review is also logged there. ``trial_stem`` is the raw trial's filename
+    stem (e.g. ``Trial2_handsonly``), used as the natural join key back to
+    its own vicon CSV -- not necessarily the same string as any
+    ``manual_frames.csv`` Session name.
+
+    A vicon CSV missing from disk (the manual export's suffix stripped, but
+    no such file) is skipped with a warning rather than raised -- a stray
+    manual export is a data-organisation problem to flag, not a reason to
+    abort discovery of every other trial.
+    """
+    found: list[tuple[str, str, Path, Path]] = []
+    if not data_root.exists():
+        return found
+    for participant_dir in sorted(p for p in data_root.iterdir() if p.is_dir()):
+        seen_stems: set[str] = set()
+        for suffix in MANUAL_LABEL_SUFFIXES:
+            for manual_csv in sorted(participant_dir.glob(f"*{suffix}")):
+                stem = manual_csv.name[: -len(suffix)]
+                if stem in seen_stems:
+                    continue  # a higher-priority suffix already claimed this trial
+                vicon_csv = participant_dir / f"{stem}.csv"
+                if not vicon_csv.exists():
+                    print(f"[warn] {manual_csv} has no matching vicon CSV "
+                          f"({vicon_csv.name} not found) -- skipped")
+                    continue
+                seen_stems.add(stem)
+                found.append((participant_dir.name, stem, vicon_csv, manual_csv))
+    return found
+
+
 def auto_reference(markers: np.ndarray, need: int = 300) -> np.ndarray:
     """Fallback reference frames: the longest fully-present stretches."""
     present = np.isfinite(markers).all(axis=(1, 2))

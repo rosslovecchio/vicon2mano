@@ -222,3 +222,74 @@ under `Index1`/`Middle1`/`Palm3`).
 hand-labelled frames spanning poses would break the ceiling directly. Label
 where strategyGMM disagrees with the on-disk labels, starting with
 P10/Trial2 Hands only (15.1%, the cleanest trial in the cohort).
+
+## Work completed 2026-09-16 (external ground-truth prior, veto opt-out, dual-skeleton animation)
+
+Follow-up to the "next steps" above: a manually-labelled-and-filled export
+of P10/Trial2 Hands only (`Trial2_handsonly_manuallylabelled_filled.csv`,
+assumed fully correct throughout) became available. `scripts/gmm/relabel_trial.py`
+now has three additions, all opt-in -- the default (no flags) behaviour is
+unchanged.
+
+**`--prior-csv PATH` (`load_prior_gmms`).** Fits `fit_marker_gmms` directly
+on the external labelled trial instead of this trial's own
+consensus-bootstrapped frames for pass 1. Unlike the in-trial bootstrap, no
+self-consistency filtering is needed -- a ground-truth trial's rigid frame
+comes straight from its own labelled Palm1/2/3 (`rigid_frames`, not the
+repair search in `rigid_frames_from_triangle`), and every finite frame is a
+trustworthy training sample. The fitted GMMs are keyed by marker *name*,
+then remapped onto the target trial's own column indices before use --
+needed because the two trials' marker columns are not guaranteed to be in
+the same order. Later passes (`--passes > 1`) still refit on the target
+trial's own consensus-clean frames as before; only pass 1 changes.
+
+Whole-trial result, P10/Trial2 Hands only (42,238 frames, prior trained on
+all 42,238 ground-truth frames, target trial's own labels used as-is for
+everything but the GMM prior):
+
+    marker-instances reassigned        2,025 (0.7% of usable slots)
+    frames rejected by the veto        748
+    bone-length error, all bones       1.85mm -> 1.84mm (0.1% improved)
+    bones touching a reassigned marker 10.64mm -> 6.81mm (84.7% improved)
+
+The whole-trial error barely moves (expected -- most of the trial was
+already fine), but the bones the repair actually touched improve sharply,
+same signature as the in-trial-bootstrap results above.
+
+**`--no-bone-veto`.** Skips step 3's independent bone-length check,
+accepting every proposed reassignment unconditionally. Exists to see the
+model's *raw* output when judging an external prior's proposals on their
+own merits, separate from the veto's judgement. Confirms the veto is doing
+real work here too: with it off on the same trial, 3,918 instances get
+reassigned (vs. 2,025) and the touched-bone improvement drops to 31.4%
+(vs. 84.7%) -- most of the veto's rejections were correct rejections.
+
+**Dual-skeleton animation.** `build_figure` now takes both `corrected`
+(`relabelled`) and `original` (raw `markers`) position arrays and renders
+both skeletons overlaid, so a repair's effect on the geometry is visible
+directly rather than only inferred from the status ring:
+- corrected: solid, width 6, one trace per finger (`_bone_finger` groups
+  bones by whichever endpoint names a finger, so e.g. the Palm2-Thumb1 base
+  bone is coloured as thumb, not palm), plus the existing marker dots.
+- original: dashed, width 2, same finger colours, plus a new faded
+  (`opacity=0.35`) marker-dot trace at the raw positions.
+
+Two independent Show/Hide button pairs act as checkboxes (Plotly's
+`updatemenus` has no native checkbox widget), each toggling its set's
+markers+bones together via `restyle`. They are stacked in their own row
+above the plot (not placed side-by-side) after a first attempt with two
+menus at the same height and long labels turned out to silently overlap and
+steal each other's clicks -- worth remembering if a future button/menu
+addition here "does nothing" when clicked: check for menu-region overlap
+before assuming the restyle wiring is wrong.
+
+Marker colour/label text needed no change -- a column's colour was already
+its *corrected* identity: a repair only ever swaps which raw column's
+*position* fills a given identity-slot, never the slot-to-identity mapping
+itself, so `labels[m]`'s colour has always meant "this is column m's
+(corrected) identity," not "this is what column m was originally labelled."
+
+`.vscode/launch.json` gained two configs: "GMM (relabel_trial, external
+prior)" (P10/Trial2, `--prior-csv` pointed at the manually-labelled export,
+output to `results/gmm/external_prior`) and the same with `--no-bone-veto`
+added (output to `results/gmm/external_prior_no_veto`).
