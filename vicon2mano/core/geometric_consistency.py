@@ -208,11 +208,13 @@ def geometric_events(df: pd.DataFrame) -> pd.DataFrame:
                                else "sustained_geometric_deviation"),
                 "associated_bone": assoc[peak],
                 "deviation_magnitude_mm": float(deviations[peak]),
+                "peak_frame": int(frames[peak]),
                 "adjacent_missing_vicon": bool((not before) or (not after)),
             })
     return pd.DataFrame(events, columns=[
         "subject_id", "trial_id", "marker", "start_frame", "end_frame", "duration",
-        "event_type", "associated_bone", "deviation_magnitude_mm", "adjacent_missing_vicon"])
+        "event_type", "associated_bone", "deviation_magnitude_mm", "peak_frame",
+        "adjacent_missing_vicon"])
 
 
 def missingness_events(df: pd.DataFrame, *, subject_id: str, trial_id: str) -> pd.DataFrame:
@@ -303,6 +305,7 @@ def trial_overall_summary(marker_summary: pd.DataFrame) -> dict:
         "total_suspicious_events": int(marker_summary["suspicious_event_count"].sum()),
         "total_affected_observations": int(marker_summary["affected_observations"].sum()),
         "total_vicon_gap_count": int(marker_summary["vicon_gap_count"].sum()),
+        "total_affected_missing_frames": int(marker_summary["affected_missing_frames"].sum()),
         "max_gap_duration": int(marker_summary["max_gap_duration"].max()),
     }
 

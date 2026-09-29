@@ -112,6 +112,7 @@ def test_sudden_marker_swap_detected_as_single_frame_event():
     assert single["event_type"] == "single_frame_discontinuity"
     assert single["duration"] == 1
     assert single["associated_bone"] is not None
+    assert single["peak_frame"] == 30
 
 
 def test_sustained_deviation_detected_as_multi_frame_event():
@@ -248,3 +249,4 @@ def test_trial_overall_summary_includes_assessment_type():
     overall = gc.trial_overall_summary(summary)
     assert overall["assessment_type"] == "geometric_self_consistency"
     assert overall["n_markers"] == 3
+    assert overall["total_affected_missing_frames"] == 0
