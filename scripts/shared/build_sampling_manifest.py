@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Turn the 500-frame anchor selection into a MATLAB-ready review list:
-resolve each frame's actual trial CSV, and where a frame was selected
+"""Build ``sampling_manifest.csv`` (deliverable #1 of the manual-validation
+plan): turn the 500-frame anchor selection into a MATLAB-ready review list,
+resolving each frame's actual trial CSV, and where a frame was selected
 *because of* a specific marker/bone (largest_anomaly,
-geometry_availability_disagreement), carry that marker through as a
-reviewing hint.
+geometry_availability_disagreement), carrying that marker through as a
+reviewing hint. This is also the record of "how frames were selected" the
+validation report cites.
 
 Reads ``results/shared/frame_sample/selected_anchors.csv`` (built by
 ``select_frames_for_review.py``) plus each trial's own ``trial_summary.csv``
@@ -16,7 +18,7 @@ docstring on the same +1 offset). The MATLAB side converts to Nexus's
 
 Usage
 -----
-python scripts/shared/export_matlab_review_list.py
+python scripts/shared/build_sampling_manifest.py
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from vicon2mano.core import dataset as ds  # noqa: E402
 GEOM_DIR = REPO_ROOT / "results" / "shared" / "geometric_consistency"
 ANCHORS_CSV = REPO_ROOT / "results" / "shared" / "frame_sample" / "selected_anchors.csv"
 WINDOWS_CSV = REPO_ROOT / "results" / "shared" / "frame_sample" / "selected_windows.csv"
-OUT_CSV = REPO_ROOT / "results" / "shared" / "frame_sample" / "matlab_review_list.csv"
+OUT_CSV = REPO_ROOT / "results" / "shared" / "frame_sample" / "sampling_manifest.csv"
 
 MARKER_CATEGORIES = ("largest_anomaly", "geometry_availability_disagreement")
 
