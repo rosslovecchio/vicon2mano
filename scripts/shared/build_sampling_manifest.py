@@ -53,7 +53,12 @@ def load_trial_metadata(participant: str, trial_id: str) -> dict | None:
     if not d.exists():
         return None
     row = pd.read_csv(d).iloc[0]
-    return {"analysis_trial": row["analysis_trial"], "n_frames": int(row["n_frames"])}
+    trial_path, *_ = ds.find_trial_csv(participant, trial_id)
+    return {
+        "analysis_trial": row["analysis_trial"],
+        "analysis_trial_path": str(trial_path) if trial_path is not None else "",
+        "n_frames": int(row["n_frames"]),
+    }
 
 
 def load_events_lookup(participant: str, trial_id: str) -> pd.DataFrame | None:
@@ -98,6 +103,7 @@ def build_review_list(anchors: pd.DataFrame, windows: pd.DataFrame) -> pd.DataFr
             "participant": a["participant"],
             "trial_id": a["trial_id"],
             "analysis_trial": meta["analysis_trial"],
+            "analysis_trial_path": meta["analysis_trial_path"],
             "n_frames": meta["n_frames"],
             "frame": int(a["frame"]),
             "window_start": int(wb["window_min"]) if wb is not None else int(a["frame"]),
