@@ -178,3 +178,100 @@ def geometry_vs_manual_contingency(per_frame: pd.DataFrame) -> pd.DataFrame:
                         (per_frame["manual_error_present"] == has_err)).sum())
             rows.append({"Geometry": geom_label, "Manual error": err_label, "Count": count})
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Building manual_annotations.csv from a hand-corrected trial export, as an
+# alternative to typing per-marker verdicts in label_selected_frames.m:
+# relabel directly in Nexus, export a corrected CSV (same
+# "<stem>_manuallylabelled.csv" convention as vicon2mano.core.dataset's
+# find_manual_csv), and diff it against the original. This still needs a
+# record of which frames were actually looked at (an unedited marker is
+# otherwise indistinguishable from an unreviewed one) -- that is what
+# visited_frames.csv (logged by the simplified label_selected_frames.m) is
+# for; this function only ever classifies frames that appear there.
+# ---------------------------------------------------------------------------
+
+
+def classify_marker_frame(orig_valid: bool, corrected_valid: bool, same_coords: bool) -> str | None:
+    """One (marker, frame) judgement inferred from a before/after coordinate
+    diff, given a human deliberately reviewed that frame in Nexus.
+
+    - both missing -> ``"missing"`` (nothing was there to judge, same as the
+      auto-detected case in ``label_selected_frames.m``).
+    - present before, missing after -> ``"ghost"``: the reviewer deleted the
+      label rather than reassigning it, which only makes sense if the point
+      was not a real, correctly-identified marker. Per instruction, a label
+      that disappears during review was NOT correct -- this is a determinate
+      error, not a data gap, even though the surface shape (present -> NaN)
+      looks like one.
+    - present before and after, coordinates unchanged -> ``"correct"``.
+    - present before and after, coordinates changed -> ``"wrong_label"``: the
+      reviewer moved the value, i.e. reassigned it to what they judged the
+      real identity to be.
+    - missing before, present after -> ``None``: the reviewer added a
+      coordinate where the original had none, i.e. gap-filling -- out of
+      scope for this identity check (see the plan's "do not fill gaps yet"),
+      so the caller should skip this case (with a warning), not classify it.
+    """
+    if not orig_valid and not corrected_valid:
+        return "missing"
+    if orig_valid and not corrected_valid:
+        return "ghost"
+    if not orig_valid and corrected_valid:
+        return None
+    return "correct" if same_coords else "wrong_label"
+
+
+def build_annotations_from_correction(
+    markers_orig: np.ndarray,
+    labels_orig: list[str],
+    markers_corrected: np.ndarray,
+    labels_corrected: list[str],
+    visited_frames: list[int],
+    *,
+    participant: str,
+    trial_id: str,
+    reviewer: str,
+    match_markers_fn,
+    atol_mm: float = 1e-6,
+) -> pd.DataFrame:
+    """``manual_annotations.csv`` rows for one trial, built by diffing the
+    original Vicon-labelled recording against a hand-corrected export, for
+    exactly the frames in ``visited_frames`` (everything else is
+    unreviewed and must not be scored either way).
+
+    ``match_markers_fn`` is ``vicon2mano.core.agreement.match_markers`` --
+    passed in rather than imported directly so this module does not import
+    ``core.agreement`` at module load time (the two assessments stay
+    independent modules; this function only borrows its base-name marker
+    matching, which is generic string plumbing, not an agreement-specific
+    concept).
+    """
+    match = match_markers_fn(labels_orig, labels_corrected)
+    rows = []
+    skipped_gap_fills = []
+    for frame in visited_frames:
+        for name in match.common:
+            a = markers_orig[frame, match.idx_a[name]]
+            b = markers_corrected[frame, match.idx_b[name]]
+            ok_a = np.isfinite(a).all()
+            ok_b = np.isfinite(b).all()
+            same = bool(ok_a and ok_b and np.allclose(a, b, atol=atol_mm))
+            status = classify_marker_frame(ok_a, ok_b, same)
+            if status is None:
+                skipped_gap_fills.append((frame, name))
+                continue
+            rows.append({
+                "trial_id": trial_id, "participant": participant, "frame": frame,
+                "marker_name": name, "vicon_label": name,
+                "manual_label": name if status in ("correct", "missing") else "",
+                "status": status, "confidence": "high", "reviewer": reviewer,
+            })
+    if skipped_gap_fills:
+        print(f"[warn] {trial_id}: skipped {len(skipped_gap_fills)} marker-frame(s) where a "
+              f"coordinate was added that the original didn't have (gap-filling is out of "
+              f"scope here) -- e.g. {skipped_gap_fills[:5]}")
+    return pd.DataFrame(rows, columns=["trial_id", "participant", "frame", "marker_name",
+                                       "vicon_label", "manual_label", "status", "confidence",
+                                       "reviewer"])

@@ -157,3 +157,78 @@ def test_geometry_vs_manual_contingency_2x2_shape_and_counts():
     assert lookup[("Normal", "Yes")] == 1
     assert lookup[("Anomalous", "No")] == 1
     assert lookup[("Anomalous", "Yes")] == 2
+
+
+# ---------------------------------------------------------------------------
+# Coordinate-diff classification (the "relabel in Nexus and diff" workflow)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_marker_frame_both_missing_is_missing():
+    assert val.classify_marker_frame(False, False, False) == "missing"
+
+
+def test_classify_marker_frame_label_removed_is_ghost_not_missing():
+    # Present before, deleted during review -- per instruction, this means
+    # the label was NOT correct (a real error), not a benign data gap.
+    assert val.classify_marker_frame(True, False, False) == "ghost"
+
+
+def test_classify_marker_frame_unchanged_is_correct():
+    assert val.classify_marker_frame(True, True, True) == "correct"
+
+
+def test_classify_marker_frame_moved_is_wrong_label():
+    assert val.classify_marker_frame(True, True, False) == "wrong_label"
+
+
+def test_classify_marker_frame_added_is_none_gap_fill_out_of_scope():
+    assert val.classify_marker_frame(False, True, False) is None
+
+
+def test_build_annotations_from_correction_full_workflow():
+    from vicon2mano.core.agreement import match_markers
+
+    labels = ["A", "B", "C", "D"]
+    T = 3
+    markers_orig = np.zeros((T, 4, 3))
+    markers_orig[:, 0] = [1.0, 0.0, 0.0]   # A: unchanged everywhere -> correct
+    markers_orig[:, 1] = [2.0, 0.0, 0.0]   # B: will be moved at frame 1 -> wrong_label
+    markers_orig[:, 2] = [3.0, 0.0, 0.0]   # C: will be deleted at frame 1 -> ghost
+    markers_orig[:, 3] = np.nan            # D: missing throughout, untouched -> missing
+
+    markers_corrected = markers_orig.copy()
+    markers_corrected[1, 1] = [99.0, 0.0, 0.0]   # B moved
+    markers_corrected[1, 2] = np.nan             # C removed
+
+    visited_frames = [1]  # only frame 1 was actually reviewed
+    out = val.build_annotations_from_correction(
+        markers_orig, labels, markers_corrected, labels, visited_frames,
+        participant="P1", trial_id="T1", reviewer="tester",
+        match_markers_fn=match_markers)
+
+    by_marker = out.set_index("marker_name")
+    assert by_marker.loc["A", "status"] == "correct"
+    assert by_marker.loc["B", "status"] == "wrong_label"
+    assert by_marker.loc["C", "status"] == "ghost"
+    assert by_marker.loc["D", "status"] == "missing"
+    # frame 0 and 2 were never visited -> nothing recorded for them at all.
+    assert set(out["frame"]) == {1}
+    assert len(out) == 4
+
+
+def test_build_annotations_from_correction_skips_gap_fill_with_warning(capsys):
+    from vicon2mano.core.agreement import match_markers
+
+    labels = ["A"]
+    markers_orig = np.full((2, 1, 3), np.nan)
+    markers_corrected = markers_orig.copy()
+    markers_corrected[0, 0] = [5.0, 0.0, 0.0]  # added where original had nothing
+
+    out = val.build_annotations_from_correction(
+        markers_orig, labels, markers_corrected, labels, [0],
+        participant="P1", trial_id="T1", reviewer="tester",
+        match_markers_fn=match_markers)
+
+    assert len(out) == 0
+    assert "gap-filling" in capsys.readouterr().out
