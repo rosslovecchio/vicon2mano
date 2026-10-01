@@ -66,7 +66,7 @@ def find_visited_csv(explicit: Path | None) -> Path:
         + "\nRun label_selected_frames.m (visit-logging mode) first, or pass --visited-csv.")
 
 
-def run(visited_csv: Path, reviewer_override: str | None, out_csv: Path) -> None:
+def run(visited_csv: Path, reviewer_override: str | None, out_csv: Path, atol_mm: float) -> None:
     visited = pd.read_csv(visited_csv)
     if visited.empty:
         raise SystemExit(f"{visited_csv} has no rows yet -- nothing to build annotations from.")
@@ -95,7 +95,7 @@ def run(visited_csv: Path, reviewer_override: str | None, out_csv: Path) -> None
             markers_orig, labels_orig, markers_corrected, labels_corrected,
             visited_frames=g["frame"].astype(int).tolist(),
             participant=participant, trial_id=trial_id, reviewer=reviewer,
-            match_markers_fn=match_markers)
+            match_markers_fn=match_markers, atol_mm=atol_mm)
         all_rows.append(annotations)
 
     if not all_rows:
@@ -116,10 +116,17 @@ def main(argv=None):
                     help="override the reviewer name recorded in the output "
                          "(default: use visited_frames.csv's own reviewer column)")
     ap.add_argument("--out-csv", default=str(OUT_CSV))
+    ap.add_argument("--atol-mm", type=float, default=1.0,
+                    help="coordinates within this distance (mm) count as unchanged. "
+                         "Default 1.0mm: measured round-trip noise between a raw Vicon CSV "
+                         "and a Nexus GetTrajectory re-export is ~0.005mm even where nothing "
+                         "was touched, so anything near 0 would misclassify almost every "
+                         "marker as wrong_label; 1mm is far above that noise floor and far "
+                         "below any real mislabelling (markers sit tens of mm apart).")
     args = ap.parse_args(argv)
 
     visited_csv = find_visited_csv(Path(args.visited_csv) if args.visited_csv else None)
-    run(visited_csv, args.reviewer, Path(args.out_csv))
+    run(visited_csv, args.reviewer, Path(args.out_csv), args.atol_mm)
 
 
 if __name__ == "__main__":

@@ -234,7 +234,7 @@ def build_annotations_from_correction(
     trial_id: str,
     reviewer: str,
     match_markers_fn,
-    atol_mm: float = 1e-6,
+    atol_mm: float = 1.0,
 ) -> pd.DataFrame:
     """``manual_annotations.csv`` rows for one trial, built by diffing the
     original Vicon-labelled recording against a hand-corrected export, for
@@ -247,6 +247,14 @@ def build_annotations_from_correction(
     independent modules; this function only borrows its base-name marker
     matching, which is generic string plumbing, not an agreement-specific
     concept).
+
+    ``atol_mm`` defaults to 1.0mm, not 0 -- re-exporting a trial's
+    trajectories through Nexus's ``GetTrajectory`` and writing them back out
+    introduces ~0.005mm of round-trip noise even on markers nobody touched
+    (measured directly on a real corrected export), so an exact-equality or
+    near-zero tolerance would misclassify most unedited markers as
+    ``wrong_label``. 1mm sits far above that noise floor and far below any
+    real mislabelling (adjacent markers are tens of millimetres apart).
     """
     match = match_markers_fn(labels_orig, labels_corrected)
     rows = []
