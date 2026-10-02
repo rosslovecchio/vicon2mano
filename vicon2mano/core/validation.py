@@ -223,6 +223,45 @@ def classify_marker_frame(orig_valid: bool, corrected_valid: bool, same_coords: 
     return "correct" if same_coords else "wrong_label"
 
 
+# Palm anchor triple used to express marker positions in a palm-relative
+# local frame before diffing -- see to_palm_local_frame's docstring for why
+# this is necessary, not optional, for build_annotations_from_correction.
+DEFAULT_ANCHOR_NAMES = ("Palm1", "Palm2", "Palm3")
+
+
+def to_palm_local_frame(
+    markers: np.ndarray, labels: list[str], anchor_names: tuple[str, str, str] = DEFAULT_ANCHOR_NAMES,
+) -> np.ndarray | None:
+    """Re-express ``markers`` (T, N, 3) in a per-frame rigid frame anchored
+    on 3 palm markers, cancelling out any *global* translation/rotation
+    difference between two files -- found to be necessary, not optional,
+    for comparing a raw Vicon CSV against a trajectory re-exported from a
+    live Nexus session: measured directly on real data (P6/Trial 1 HOI),
+    the two differed by 40-180mm per marker in *absolute* position while
+    every inter-marker (bone) distance matched to within a few mm -- i.e.
+    the whole hand had moved (or Nexus is using a different global
+    reference) between the two captures, not that anything was mislabelled.
+    Comparing raw world coordinates in that situation misclassifies nearly
+    every untouched marker as ``wrong_label``.
+
+    Returns ``None`` (not raising) if any of ``anchor_names`` is missing
+    from ``labels`` -- comparison then has to fall back to raw coordinates
+    for that file, which the caller should treat as reduced confidence
+    rather than silently proceeding as if nothing were wrong.
+
+    Reuses ``vicon2mano.strategies.gmm.labeler.rigid_frames``/``to_local``
+    (the same anchor-triangle construction strategyGMM already relies on)
+    rather than re-deriving a second implementation.
+    """
+    from vicon2mano.strategies.gmm.labeler import rigid_frames, to_local
+
+    base = {l.split(":")[-1]: i for i, l in enumerate(labels)}
+    if not all(n in base for n in anchor_names):
+        return None
+    R, origin = rigid_frames(markers, base[anchor_names[0]], base[anchor_names[1]], base[anchor_names[2]])
+    return to_local(markers, R, origin)
+
+
 def build_annotations_from_correction(
     markers_orig: np.ndarray,
     labels_orig: list[str],
@@ -235,6 +274,7 @@ def build_annotations_from_correction(
     reviewer: str,
     match_markers_fn,
     atol_mm: float = 1.0,
+    use_palm_local_frame: bool = True,
 ) -> pd.DataFrame:
     """``manual_annotations.csv`` rows for one trial, built by diffing the
     original Vicon-labelled recording against a hand-corrected export, for
@@ -255,18 +295,63 @@ def build_annotations_from_correction(
     near-zero tolerance would misclassify most unedited markers as
     ``wrong_label``. 1mm sits far above that noise floor and far below any
     real mislabelling (adjacent markers are tens of millimetres apart).
+
+    ``use_palm_local_frame`` (default True) converts both marker arrays via
+    :func:`to_palm_local_frame` before diffing. Required, not cosmetic: on
+    real data (P6/Trial 1 HOI) the raw-world comparison found 40-180mm
+    "changes" on markers that were never touched, while every inter-marker
+    bone length matched to within a few mm -- the hand had moved (or Nexus
+    is using a different global reference) between the two captures. If
+    either file is missing the anchor triple, this falls back to raw world
+    coordinates *for that file* and prints a warning rather than silently
+    comparing two different coordinate systems.
+
+    A frame where the anchor markers (default Palm1-3) are themselves
+    missing makes the local frame undefined for every *other* marker that
+    frame too -- found to matter in practice, since the sample this feeds
+    (``select_frames_for_review.py``'s "poor_availability" category) is
+    specifically chosen for low marker availability, which correlates with
+    the anchors themselves being occluded. This is NOT the same situation
+    as the marker itself being absent, and is not reported as ``missing``
+    or ``ghost`` (either of which would be a false claim about that
+    specific marker) -- it is reported as ``ambiguous``: the reviewer's own
+    "couldn't tell" category, which is exactly what it is here, just
+    determined automatically rather than by eye. A marker's own raw
+    presence/absence (used for the ``missing``/``ghost``/gap-fill cases) is
+    always read from the *original* world coordinates, never from whether
+    its local-frame value happens to be NaN.
     """
     match = match_markers_fn(labels_orig, labels_corrected)
+
+    local_orig = to_palm_local_frame(markers_orig, labels_orig) if use_palm_local_frame else None
+    local_corrected = to_palm_local_frame(markers_corrected, labels_corrected) if use_palm_local_frame else None
+    if use_palm_local_frame and (local_orig is None or local_corrected is None):
+        print(f"[warn] {trial_id}: missing {DEFAULT_ANCHOR_NAMES} in "
+              f"{'original' if local_orig is None else 'corrected'} labels -- falling back to "
+              f"raw world coordinates, which are NOT robust to a global coordinate-frame "
+              f"difference between the two files (see to_palm_local_frame's docstring).")
+    markers_orig_cmp = local_orig if local_orig is not None else markers_orig
+    markers_corrected_cmp = local_corrected if local_corrected is not None else markers_corrected
+
     rows = []
     skipped_gap_fills = []
     for frame in visited_frames:
         for name in match.common:
-            a = markers_orig[frame, match.idx_a[name]]
-            b = markers_corrected[frame, match.idx_b[name]]
-            ok_a = np.isfinite(a).all()
-            ok_b = np.isfinite(b).all()
-            same = bool(ok_a and ok_b and np.allclose(a, b, atol=atol_mm))
-            status = classify_marker_frame(ok_a, ok_b, same)
+            raw_a = markers_orig[frame, match.idx_a[name]]
+            raw_b = markers_corrected[frame, match.idx_b[name]]
+            ok_a_raw = bool(np.isfinite(raw_a).all())
+            ok_b_raw = bool(np.isfinite(raw_b).all())
+
+            a = markers_orig_cmp[frame, match.idx_a[name]]
+            b = markers_corrected_cmp[frame, match.idx_b[name]]
+            local_undefined_a = ok_a_raw and not np.isfinite(a).all()
+            local_undefined_b = ok_b_raw and not np.isfinite(b).all()
+
+            if local_undefined_a or local_undefined_b:
+                status = "ambiguous"
+            else:
+                same = bool(ok_a_raw and ok_b_raw and np.allclose(a, b, atol=atol_mm))
+                status = classify_marker_frame(ok_a_raw, ok_b_raw, same)
             if status is None:
                 skipped_gap_fills.append((frame, name))
                 continue

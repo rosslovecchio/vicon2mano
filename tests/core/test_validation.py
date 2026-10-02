@@ -232,3 +232,146 @@ def test_build_annotations_from_correction_skips_gap_fill_with_warning(capsys):
 
     assert len(out) == 0
     assert "gap-filling" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Palm-local-frame invariance (the coordinate-frame-offset fix)
+# ---------------------------------------------------------------------------
+
+
+def _palm_hand(T, rng):
+    """Palm1/2/3 (rigid triangle) plus one finger marker rigidly attached
+    to the palm -- a minimal "hand" for testing frame invariance."""
+    labels = ["Palm1", "Palm2", "Palm3", "Finger1"]
+    local = np.array([[0.0, 0.0, 0.0], [40.0, 0.0, 0.0], [0.0, 50.0, 0.0], [20.0, 20.0, 30.0]])
+    out = np.zeros((T, 4, 3))
+    for t in range(T):
+        th = 0.1 * t
+        c, s = np.cos(th), np.sin(th)
+        Rw = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+        shift = np.array([t * 2.0, t * 1.5, 0.0])
+        out[t] = local @ Rw.T + shift
+        if rng is not None:
+            out[t] += rng.normal(scale=0.01, size=out[t].shape)
+    return out, labels
+
+
+def test_to_palm_local_frame_returns_none_without_anchors():
+    markers = np.zeros((3, 2, 3))
+    assert val.to_palm_local_frame(markers, ["A", "B"]) is None
+
+
+def test_to_palm_local_frame_cancels_global_rigid_motion():
+    rng = np.random.default_rng(0)
+    hand, labels = _palm_hand(20, rng)
+
+    # A second "file" of the same hand, globally translated + rotated --
+    # simulating Nexus's different coordinate reference, with nobody having
+    # touched any label.
+    th = 0.7
+    c, s = np.cos(th), np.sin(th)
+    Rglobal = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+    shifted = hand @ Rglobal.T + np.array([500.0, -300.0, 100.0])
+
+    local_a = val.to_palm_local_frame(hand, labels)
+    local_b = val.to_palm_local_frame(shifted, labels)
+    np.testing.assert_allclose(local_a, local_b, atol=0.1)
+
+
+def test_build_annotations_from_correction_ignores_global_offset_with_local_frame():
+    from vicon2mano.core.agreement import match_markers
+
+    hand, labels = _palm_hand(5, rng=None)
+    # Globally shift+rotate the "corrected" file -- same real-world data,
+    # different coordinate system, nothing actually relabelled.
+    th = 0.3
+    c, s = np.cos(th), np.sin(th)
+    Rglobal = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+    corrected = hand @ Rglobal.T + np.array([200.0, 150.0, -50.0])
+
+    out = val.build_annotations_from_correction(
+        hand, labels, corrected, labels, [2],
+        participant="P1", trial_id="T1", reviewer="tester",
+        match_markers_fn=match_markers, use_palm_local_frame=True)
+    assert (out.set_index("marker_name")["status"] == "correct").all()
+
+
+def test_build_annotations_from_correction_raw_frame_false_positives_on_global_offset():
+    # Without the fix, the same globally-shifted data would be misread as
+    # every marker being wrong -- documents the bug this feature fixes.
+    from vicon2mano.core.agreement import match_markers
+
+    hand, labels = _palm_hand(5, rng=None)
+    th = 0.3
+    c, s = np.cos(th), np.sin(th)
+    Rglobal = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+    corrected = hand @ Rglobal.T + np.array([200.0, 150.0, -50.0])
+
+    out = val.build_annotations_from_correction(
+        hand, labels, corrected, labels, [2],
+        participant="P1", trial_id="T1", reviewer="tester",
+        match_markers_fn=match_markers, use_palm_local_frame=False)
+    assert (out.set_index("marker_name")["status"] == "wrong_label").all()
+
+
+def test_build_annotations_from_correction_still_detects_real_swap_in_local_frame():
+    from vicon2mano.core.agreement import match_markers
+
+    hand, labels = _palm_hand(5, rng=None)
+    corrected = hand.copy()
+    # Genuinely swap Finger1 with a far-away position at frame 2 (simulating
+    # a real mislabel), on top of an unrelated global coordinate shift.
+    corrected[2, 3] = corrected[2, 3] + np.array([80.0, 0.0, 0.0])
+    th = 0.3
+    c, s = np.cos(th), np.sin(th)
+    Rglobal = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+    corrected = corrected @ Rglobal.T + np.array([200.0, 150.0, -50.0])
+
+    out = val.build_annotations_from_correction(
+        hand, labels, corrected, labels, [2],
+        participant="P1", trial_id="T1", reviewer="tester",
+        match_markers_fn=match_markers, use_palm_local_frame=True)
+    by_marker = out.set_index("marker_name")
+    assert by_marker.loc["Finger1", "status"] == "wrong_label"
+    assert by_marker.loc["Palm1", "status"] == "correct"
+
+
+def test_build_annotations_from_correction_warns_and_falls_back_without_anchors(capsys):
+    from vicon2mano.core.agreement import match_markers
+
+    labels = ["A", "B"]
+    markers_orig = np.zeros((2, 2, 3))
+    markers_corrected = markers_orig.copy()
+
+    val.build_annotations_from_correction(
+        markers_orig, labels, markers_corrected, labels, [0],
+        participant="P1", trial_id="T1", reviewer="tester",
+        match_markers_fn=match_markers, use_palm_local_frame=True)
+    assert "falling back to raw world coordinates" in capsys.readouterr().out
+
+
+def test_build_annotations_from_correction_anchor_occlusion_is_ambiguous_not_missing():
+    # Regression test for a real finding: the "poor_availability" sampling
+    # category specifically targets frames with low marker availability,
+    # which correlates with the PALM ANCHORS themselves being occluded --
+    # that undefines the local frame for every other marker too, but a
+    # marker that is genuinely present in both raw files must not be
+    # reported as "missing" or "ghost" just because of that, since neither
+    # claim is true about the marker itself. It must come out "ambiguous".
+    from vicon2mano.core.agreement import match_markers
+
+    hand, labels = _palm_hand(3, rng=None)
+    corrected = hand.copy()
+    # Occlude Palm1 in the corrected file at frame 1 only -- Finger1 itself
+    # stays fully present (raw-valid) in both files at that frame.
+    corrected[1, 0] = np.nan
+
+    out = val.build_annotations_from_correction(
+        hand, labels, corrected, labels, [1],
+        participant="P1", trial_id="T1", reviewer="tester",
+        match_markers_fn=match_markers, use_palm_local_frame=True)
+    by_marker = out.set_index("marker_name")
+    assert by_marker.loc["Finger1", "status"] == "ambiguous"
+    # Palm1 itself is raw-missing in corrected -> genuinely "ghost", not
+    # "ambiguous" (its own absence is the real, determinate finding here).
+    assert by_marker.loc["Palm1", "status"] == "ghost"
