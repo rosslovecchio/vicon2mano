@@ -375,3 +375,36 @@ def test_build_annotations_from_correction_anchor_occlusion_is_ambiguous_not_mis
     # Palm1 itself is raw-missing in corrected -> genuinely "ghost", not
     # "ambiguous" (its own absence is the real, determinate finding here).
     assert by_marker.loc["Palm1", "status"] == "ghost"
+
+
+def test_palm_triangle_bone_deltas_zero_for_rigid_unchanged_triangle():
+    hand, labels = _palm_hand(3, rng=None)
+    deltas = val.palm_triangle_bone_deltas(hand, labels, hand, labels, frame=1)
+    assert set(deltas) == {"Palm1-Palm2", "Palm2-Palm3", "Palm1-Palm3"}
+    assert all(v == pytest.approx(0.0, abs=1e-9) for v in deltas.values())
+
+
+def test_palm_triangle_bone_deltas_detects_distorted_triangle():
+    hand, labels = _palm_hand(3, rng=None)
+    corrected = hand.copy()
+    corrected[1, 2] += np.array([20.0, 0.0, 0.0])  # move Palm3 at frame 1 only
+    deltas = val.palm_triangle_bone_deltas(hand, labels, corrected, labels, frame=1)
+    assert deltas["Palm2-Palm3"] > 1.0
+    assert deltas["Palm1-Palm3"] > 1.0
+    assert deltas["Palm1-Palm2"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_palm_triangle_bone_deltas_empty_without_anchor_triple():
+    markers = np.zeros((2, 2, 3))
+    assert val.palm_triangle_bone_deltas(markers, ["A", "B"], markers, ["A", "B"], frame=0) == {}
+
+
+def test_palm_triangle_bone_deltas_partial_when_one_anchor_missing_that_frame():
+    # Palm1 missing invalidates only the two bones touching it
+    # (Palm1-Palm2, Palm1-Palm3); Palm2-Palm3 doesn't involve Palm1 at all,
+    # so it stays computable.
+    hand, labels = _palm_hand(3, rng=None)
+    corrected = hand.copy()
+    corrected[1, 0] = np.nan  # Palm1 missing at frame 1
+    deltas = val.palm_triangle_bone_deltas(hand, labels, corrected, labels, frame=1)
+    assert set(deltas) == {"Palm2-Palm3"}

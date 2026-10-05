@@ -262,6 +262,43 @@ def to_palm_local_frame(
     return to_local(markers, R, origin)
 
 
+def palm_triangle_bone_deltas(
+    markers_orig: np.ndarray, labels_orig: list[str],
+    markers_corrected: np.ndarray, labels_corrected: list[str],
+    frame: int, anchor_names: tuple[str, str, str] = DEFAULT_ANCHOR_NAMES,
+) -> dict[str, float]:
+    """|orig bone length - corrected bone length| for each of the 3 pairs
+    within the palm anchor triangle, at one frame -- the same check used in
+    the audit's P7 spot-checks, generalised so it can be run systematically
+    over every ``wrong_label`` judgement rather than by hand.
+
+    A small delta means the anchor triangle itself was geometrically
+    consistent between the two files at this frame, so a `wrong_label`
+    verdict there is probably a genuine finger/marker swap. A large delta
+    means the anchor triangle itself differs, which means the local frame
+    those judgements were computed in may be unreliable at that frame --
+    see :func:`to_palm_local_frame`'s docstring. This function does not
+    decide which; it only supplies the number a human reviewer (or a
+    selection script sorting frames into "small"/"large" buckets) needs to
+    judge it.
+
+    Returns an empty dict if either file lacks the anchor triple.
+    """
+    base_o = {l.split(":")[-1]: i for i, l in enumerate(labels_orig)}
+    base_c = {l.split(":")[-1]: i for i, l in enumerate(labels_corrected)}
+    if not all(n in base_o for n in anchor_names) or not all(n in base_c for n in anchor_names):
+        return {}
+    pairs = [(anchor_names[0], anchor_names[1]), (anchor_names[1], anchor_names[2]),
+             (anchor_names[0], anchor_names[2])]
+    out = {}
+    for m1, m2 in pairs:
+        a1, a2 = markers_orig[frame, base_o[m1]], markers_orig[frame, base_o[m2]]
+        b1, b2 = markers_corrected[frame, base_c[m1]], markers_corrected[frame, base_c[m2]]
+        if np.isfinite([a1, a2, b1, b2]).all():
+            out[f"{m1}-{m2}"] = float(abs(np.linalg.norm(a1 - a2) - np.linalg.norm(b1 - b2)))
+    return out
+
+
 def build_annotations_from_correction(
     markers_orig: np.ndarray,
     labels_orig: list[str],
