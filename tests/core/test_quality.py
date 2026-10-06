@@ -97,3 +97,43 @@ def test_summarize_counts_shape_and_totals():
     assert row_b["n_frames"] == 2
     assert row_b["observed_suspicious"] == 1
     assert row_b["label_manually_wrong"] == 1
+
+
+# ---------------------------------------------------------------------------
+# adaptive_anchor_threshold
+# ---------------------------------------------------------------------------
+
+
+def test_adaptive_threshold_empty_input_returns_floor():
+    assert q.adaptive_anchor_threshold(np.array([])) == pytest.approx(0.1)
+    assert q.adaptive_anchor_threshold(np.full(5, np.nan)) == pytest.approx(0.1)
+
+
+def test_adaptive_threshold_tight_distribution_is_stricter_than_floor():
+    # P10-like: tight spread around a high median -> threshold should sit
+    # well above the universal 0.1 floor, near the subject's own typical
+    # value minus a few MADs.
+    rng = np.random.default_rng(0)
+    sine = rng.normal(loc=0.45, scale=0.01, size=2000)
+    thresh = q.adaptive_anchor_threshold(sine, k=3.0, absolute_floor=0.1)
+    assert thresh > 0.3
+    assert thresh < 0.45
+
+
+def test_adaptive_threshold_never_goes_below_absolute_floor():
+    # A wide/contaminated distribution (P7-like: large MAD) must not push
+    # the threshold below the universal floor -- the floor is a backstop
+    # against a subject's own statistics being too contaminated to trust.
+    rng = np.random.default_rng(1)
+    sine = rng.uniform(0.0, 1.0, size=2000)  # deliberately very spread out
+    thresh = q.adaptive_anchor_threshold(sine, k=3.0, absolute_floor=0.1)
+    assert thresh == pytest.approx(0.1)
+
+
+def test_adaptive_threshold_is_one_sided_wide_triangles_not_penalised():
+    # A distribution shifted entirely above the floor, with zero spread,
+    # should give a threshold at or below the median -- never above it
+    # (only narrow/low outliers should ever be flagged, not wide ones).
+    sine = np.full(500, 0.8)
+    thresh = q.adaptive_anchor_threshold(sine, k=3.0, absolute_floor=0.1)
+    assert thresh <= 0.8

@@ -105,6 +105,57 @@ near-static pose. A few hundred hand-labelled frames **spanning poses** is
 the highest-value thing to add; label where a strategy disagrees with the
 on-disk labels, starting with P10/Trial2 Hands only (15.1%, the cleanest).
 
+**P1 and P2 have a different physical marker configuration than every other
+participant**: both have the same 22 marker *columns* on disk, but
+`Forearm3`, `Forearm4`, and `Palm3` are 0.00% available across every one of
+their trials (not occluded sometimes — genuinely never present). Confirmed
+directly from the raw CSVs, not inferred. Effectively: 2 working forearm
+markers instead of 4, and no `Palm3` at all. Consequences:
+
+- Any method anchored on `(Palm1, Palm2, Palm3)` (the GMM strategy's anchor
+  triangle, `core.validation.to_palm_local_frame`, `core.quality`'s
+  anchor-validity check) **cannot form a reference frame for P1/P2 at
+  all** — anchor validity reads as flat 0% for every one of their trials,
+  which inflated both participants to the top of `difficult_trials.csv`
+  in the Phase 1B quality pass even though that is a methodological
+  artifact of the anchor choice, not necessarily worse underlying label
+  quality than other participants.
+- Any bone/chain definition touching `Forearm3`/`Forearm4`/`Palm3`
+  (`quality_cascade.infer_bones`, `core.bones.consensus_bone_lengths`)
+  degrades gracefully for these two (per the permanently-missing-marker
+  fix in `core.bones`) but simply has less redundancy to work with.
+- A fallback anchor triple (e.g. `Palm1`/`Palm2` plus a finger base) would
+  be needed before any anchor-based assessment can say anything useful
+  about P1/P2 specifically.
+
+**The Palm1-2-3 "anchor triangle" used throughout (`core.validation`,
+`core.quality`, strategyGMM) is not actually rigid** — this is the same
+fact this file already states above ("palm markers are taped to skin"),
+re-confirmed with real numbers because several pieces of this project
+implicitly lean on it as if it were a fixed plate. Measured directly on
+P10/Trial2_handsonly: Palm1-Palm2 ranges 22.2-73.9mm over the trial (mean
+33.2mm, std 2.2mm); Palm2-Palm3 and Palm1-Palm3 show the same pattern.
+Consequences:
+
+- The anchor-validity check (`core.quality`'s degenerate-triangle test)
+  only catches *geometric impossibilities* (collinear or missing anchors)
+  — a triangle that passes it can still be a genuinely deformed (not
+  mislabelled) palm, since some deformation is real skin movement, not
+  noise or an error.
+- `core.validation.palm_triangle_bone_deltas` (used in the validation
+  audit's P7 spot-checks and `select_spotcheck_frames.py`'s
+  small-vs-large-anchor-deviation split, 10mm threshold) cannot cleanly
+  separate "the anchor frame is corrupted by a mislabelled Palm marker"
+  from "the palm plate genuinely deformed this much between the two
+  frames being compared" — both produce the same symptom (a bone-length
+  delta). A large delta is evidence to look closer, not proof either way.
+- This sharpens, rather than duplicates, the "geometry does not prove
+  label correctness" caveat already carried by every geometry-based
+  module here: it is not just that plausible geometry doesn't prove a
+  correct label, but that the *reference frame itself* is only
+  approximately rigid, so judgements made relative to it inherit that
+  approximation.
+
 ## Work completed 2026-09-11 (strategyGMM reviewed against the paper; 2 bugs fixed)
 
 Read `vicon2mano/strategies/gmm/labeler.py` line by line against

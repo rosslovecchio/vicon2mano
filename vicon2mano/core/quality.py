@@ -148,3 +148,45 @@ def summarize_counts(classification: pd.DataFrame) -> pd.DataFrame:
             row[cat] = int(counts.get(cat, 0))
         rows.append(row)
     return pd.DataFrame(rows).sort_values(["participant", "trial_id", "marker"]).reset_index(drop=True)
+
+
+def adaptive_anchor_threshold(sine_values: np.ndarray, *, k: float = 3.0,
+                               absolute_floor: float = 0.1) -> float:
+    """Lower bound on sine(Palm1-2-3 angle) for "valid", learned from one
+    subject's own pooled distribution rather than assumed universal.
+
+    Why this exists: the palm plate is not rigid (see CLAUDE.md -- "palm
+    markers are taped to skin"), so there is no single geometrically
+    correct angle to check against; each subject's own marker placement
+    gives them their own typical angle. Measured directly across this
+    dataset: per-subject median sine is 0.4-0.6, with a fixed
+    ``absolute_floor=0.1`` essentially never triggering for anyone (it is
+    far below every subject's normal range) -- so a fixed threshold was
+    silently only ever catching "anchor missing", never "anchor
+    geometrically implausible for this subject".
+
+    One-sided: only a *narrower*-than-usual triangle is penalised. A wider
+    one is not degenerate -- if anything it is numerically *more* stable --
+    so there is no reason to flag it.
+
+    ``k`` defaults to 3.0, tighter than this repo's usual ``k=6`` (used
+    where the concern is suppressing false positives on a mostly-zero
+    signal, e.g. ``core.continuity``, ``core.agreement.flag_temporal_jumps``).
+    Here the goal is the opposite: real sensitivity to a subject whose
+    anchor geometry drifts, so a looser k would under-detect. This is a
+    median+MAD estimate, not a consensus/RANSAC one (contrast
+    ``core.bones.consensus_bone_lengths``, which exists precisely because a
+    median/mode can land on a contaminated value when a large fraction of
+    frames are themselves bad) -- a subject whose own palm labelling is
+    badly and pervasively wrong could inflate both the median and the MAD
+    enough to mask the problem. The ``absolute_floor`` is the backstop for
+    that case: the returned threshold never drops below it, so a subject's
+    own statistics can only make the check *stricter*, never *looser*, than
+    the universal minimum.
+    """
+    finite = sine_values[np.isfinite(sine_values)]
+    if finite.size == 0:
+        return absolute_floor
+    med = float(np.median(finite))
+    mad = float(np.median(np.abs(finite - med))) * 1.4826
+    return max(absolute_floor, med - k * mad)

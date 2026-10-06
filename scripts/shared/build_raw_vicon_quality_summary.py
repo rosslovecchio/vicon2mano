@@ -74,16 +74,16 @@ def trial_dir(participant: str, trial_id: str) -> str:
     return f"{participant}_{ds.slug(trial_id)}"
 
 
-def anchor_validity(markers: np.ndarray, labels: list[str],
-                     degenerate_threshold: float) -> np.ndarray:
-    """(T,) bool: palm anchor triple present and non-degenerate that frame.
-    Same sine-of-angle degeneracy measure as the validation audit's
-    anchor_degeneracy, generalised to every frame rather than just the
-    sampled ones."""
+def anchor_sine(markers: np.ndarray, labels: list[str]) -> np.ndarray:
+    """(T,) float: sine of the Palm1-2-3 angle at Palm1 each frame -- NaN
+    where the triple is absent from this file or not all finite that frame.
+    Split out from the old combined anchor_validity() so a threshold (fixed
+    or per-subject adaptive, see core.quality.adaptive_anchor_threshold)
+    can be applied afterwards without recomputing the geometry."""
     base = {l.split(":")[-1]: i for i, l in enumerate(labels)}
     T = markers.shape[0]
     if not all(n in base for n in ANCHOR_NAMES):
-        return np.zeros(T, dtype=bool)
+        return np.full(T, np.nan)
     o = markers[:, base[ANCHOR_NAMES[0]]]
     xp = markers[:, base[ANCHOR_NAMES[1]]]
     yp = markers[:, base[ANCHOR_NAMES[2]]]
@@ -91,7 +91,14 @@ def anchor_validity(markers: np.ndarray, labels: list[str],
     finite = np.isfinite(x).all(axis=1) & np.isfinite(y).all(axis=1)
     with np.errstate(invalid="ignore", divide="ignore"):
         sine = np.linalg.norm(np.cross(x, y), axis=1) / (np.linalg.norm(x, axis=1) * np.linalg.norm(y, axis=1))
-    return finite & (sine >= degenerate_threshold)
+    return np.where(finite, sine, np.nan)
+
+
+def anchor_valid_from_sine(sine: np.ndarray, threshold: float) -> np.ndarray:
+    """(T,) bool from anchor_sine's output and a (fixed or per-subject
+    adaptive) lower bound. NaN (anchor absent/missing that frame) is
+    always invalid, regardless of threshold."""
+    return np.isfinite(sine) & (sine >= threshold)
 
 
 def expand_events_to_bool(events: pd.DataFrame, marker_base_names: list[str], T: int) -> dict:
@@ -129,12 +136,48 @@ def event_detail_lookup(events: pd.DataFrame) -> dict:
     return out
 
 
-def run(out_dir: Path, degenerate_threshold: float, write_per_trial_detail: bool) -> None:
+def find_all_trials(sessions: dict, participants: list[str]) -> list[tuple[str, str, Path]]:
+    out = []
+    for participant in participants:
+        have = sessions[participant]
+        for trial_id in TRIAL_KEYS:
+            if trial_id not in have:
+                continue
+            trial_path, *_ = ds.find_trial_csv(participant, trial_id)
+            if trial_path is not None:
+                out.append((participant, trial_id, trial_path))
+    return out
+
+
+def run(out_dir: Path, k: float, absolute_floor: float, write_per_trial_detail: bool) -> None:
     sessions = ds.load_trial_sessions(ds.REF_CSV)
     participants = sorted(sessions, key=ds.participant_sort_key)
+    trials = find_all_trials(sessions, participants)
 
     annotations = pd.read_csv(ANNOTATIONS_CSV) if ANNOTATIONS_CSV.exists() else pd.DataFrame(
         columns=["participant", "trial_id", "frame", "marker_name", "status"])
+
+    # --- Pass 1: learn each subject's own anchor-angle reference. The palm
+    # plate is not rigid (CLAUDE.md), so there is no single universal
+    # "correct" angle -- a fixed threshold turned out to sit far below
+    # every subject's normal range (median sine 0.4-0.6 dataset-wide) and
+    # was effectively a no-op, only ever catching outright-missing anchors.
+    # See core.quality.adaptive_anchor_threshold's docstring for the full
+    # reasoning, including why this is median+MAD (not consensus/RANSAC)
+    # and why the absolute_floor backstop matters.
+    print("Pass 1/2: learning each subject's anchor-angle reference...")
+    t_pass1 = time.time()
+    sine_by_participant: dict[str, list[np.ndarray]] = {}
+    for participant, trial_id, trial_path in trials:
+        markers, labels = load_csv(str(trial_path))
+        sine_by_participant.setdefault(participant, []).append(anchor_sine(markers, labels))
+    anchor_threshold_by_participant = {
+        p: q.adaptive_anchor_threshold(np.concatenate(sines), k=k, absolute_floor=absolute_floor)
+        for p, sines in sine_by_participant.items()
+    }
+    print(f"  done in {time.time() - t_pass1:.0f}s. Per-subject thresholds (sine):")
+    for p, thr in sorted(anchor_threshold_by_participant.items(), key=lambda kv: ds.participant_sort_key(kv[0])):
+        print(f"    {p}: {thr:.3f}")
 
     summary_rows = []
     anchor_diag_rows = []
@@ -142,100 +185,95 @@ def run(out_dir: Path, degenerate_threshold: float, write_per_trial_detail: bool
     t_start = time.time()
     n_trials_done = 0
 
-    for participant in participants:
-        have = sessions[participant]
-        for trial_id in TRIAL_KEYS:
-            if trial_id not in have:
-                continue
-            trial_path, *_ = ds.find_trial_csv(participant, trial_id)
-            if trial_path is None:
-                continue
+    print("\nPass 2/2: classifying every marker-frame...")
+    for participant, trial_id, trial_path in trials:
+        markers, labels = load_csv(str(trial_path))
+        T, N, _ = markers.shape
+        base_names = [l.split(":")[-1] for l in labels]
 
-            markers, labels = load_csv(str(trial_path))
-            T, N, _ = markers.shape
-            base_names = [l.split(":")[-1] for l in labels]
+        is_missing = ~np.isfinite(markers).all(axis=2)              # (T, N)
+        sine_t = anchor_sine(markers, labels)
+        anchor_valid_t = anchor_valid_from_sine(sine_t, anchor_threshold_by_participant[participant])
+        continuity_suspicious = cont.flag_discontinuities(markers)   # (T, N)
 
-            is_missing = ~np.isfinite(markers).all(axis=2)              # (T, N)
-            anchor_valid_t = anchor_validity(markers, labels, degenerate_threshold)  # (T,)
-            continuity_suspicious = cont.flag_discontinuities(markers)   # (T, N)
+        events_path = GEOM_DIR / trial_dir(participant, trial_id) / "events.csv"
+        events = pd.read_csv(events_path) if events_path.exists() else None
+        geometric_suspicious_by_marker = expand_events_to_bool(events, base_names, T)
+        event_detail = event_detail_lookup(events)
 
-            events_path = GEOM_DIR / trial_dir(participant, trial_id) / "events.csv"
-            events = pd.read_csv(events_path) if events_path.exists() else None
-            geometric_suspicious_by_marker = expand_events_to_bool(events, base_names, T)
-            event_detail = event_detail_lookup(events)
+        trial_annot = annotations[(annotations["participant"] == participant) &
+                                  (annotations["trial_id"] == trial_id)].copy()
+        trial_annot["base_marker"] = trial_annot["marker_name"].str.split(":").str[-1]
+        # Sparse overlay: manual review covers at most a few hundred
+        # marker-frames per trial out of up to ~1.4M -- group once per
+        # marker instead of touching every frame to look it up.
+        manual_by_marker: dict[str, dict[int, str]] = {
+            m: dict(zip(g["frame"], g["status"]))
+            for m, g in trial_annot.groupby("base_marker")
+        }
 
-            trial_annot = annotations[(annotations["participant"] == participant) &
-                                      (annotations["trial_id"] == trial_id)].copy()
-            trial_annot["base_marker"] = trial_annot["marker_name"].str.split(":").str[-1]
-            # Sparse overlay: manual review covers at most a few hundred
-            # marker-frames per trial out of up to ~1.4M -- group once per
-            # marker instead of touching every frame to look it up.
-            manual_by_marker: dict[str, dict[int, str]] = {
-                m: dict(zip(g["frame"], g["status"]))
-                for m, g in trial_annot.groupby("base_marker")
-            }
+        detail_rows = [] if write_per_trial_detail else None
+        counts_per_marker = {m: {c: 0 for c in q.CATEGORIES} for m in base_names}
 
-            detail_rows = [] if write_per_trial_detail else None
-            counts_per_marker = {m: {c: 0 for c in q.CATEGORIES} for m in base_names}
+        for mi, m in enumerate(base_names):
+            missing_m = is_missing[:, mi]
+            suspicious_m = geometric_suspicious_by_marker.get(m, np.zeros(T, dtype=bool))
+            manual_frames_m = manual_by_marker.get(m, {})
+            manual_cat_m = np.full(T, "", dtype=object)
+            for f, status in manual_frames_m.items():
+                manual_cat_m[f] = q.resolve_manual_category(status)
 
-            for mi, m in enumerate(base_names):
-                missing_m = is_missing[:, mi]
-                suspicious_m = geometric_suspicious_by_marker.get(m, np.zeros(T, dtype=bool))
-                manual_frames_m = manual_by_marker.get(m, {})
-                manual_cat_m = np.full(T, "", dtype=object)
-                for f, status in manual_frames_m.items():
-                    manual_cat_m[f] = q.resolve_manual_category(status)
-
-                cats = q.classify_vectorized(missing_m, anchor_valid_t, suspicious_m, manual_cat_m)
-                cat_counts = pd.Series(cats).value_counts()
-                for c in q.CATEGORIES:
-                    counts_per_marker[m][c] = int(cat_counts.get(c, 0))
-
-                if detail_rows is not None:
-                    # Thin the detail file: keep every frame that isn't the
-                    # least-informative default (plausible/missing with no
-                    # continuity flag either) -- vectorised selection, no
-                    # per-frame Python loop over the full T.
-                    keep = continuity_suspicious[:, mi] | ~np.isin(cats, ("observed_plausible", "missing"))
-                    for f in np.flatnonzero(keep):
-                        f = int(f)
-                        ev_type, ev_bone = event_detail.get((m, f), (None, None))
-                        detail_rows.append((participant, trial_id, m, f, bool(missing_m[f]),
-                                           bool(anchor_valid_t[f]), bool(suspicious_m[f]),
-                                           ev_type, ev_bone, bool(continuity_suspicious[f, mi]),
-                                           manual_frames_m.get(f), cats[f]))
-
-                if counts_per_marker[m]["ambiguous"] or counts_per_marker[m]["anchor_invalid"]:
-                    excluded_rows.append({
-                        "participant": participant, "trial_id": trial_id, "marker": m,
-                        "n_ambiguous": counts_per_marker[m]["ambiguous"],
-                        "n_anchor_invalid": counts_per_marker[m]["anchor_invalid"],
-                    })
-
-                row = {"participant": participant, "trial_id": trial_id, "marker": m, "n_frames": T}
-                row.update(counts_per_marker[m])
-                row["pct_continuity_suspicious"] = 100.0 * continuity_suspicious[:, mi].mean()
-                summary_rows.append(row)
-
-            anchor_diag_rows.append({
-                "participant": participant, "trial_id": trial_id, "n_frames": T,
-                "has_anchor_triple": all(n in base_names for n in ANCHOR_NAMES),
-                "pct_anchor_valid": 100.0 * anchor_valid_t.mean(),
-                "n_anchor_invalid_frames": int((~anchor_valid_t).sum()),
-            })
+            cats = q.classify_vectorized(missing_m, anchor_valid_t, suspicious_m, manual_cat_m)
+            cat_counts = pd.Series(cats).value_counts()
+            for c in q.CATEGORIES:
+                counts_per_marker[m][c] = int(cat_counts.get(c, 0))
 
             if detail_rows is not None:
-                d = out_dir / trial_dir(participant, trial_id)
-                d.mkdir(parents=True, exist_ok=True)
-                pd.DataFrame(detail_rows, columns=[
-                    "participant", "trial_id", "marker", "frame", "is_missing", "anchor_valid",
-                    "geometric_suspicious", "event_type", "associated_bone",
-                    "continuity_suspicious", "manual_status", "category",
-                ]).to_csv(d / "marker_frame_classification.csv", index=False)
+                # Thin the detail file: keep every frame that isn't the
+                # least-informative default (plausible/missing with no
+                # continuity flag either) -- vectorised selection, no
+                # per-frame Python loop over the full T.
+                keep = continuity_suspicious[:, mi] | ~np.isin(cats, ("observed_plausible", "missing"))
+                for f in np.flatnonzero(keep):
+                    f = int(f)
+                    ev_type, ev_bone = event_detail.get((m, f), (None, None))
+                    detail_rows.append((participant, trial_id, m, f, bool(missing_m[f]),
+                                       bool(anchor_valid_t[f]), bool(suspicious_m[f]),
+                                       ev_type, ev_bone, bool(continuity_suspicious[f, mi]),
+                                       manual_frames_m.get(f), cats[f]))
 
-            n_trials_done += 1
-            print(f"[{n_trials_done}] {participant}/{trial_id}: {T} frames x {N} markers "
-                  f"({time.time() - t_start:.0f}s elapsed)")
+            if counts_per_marker[m]["ambiguous"] or counts_per_marker[m]["anchor_invalid"]:
+                excluded_rows.append({
+                    "participant": participant, "trial_id": trial_id, "marker": m,
+                    "n_ambiguous": counts_per_marker[m]["ambiguous"],
+                    "n_anchor_invalid": counts_per_marker[m]["anchor_invalid"],
+                })
+
+            row = {"participant": participant, "trial_id": trial_id, "marker": m, "n_frames": T}
+            row.update(counts_per_marker[m])
+            row["pct_continuity_suspicious"] = 100.0 * continuity_suspicious[:, mi].mean()
+            summary_rows.append(row)
+
+        anchor_diag_rows.append({
+            "participant": participant, "trial_id": trial_id, "n_frames": T,
+            "has_anchor_triple": all(n in base_names for n in ANCHOR_NAMES),
+            "anchor_threshold_sine": anchor_threshold_by_participant[participant],
+            "pct_anchor_valid": 100.0 * anchor_valid_t.mean(),
+            "n_anchor_invalid_frames": int((~anchor_valid_t).sum()),
+        })
+
+        if detail_rows is not None:
+            d = out_dir / trial_dir(participant, trial_id)
+            d.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(detail_rows, columns=[
+                "participant", "trial_id", "marker", "frame", "is_missing", "anchor_valid",
+                "geometric_suspicious", "event_type", "associated_bone",
+                "continuity_suspicious", "manual_status", "category",
+            ]).to_csv(d / "marker_frame_classification.csv", index=False)
+
+        n_trials_done += 1
+        print(f"[{n_trials_done}] {participant}/{trial_id}: {T} frames x {N} markers "
+              f"({time.time() - t_start:.0f}s elapsed)")
 
     summary = pd.DataFrame(summary_rows)
     summary.insert(0, "assessment_type", q.ASSESSMENT_TYPE)
@@ -279,12 +317,17 @@ def run(out_dir: Path, degenerate_threshold: float, write_per_trial_detail: bool
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--out-dir", default=str(OUT_DIR))
-    ap.add_argument("--degenerate-threshold", type=float, default=0.1)
+    ap.add_argument("--k", type=float, default=3.0,
+                    help="per-subject anchor-angle tolerance, in MADs below that "
+                         "subject's own median sine (see core.quality.adaptive_anchor_threshold)")
+    ap.add_argument("--absolute-floor", type=float, default=0.1,
+                    help="universal minimum sine, regardless of subject -- a backstop in "
+                         "case a subject's own statistics are themselves contaminated")
     ap.add_argument("--no-per-trial-detail", action="store_true",
                     help="skip writing marker_frame_classification.csv per trial "
                          "(faster; the aggregate summary is still produced)")
     args = ap.parse_args(argv)
-    run(Path(args.out_dir), args.degenerate_threshold, not args.no_per_trial_detail)
+    run(Path(args.out_dir), args.k, args.absolute_floor, not args.no_per_trial_detail)
 
 
 if __name__ == "__main__":
