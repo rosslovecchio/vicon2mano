@@ -53,7 +53,194 @@ for _attr, _builtin in {"int": int, "float": float, "bool": bool, "complex": com
         setattr(_np, _attr, _builtin)
 
 from vicon2mano.core.loader import load_csv
-from animate_fit import _write_html  # noqa: E402 -- path inserted above
+
+_HTML_TEMPLATE = """<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vicon2mano — MANO mesh animation</title>
+<style>
+  body {{ margin:0; background:#111; color:#eee; font-family:sans-serif;
+         display:flex; flex-direction:column; align-items:center; }}
+  img {{ max-width:100vw; height:auto; }}
+  #plotlyMesh {{ width:min(100vw, 900px); height:700px; display:none; }}
+  #bar {{ display:flex; gap:10px; align-items:center; padding:8px;
+          width:95vw; max-width:900px; flex-wrap:wrap; }}
+  input[type=range] {{ flex:1; }}
+  button {{ font-size:16px; padding:4px 14px; }}
+  #goto {{ width:70px; font-size:14px; }}
+  #inspectBtn.active {{ background:#2c7; color:#111; }}
+  #hint {{ font-size:12px; color:#999; max-width:900px; text-align:center; padding:0 8px; }}
+</style></head><body>
+<img id="view">
+<div id="plotlyMesh"></div>
+<div id="bar">
+  <button id="btn" onclick="toggle()">&#9208;</button>
+  <button id="prev" onclick="step(-1)" title="previous frame">&#9198;</button>
+  <button id="next" onclick="step(1)" title="next frame">&#9197;</button>
+  <input id="slider" type="range" min="0" max="{nmax}" value="0"
+         oninput="seek(this.value)">
+  <span id="lbl"></span>
+  <input id="goto" type="number" min="1" max="{nframes}" placeholder="go to #"
+         onkeydown="if(event.key==='Enter') gotoFrame(this.value)">
+  <button onclick="gotoFrame(document.getElementById('goto').value)">Go</button>
+  <button id="inspectBtn" onclick="toggleInspect()">Inspect (rotate)</button>
+</div>
+<div id="hint">Playback (▶) uses pre-rendered frames for guaranteed real-time
+speed. "Inspect" pauses and swaps in a live, rotatable 3-D view of the
+current frame — drag to orbit, scroll to zoom. Pressing ▶ again exits
+Inspect and resumes real-time playback.</div>
+<script>{plotlyjs}</script>
+<script>
+const frames = [{frames}];
+const fps = {fps};
+let i = 0, timer = null, inspecting = false, plotlyInited = false;
+const img = document.getElementById("view");
+const meshDiv = document.getElementById("plotlyMesh");
+const slider = document.getElementById("slider");
+const lbl = document.getElementById("lbl");
+const inspectBtn = document.getElementById("inspectBtn");
+
+// Per-frame mesh vertices + marker positions, decoded once from base64
+// float32 buffers (not shipped as per-frame JSON -- far more compact).
+function decodeFloat32(b64) {{
+  const bin = atob(b64);
+  const buf = new Uint8Array(bin.length);
+  for (let j = 0; j < bin.length; j++) buf[j] = bin.charCodeAt(j);
+  return new Float32Array(buf.buffer);
+}}
+const nVerts = {n_verts};
+const nMarkers = {n_markers};
+const vertsFlat = decodeFloat32("{verts_b64}");       // frames.length * nVerts * 3
+const markersFlat = decodeFloat32("{markers_b64}");   // frames.length * nMarkers * 3
+const facesI = {faces_i};
+const facesJ = {faces_j};
+const facesK = {faces_k};
+const markerLabels = {marker_labels};
+const center = {center};
+const half = {half};
+
+function frameSlice(flat, nPts, k) {{
+  const off = k * nPts * 3;
+  const x = new Array(nPts), y = new Array(nPts), z = new Array(nPts);
+  for (let p = 0; p < nPts; p++) {{
+    x[p] = flat[off + p * 3]; y[p] = flat[off + p * 3 + 1]; z[p] = flat[off + p * 3 + 2];
+  }}
+  return {{x, y, z}};
+}}
+
+function updatePlotly(k) {{
+  const v = frameSlice(vertsFlat, nVerts, k);
+  const m = frameSlice(markersFlat, nMarkers, k);
+  if (!plotlyInited) {{
+    const meshTrace = {{
+      type: "mesh3d", x: v.x, y: v.y, z: v.z,
+      i: facesI, j: facesJ, k: facesK,
+      color: "#e8a0a0", opacity: 0.95, flatshading: false, hoverinfo: "skip",
+      lighting: {{ambient: 0.5, diffuse: 0.8, specular: 0.2, roughness: 0.6}},
+      lightposition: {{x: 200, y: 200, z: 400}},
+    }};
+    const markerTrace = {{
+      type: "scatter3d", mode: "markers", x: m.x, y: m.y, z: m.z,
+      marker: {{size: 4, color: "#2c3e50"}},
+      text: markerLabels, hoverinfo: "text",
+    }};
+    Plotly.newPlot(meshDiv, [meshTrace, markerTrace], {{
+      scene: {{
+        xaxis: {{range: [center[0]-half, center[0]+half], title: "X (mm)"}},
+        yaxis: {{range: [center[1]-half, center[1]+half], title: "Y (mm)"}},
+        zaxis: {{range: [center[2]-half, center[2]+half], title: "Z (mm)"}},
+        aspectmode: "cube",
+      }},
+      uirevision: "constant",  // preserve camera across updates
+      margin: {{t: 10, b: 10}},
+    }}, {{displaylogo: false}});
+    plotlyInited = true;
+  }} else {{
+    Plotly.restyle(meshDiv, {{x: [v.x, m.x], y: [v.y, m.y], z: [v.z, m.z]}}, [0, 1]);
+  }}
+}}
+
+function enterInspect() {{
+  pause();
+  inspecting = true;
+  img.style.display = "none";
+  meshDiv.style.display = "block";
+  inspectBtn.classList.add("active");
+  updatePlotly(i);
+}}
+function exitInspect() {{
+  inspecting = false;
+  meshDiv.style.display = "none";
+  img.style.display = "block";
+  inspectBtn.classList.remove("active");
+}}
+function toggleInspect() {{ inspecting ? exitInspect() : enterInspect(); }}
+
+function show(k) {{
+  i = ((k % frames.length) + frames.length) % frames.length;
+  img.src = "data:image/jpeg;base64," + frames[i];
+  slider.value = i;
+  lbl.textContent = (i + 1) + "/" + frames.length;
+  if (inspecting) updatePlotly(i);  // manual stepping/scrubbing also updates the 3-D view
+}}
+function play() {{
+  if (inspecting) exitInspect();  // Inspect only applies while paused -- never during playback
+  timer = setInterval(() => show(i + 1), 1000 / fps);
+  document.getElementById("btn").innerHTML = "&#9208;";
+}}
+function pause() {{
+  clearInterval(timer); timer = null;
+  document.getElementById("btn").innerHTML = "&#9654;";
+}}
+function toggle() {{ timer ? pause() : play(); }}
+function seek(v) {{ pause(); show(+v); }}
+function step(d) {{ pause(); show(i + d); }}
+function gotoFrame(v) {{
+  const n = parseInt(v, 10);
+  if (!isNaN(n)) {{ pause(); show(n - 1); }}
+}}
+document.addEventListener("keydown", (e) => {{
+  if (document.activeElement === document.getElementById("goto")) return;
+  if (e.key === "ArrowLeft") step(-1);
+  else if (e.key === "ArrowRight") step(1);
+  else if (e.key === " ") {{ e.preventDefault(); toggle(); }}
+}});
+show(0); play();
+</script></body></html>
+"""
+
+
+def _write_html(frames_b64, n_frames, playback_fps, verts_mm, markers_mm, faces,
+                 marker_labels, center, half, out: Path) -> None:
+    """Write the hybrid player: baked JPEGs for real-time Play/scrub, plus a
+    live Plotly Mesh3d of the current frame for free rotation while paused
+    ("Inspect"). Embeds plotly.js inline (``get_plotlyjs()``) so the page
+    stays self-contained, same as this repo's other Plotly-based outputs.
+    """
+    import base64
+    import json
+    import plotly.offline as pyo
+
+    verts_b64 = base64.b64encode(verts_mm.astype(np.float32).tobytes()).decode("ascii")
+    markers_b64 = base64.b64encode(markers_mm.astype(np.float32).tobytes()).decode("ascii")
+
+    out.write_text(_HTML_TEMPLATE.format(
+        nmax=n_frames - 1,
+        nframes=n_frames,
+        fps=playback_fps,
+        frames=",".join(f'"{e}"' for e in frames_b64),
+        plotlyjs=pyo.get_plotlyjs(),
+        n_verts=verts_mm.shape[1],
+        n_markers=markers_mm.shape[1],
+        verts_b64=verts_b64,
+        markers_b64=markers_b64,
+        faces_i=json.dumps(faces[:, 0].tolist()),
+        faces_j=json.dumps(faces[:, 1].tolist()),
+        faces_k=json.dumps(faces[:, 2].tolist()),
+        marker_labels=json.dumps(list(marker_labels)),
+        center=json.dumps([float(c) for c in center]),
+        half=float(half),
+    ), encoding="utf-8")
 
 
 def resolve_model_path(mano_dir: str, side: str) -> Path:
@@ -152,10 +339,13 @@ def main() -> None:
     half = np.nanmax(np.linalg.norm(all_pts - center, axis=-1)) * 1.1
 
     print("[animate_mesh] rendering frames...")
+    import base64
+    import io
+
     fig = plt.figure(figsize=(8, 7))
     ax = fig.add_subplot(111, projection="3d")
-
-    def update(k: int) -> None:
+    frames_b64 = []
+    for k in range(len(frame_idx)):
         ax.clear()
         v = verts_mm[k]
         ax.plot_trisurf(v[:, 0], v[:, 1], v[:, 2], triangles=faces,
@@ -174,11 +364,16 @@ def main() -> None:
         ax.set_ylabel("Y (mm)", fontsize=7)
         ax.set_zlabel("Z (mm)", fontsize=7)
         ax.tick_params(labelsize=6)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="jpeg", dpi=args.dpi)
+        frames_b64.append(base64.b64encode(buf.getvalue()).decode("ascii"))
+    plt.close(fig)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_html(fig, update, len(frame_idx), playback_fps, args.dpi, out_path)
-    plt.close(fig)
+    print(f"[animate_mesh] writing hybrid HTML player ({len(frame_idx)} frames)...")
+    _write_html(frames_b64, len(frame_idx), playback_fps, verts_mm, sampled_markers,
+                faces, labels, center, half, out_path)
     print(f"[animate_mesh] saved {out_path} ({out_path.stat().st_size / 1e6:.1f} MB)")
 
 
