@@ -142,6 +142,27 @@
                 "right"
             ]
         },
+        {
+            "name": "MANO: export joint angles (P10/Trial2 Hands only)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scripts/mano/export_joint_angles.py",
+            "python": "${workspaceFolder}/.viconvenv/Scripts/python.exe",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                // Reads the already-fitted MANOFitter result (see "Strategy:
+                // MANO" configs above for how that .npz gets produced) --
+                // this config does not run the fit itself, just decodes it.
+                "--npz",
+                "results/mano/P10_Trial2_handsonly/mano_fit_right.npz",
+                "--out",
+                "results/mano/P10_Trial2_handsonly/joint_angles",
+                "--fps",
+                "200",
+                "--plot"
+            ]
+        },
 
         // --- pre-existing configs, fixed to the Windows venv and the
         // post-reorganisation script paths (scripts/deep/...) ---

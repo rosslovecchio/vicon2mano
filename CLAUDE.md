@@ -528,3 +528,112 @@ New tests: the unseeded-unmatched-marker case resolves without crashing
 and without falsely asserting a position, and both `gate_loglik` and
 `residual_loglik` raise `LinAlgError` on a deliberately indefinite
 covariance.
+
+## Work completed 2026-10-06 (first real-ground-truth eval of GMM-Viterbi; list item #2 fixed)
+
+Two things this session that change how much to trust strategyGMM's
+existing validation numbers:
+
+### 1. A full-trial manual relabel exists and was never compared against
+
+`P10/Trial2_handsonly_manuallylabelled_filled.csv` is a complete,
+human-relabelled export of the *entire* 42,238-frame trial (not a sample) -
+distinct from the 500-frame stratified `manual_identity_validation` sample
+in `results/shared/validation/`. Diffed against the raw Vicon file with the
+same palm-local-frame method `build_annotations_from_correction` already
+uses (1mm tolerance, `Palm1-3` anchor):
+
+    judgeable marker-frame slots: 738,839 (79.5% of all slots; rest are
+      anchor-occluded `ambiguous` or gap-filled `missing`, out of scope)
+    Vicon correct:  721,181  (97.6% of judgeable)
+    Vicon wrong:     17,658  ( 2.4%)
+    Ghost: 0 (structural - a "filled" export never deletes a coordinate,
+      only adds/moves one, so this status can never trigger from this file)
+
+97.6% is much better than the 500-frame sample's 75.9% determinate accuracy
+- expected, since that sample was deliberately stratified toward
+`poor_availability`/`largest_anomaly` (the hard cases), while this is every
+frame of one of P10's cleanest trials.
+
+**This is the first time any strategy's output was checked against real,
+full-trial human ground truth rather than a stratified sample or an
+injected synthetic swap.** Running `scripts/gmm/relabel_trial.py` on the
+*raw* trial (no `--prior-csv`, no cheating) and diffing its `relabelled`
+output against this ground truth:
+
+    GMM touched (proposed a reassignment):            385
+    - correctly targeted a real Vicon error:           106
+    - of those, actually fixed it (matches truth):      62
+    - false positive (broke an already-correct label): 279
+    Vicon-wrong slots left untouched:               17,596
+
+**Recall 62/17,658 = 0.35%. Precision among touched slots: net harmful,
+62 fixed vs 279 broken (1 : 4.5 against).** This is a materially worse,
+and more trustworthy, number than the existing `validate_injected_swap.py`
+100%/100%/100% result - that protocol was already flagged (09-11) as
+non-discriminating (clean block swap, sharp temporal boundary, resolved by
+the transition term alone). This is the method's actual end-to-end
+performance on real mislabelling, and it is poor: not deployable unaided
+in this configuration.
+
+### 2. List item #2 fixed - `theta_min` was a clamp, not a filter
+
+Root cause exactly as 09-11 described it: `loglik_matrix` floored every
+log-likelihood at `theta_min` and handed the result straight to
+`top_n_assignments`, so a marker with *no* plausible match still had to
+accept whichever real observation the Hungarian algorithm gave it - and
+once several entries hit the same floor, the LAP became degenerate
+(arbitrary tie-breaking among equally "impossible" pairings).
+
+Fixed with a standard assignment-problem technique rather than touching
+`top_n_assignments` itself: `_decline_augmented_cost` appends one dedicated
+"decline any real match" column per marker (cost `-theta_min`, off-diagonal
+`1e9` so marker `i` can only use column `K+i`, never another marker's).
+Declining is now a real competing option instead of a clamp - a marker only
+accepts a real match cheaper than declining, and two markers declining in
+the same frame never collide (each has its own column). `loglik_matrix`
+itself now returns the raw, unclamped log-likelihood (floored only at a
+numerically-safe `_NO_MODEL_FLOOR = -1e4` for markers with no trained GMM
+at all, which is bookkeeping, not the Section 3.1 filter).
+
+Verified directly: a 2-marker/2-observation toy case where marker 0 has a
+genuinely good match and marker 1 fits nothing well - old code forced
+marker 1 onto a terrible pairing; new code has marker 1 correctly decline
+via its own column while marker 0 still takes its good match.
+
+**Real-data re-run, P10/Trial2 Hands only, same ground truth as above:**
+
+    reassigned             1143 -> 1161   (~unchanged count)
+    bones touching a reassigned marker:     9.32mm -> 8.50mm (65.4% better)
+                                       ->    8.91mm -> 5.21mm (87.4% better)
+    GMM touched                              385 ->  293
+    correctly fixed (matches truth)           62 ->   90   (+45%)
+    false positive (broke correct label)     279 ->  152   (-45%)
+    hit:miss ratio                       1:4.5   -> 1:1.7
+
+Both precision and the self-consistency metric improved together (not a
+tradeoff), and recall roughly doubled - but **still net harmful** (90 fixed
+vs 152 broken) and still very low recall (90/17,658 = 0.5%). The fix is
+confirmed correct and worth keeping, but does not make this trial's
+unaided output trustworthy to deploy.
+
+### Why recall is still so low - the bigger remaining lever
+
+`44.5% anchor-valid, 0 frames with repaired anchors` in this run's log -
+`locate_anchor_triangle` (list item #8, superseded-but-still-public) never
+fired, so the 55.5% of frames with no raw Palm1-3 solution are invisible to
+every downstream step, not just under-served by `theta_min`. Fixing the
+anchor-repair path (items #3 `MAX_OCCLUSION_FRAMES` dead code and #8) looks
+like a bigger lever on recall than anything left in the hypothesis-scoring
+code - prioritise that next over further Viterbi/GMM tuning.
+
+### Tests
+
+`tests/gmm/test_labeler.py` 50 -> 53; full suite 257 -> **260 passing**.
+This session changed `loglik_matrix`'s signature (dropped `theta_min`, now
+unclamped) and added `_decline_augmented_cost`; no existing test exercised
+the old clamping behaviour directly, so nothing needed updating. New
+tests: a hopeless marker declines via its own column instead of being
+forced onto a real pairing; two equally-bad markers decline independently
+without colliding; `loglik_matrix` no longer clamps a wildly implausible
+observation to the old `theta_min` floor.

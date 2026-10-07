@@ -270,6 +270,55 @@ def test_top_n_assignments_is_non_decreasing_in_cost():
 
 
 # ---------------------------------------------------------------------------
+# theta_min as a filter, not a clamp (CLAUDE.md 09-11 list item #2)
+# ---------------------------------------------------------------------------
+
+
+def test_decline_augmented_cost_lets_a_hopeless_marker_opt_out():
+    # marker 0 has a genuinely good match (obs 0); marker 1 fits nothing
+    # well. The old clamp-at-theta_min approach forced marker 1 onto
+    # whichever floored (tied) real observation Hungarian handed it; the
+    # fix gives it its own "decline" column to take instead.
+    cost = np.array([
+        [1.0, 50.0],
+        [50.0, 60.0],
+    ])
+    theta_min = -30.0
+    aug = gl._decline_augmented_cost(cost, theta_min)
+    assert aug.shape == (2, 4)
+    (assign, total), = gl.top_n_assignments(aug, 1)
+    assert assign[0] == 0          # marker 0 takes its good match
+    assert assign[1] == 3          # marker 1 declines via its own column
+    np.testing.assert_allclose(total, 1.0 + (-theta_min))
+
+
+def test_decline_column_never_collides_between_markers():
+    # Both markers equally bad at every real observation -> both should
+    # decline independently (each via its own column), not be forced into
+    # a degenerate tie-broken pairing with each other.
+    cost = np.full((3, 3), 99.0)
+    theta_min = -30.0
+    aug = gl._decline_augmented_cost(cost, theta_min)
+    (assign, total), = gl.top_n_assignments(aug, 1)
+    np.testing.assert_array_equal(assign, [3, 4, 5])  # each marker's own column
+    np.testing.assert_allclose(total, 3 * (-theta_min))
+
+
+def test_loglik_matrix_no_longer_clamps():
+    # loglik_matrix now returns the raw log-likelihood (filtering happens
+    # downstream in _decline_augmented_cost), so a very implausible
+    # observation should score far below any floor, not be clamped to it.
+    gmm = gl.GMMParams(
+        weights=np.array([1.0]),
+        means=np.zeros((1, 3)),
+        variances=np.full((1, 3), 1.0),
+    )
+    obs = np.array([[0.0, 0.0, 0.0], [1000.0, 1000.0, 1000.0]])
+    out = gl.loglik_matrix(obs, {0: gmm}, [0])
+    assert out[0, 1] < -1e4   # not clamped to the old theta_min=-30 default
+
+
+# ---------------------------------------------------------------------------
 # Step 4: Kalman filter + Viterbi hypothesis selection
 # ---------------------------------------------------------------------------
 

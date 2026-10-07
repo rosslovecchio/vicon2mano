@@ -354,29 +354,62 @@ def fit_marker_gmms(
     return out
 
 
+_NO_MODEL_FLOOR = -1e4  # numerically-safe stand-in for "no GMM trained here"
+
+
 def loglik_matrix(
     obs_local: np.ndarray,             # (K, 3) observations in the local frame
     gmms: dict[int, GMMParams],
     marker_order: list[int],
-    *,
-    theta_min: float = -30.0,
 ) -> np.ndarray:
     """(M, K) log-likelihood matrix, ``M = len(marker_order)``.
 
-    Mirrors the paper's ghost-marker tolerance: entries below ``theta_min``
-    are clamped to it rather than left arbitrarily negative, so a wildly
-    implausible pairing doesn't dominate cost comparisons through its
-    magnitude alone (Section 3.1's ``theta_min`` filter).
+    Entries are the raw (unclamped) GMM log-likelihood; a marker with no
+    trained GMM gets a large-but-finite floor (``_NO_MODEL_FLOOR``), not a
+    meaningful threshold -- ``theta_min`` filtering (Section 3.1's actual
+    ghost/gap removal) happens downstream in :func:`_decline_augmented_cost`,
+    where it competes as a real alternative rather than clamping this matrix
+    (see that function's docstring for why the clamp was wrong).
     """
     M, K = len(marker_order), obs_local.shape[0]
-    out = np.full((M, K), theta_min)
+    out = np.full((M, K), _NO_MODEL_FLOOR)
     for i, m in enumerate(marker_order):
         gmm = gmms.get(m)
         if gmm is None:
             continue
-        ll = gmm_loglik(obs_local, gmm)
-        out[i] = np.maximum(ll, theta_min)
+        out[i] = gmm_loglik(obs_local, gmm)
     return out
+
+
+def _decline_augmented_cost(cost: np.ndarray, theta_min: float) -> np.ndarray:
+    """Append one dedicated "decline any real match" column per row (marker)
+    at fixed cost ``-theta_min``, turning ``theta_min`` into the paper's
+    actual Section 3.1 filter instead of a clamp.
+
+    The previous approach floored each matrix entry at ``theta_min`` and let
+    ``top_n_assignments`` pick among them regardless -- so a marker with
+    *no* plausible match still had to accept whichever real observation the
+    Hungarian algorithm handed it, and once several entries hit the same
+    floor the LAP became degenerate (arbitrary tie-breaking among equally
+    "impossible" pairings), precisely in the ambiguous frames the
+    hypotheses exist to resolve.
+
+    Giving each marker its own decline column instead makes "no confident
+    match" a real competing option: a marker only accepts a real
+    observation cheaper than declining, and declining never collides
+    between markers (each has a dedicated column, so one marker's decline
+    can never block another's). Off-diagonal entries are set prohibitively
+    high so marker ``i`` can only use its own column ``K + i``, never
+    another marker's.
+
+    ``top_n_assignments`` needs no changes: it already solves a plain
+    rectangular LAP, and this is still one (now ``M x (K + M)``).
+    """
+    M, K = cost.shape
+    BIG = 1e9  # matches the forbidden-pair sentinel already used in _lap_on_subset
+    decline = np.full((M, M), BIG)
+    np.fill_diagonal(decline, -theta_min)
+    return np.concatenate([cost, decline], axis=1)
 
 
 # ---------------------------------------------------------------------------
@@ -848,15 +881,19 @@ def _build_hypotheses(
         obs_full = local[t, kept]                       # (K, 3), K == len(kept)
         finite = np.isfinite(obs_full).all(axis=1)
         present = np.flatnonzero(finite)
-        cost = -loglik_matrix(obs_full[present], gmms, kept, theta_min=theta_min)
+        K = present.size
+        cost = _decline_augmented_cost(-loglik_matrix(obs_full[present], gmms, kept), theta_min)
         raw = top_n_assignments(cost, n_hypotheses)
         remapped = []
         for a, c in raw:
-            if present.size:
-                idx_arr = present[np.clip(a, 0, len(present) - 1)]
-            else:
-                idx_arr = np.full_like(a, -1)
-            remapped.append((np.where(a >= 0, idx_arr, -1), c))
+            # columns [0, K) are real present observations; [K, K+M) are a
+            # marker's own "decline" column (below theta_min -- not a real
+            # match, same as -1/occluded); anything else is unassigned.
+            real_mask = (a >= 0) & (a < K)
+            safe_a = np.where(real_mask, a, 0)
+            mapped = present[safe_a] if K else np.full_like(a, -1)
+            idx_arr = np.where(real_mask, mapped, -1)
+            remapped.append((idx_arr, c))
         hyps_per_frame.append(remapped)
         obs_per_frame.append(obs_full)
     return hyps_per_frame, obs_per_frame
