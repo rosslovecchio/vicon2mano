@@ -35,7 +35,8 @@ proxy, NOT human-verified like P10 — flagging that honestly):
 | P3/Trial1 Hands only  | ~16s noisy region at t=242-257s, real mislabelling likely |
 
 All in `results/mano/<trial>/joint_angles.csv` + 5 per-finger PNGs each.
-Mesh+marker HTML animation also done for P10.
+Mesh+marker HTML animation done for all 4 trials
+(`results/mano/<trial>/eval/mesh_animation.html`).
 Bug fixed: plot titles were hardcoded to "P10" regardless of input trial.
 Everything committed and pushed to origin/feat/gmm-labeler.
 
