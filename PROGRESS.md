@@ -23,15 +23,26 @@ Joint angles delivered for P10/Trial2 Hands only:
 - Caveat: angle = rotation magnitude in degrees (MCP/PIP/DIP), not a true
   flexion/abduction decomposition. Good enough to see bend amount, not clinical-grade.
 
-## In progress (2026-10-07)
-- Fitting 3 more trials picked by automated clean-ness proxy (not human-verified
-  like P10): P15/Trial2, P5/Trial2, P3/Trial1, all Hands only. Running in background.
-- Mesh+marker HTML animation: done for P10.
-  `results/mano/P10_Trial2_handsonly/eval/mesh_animation.html` (script:
-  `scripts/mano/animate_mesh.py`).
+## Status (2026-10-07, done)
+4 trials now have joint angles (P10 + 3 more picked by automated clean-ness
+proxy, NOT human-verified like P10 — flagging that honestly):
+
+| Trial | Result |
+|---|---|
+| P10/Trial2 Hands only | Clean (human-verified, 97.6% accurate) |
+| P15/Trial2 Hands only | Clean |
+| P5/Trial2 Hands only  | 0.04% of frames spike to ~168deg, 2 brief windows (t=123s, 207s) |
+| P3/Trial1 Hands only  | ~16s noisy region at t=242-257s, real mislabelling likely |
+
+All in `results/mano/<trial>/joint_angles.csv` + 5 per-finger PNGs each.
+Mesh+marker HTML animation also done for P10.
+Bug fixed: plot titles were hardcoded to "P10" regardless of input trial.
+Everything committed and pushed to origin/feat/gmm-labeler.
 
 ## Next decision (pick one, nothing proceeds until you do)
-- [ ] (nothing blocked right now — both items above are mid-flight)
+- [ ] Leave P5/P3's bad windows as-is (just documented) — done for now.
+- [ ] Dig into why P3's t=242-257s window is bad (relabel just that window?).
+- [ ] Something else — say what.
 
 ## Rules for this file
 - Max ~20 lines. If it's longer, delete the old stuff.
