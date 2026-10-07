@@ -92,9 +92,23 @@ cohort-wide**, not in one trial:
 - **Occlusion is not the problem** — median visibility is 22/22 markers, and
   no frame was ever lost for want of markers.
 - **Statics do not help train a spatial prior.** A static is one pose (0.1mm
-  spread) where markers actually vary by 9.1mm across poses; and both statics
-  checked are themselves mislabelled (P10 `Palm2-Thumb1`=129mm; P9's palm
-  markers sit under `Index1`/`Middle1`/`Palm3`).
+  spread) where markers actually vary by 9.1mm across poses. This applies to a
+  *spatial prior* specifically. Statics are fine, and are in fact the best
+  available source, for anything **pose-invariant** — bone lengths / shape
+  calibration — since one pose suffices by definition and the hand is still
+  (P10's static: 0.04-0.30mm marker sd, vs 1.8-4.2mm during movement).
+  - **Correction (2026-10-07): P10's static is NOT mislabelled.** An earlier
+    revision of this file claimed `Palm2-Thumb1`=129mm. That does not
+    reproduce: measured directly off `P10/static_trial.csv` it is **53.85mm**,
+    and every finger/palm segment agrees with the human-verified
+    `Trial2_handsonly_manuallylabelled_filled.csv` to within ±4.4mm. The
+    original figure came from a buggy ad-hoc script, not the data.
+  - **P9's static IS mislabelled, but only in the palm**, as originally
+    recorded: `Palm1-Palm3` reads 28.0mm static vs 47.6mm in movement,
+    `Palm1-Index1` -18.3mm, `Palm2-Thumb1` +24.2mm. Its *finger* chains are
+    clean (within ±3.4mm), so the finger markers remain usable.
+  - Screen any static per segment against a verified movement trial before
+    trusting it: `scripts/mano/calibrate_shape_on_static.py --report-only`.
 - **There is no rigid plate** — palm markers are taped to skin. But the data
   is not drifting either: it is piecewise stable across labelling *regimes*
   (0.06mm/frame within one, jumps up to 119mm between them).

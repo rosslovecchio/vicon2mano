@@ -74,9 +74,13 @@ from vicon2mano.strategies.mano.relabel import (
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--csv", required=True, help="source Vicon CSV (markers, mm)")
-    ap.add_argument("--whole-trial-npz", required=True,
+    ap.add_argument("--whole-trial-npz", default=None,
                      help="existing whole-trial FitResult .npz, used only to supply "
-                          "joints for offset calibration (not refit)")
+                          "joints for offset calibration (not refit). Omit to calibrate "
+                          "from this window's own pass-1 fit instead -- self-contained and "
+                          "guaranteed consistent with the current marker->joint mapping, "
+                          "but calibrated over fewer/less varied poses, so the offsets are "
+                          "weaker. Prefer the whole-trial npz when it is up to date.")
     ap.add_argument("--start", type=int, required=True)
     ap.add_argument("--end", type=int, required=True)
     ap.add_argument("--highlight-frame", type=int, required=True)
@@ -88,20 +92,8 @@ def main() -> None:
 
     markers_mm, labels = load_csv(args.csv)
     base_labels = [l.split(":")[-1] for l in labels]
-
-    # ---- calibrate per-marker offsets from the whole trial's own fit ----
-    whole = np.load(args.whole_trial_npz)
-    T_whole = whole["joints"].shape[0]
     m2j = marker_joint_map(labels, side=args.side)
     print(f"[refit] {len(m2j)} markers map to a MANO joint")
-    offsets, spreads = calibrate_marker_offsets(
-        markers_mm[:T_whole], np.arange(T_whole), whole["joints"], m2j,
-        status=None, min_samples=args.min_samples,
-    )
-    print("Calibrated offsets (mm magnitude) and pose-invariance spread (mm):")
-    for m_idx, off in sorted(offsets.items()):
-        print(f"  marker {m_idx:2d} ({base_labels[m_idx]:10s}): "
-              f"|offset|={np.linalg.norm(off) * 1000:6.2f}mm  spread={spreads[m_idx]:5.2f}mm")
 
     # ---- pass 1: normal fit on the window ----
     window = markers_mm[args.start:args.end + 1]
@@ -110,6 +102,33 @@ def main() -> None:
     fitter = MANOFitter(cfg)
     print("\n[refit] pass 1: normal fit (raw marker targets)...")
     pass1 = fitter.fit(window, labels, verbose=True)
+
+    # ---- calibrate per-marker offsets ----
+    # Calibration must use joints produced by the SAME marker->joint mapping
+    # the refit will use, so a stale whole-trial .npz (fitted under an older
+    # mapping) is worse than useless here -- it would calibrate offsets against
+    # joints that mean something different.
+    if args.whole_trial_npz:
+        whole = np.load(args.whole_trial_npz)
+        T_whole = whole["joints"].shape[0]
+        cal_src, cal_frames, cal_joints = "whole trial", np.arange(T_whole), whole["joints"]
+        cal_markers = markers_mm[:T_whole]
+    else:
+        cal_src = "this window's own pass-1 fit"
+        cal_frames = np.arange(args.start, args.end + 1)
+        cal_joints = pass1.joints
+        cal_markers = markers_mm
+    print(f"\n[refit] calibrating offsets from {cal_src} ({len(cal_frames)} frames)")
+    offsets, spreads = calibrate_marker_offsets(
+        cal_markers, cal_frames, cal_joints, m2j,
+        status=None, min_samples=args.min_samples,
+    )
+    print("Calibrated offsets (mm magnitude) and pose-invariance spread (mm):")
+    for m_idx, off in sorted(offsets.items()):
+        mag = np.linalg.norm(off) * 1000
+        flag = "  <-- not pose-invariant" if spreads[m_idx] > 0.6 * mag else ""
+        print(f"  marker {m_idx:2d} ({base_labels[m_idx]:10s}): "
+              f"|offset|={mag:6.2f}mm  spread={spreads[m_idx]:5.2f}mm{flag}")
 
     # ---- build offset-corrected targets using pass-1's (fixed) joints ----
     assign = pass1.assignment
