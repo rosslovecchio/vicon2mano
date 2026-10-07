@@ -340,12 +340,24 @@ class MANOFitter:
         betas: np.ndarray,       # (10,)
         *,
         verbose: bool,
+        target_override: np.ndarray | None = None,  # (T, 21, 3), NaN where unassigned
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """``target_override`` lets a caller substitute per-marker
+        offset-corrected targets (see ``strategies.mano.relabel``'s bone-
+        segment-frame marker offsets) for the raw marker positions
+        ``_assigned_targets`` would otherwise use -- the fitter's objective
+        is unchanged (still ``||J_j - target_j||^2``), only what counts as
+        "target" differs. Markers sit on skin, not joint centres, and the
+        offset is systematic (worst at MCP joints, ~20-25mm, vs ~5-16mm at
+        PIP/DIP -- measured directly on P10/Trial2 Hands only); this is the
+        hook a two-pass calibrate-then-refit workflow needs without
+        duplicating this method's optimisation loop (temporal smoothness,
+        pose prior, accel penalty, scheduler all stay shared)."""
         cfg = self.cfg
         T = markers_m.shape[0]
         pd = self._pose_dim()
 
-        target = self._assigned_targets(markers_m, assign)
+        target = target_override if target_override is not None else self._assigned_targets(markers_m, assign)
         target_t = torch.tensor(target, device=self.device)
         mask = torch.isfinite(target_t).all(-1)
 

@@ -348,13 +348,25 @@ def main() -> None:
     for k in range(len(frame_idx)):
         ax.clear()
         v = verts_mm[k]
+        # Known limitation, not yet fixed: mplot3d depth-sorts the mesh
+        # surface (Poly3DCollection) and the marker scatter (PathCollection)
+        # independently via separate per-artist heuristics, and regularly
+        # gets the ordering wrong -- an opaque mesh can hide markers that are
+        # geometrically in front of it. zorder does NOT fix this (mplot3d
+        # doesn't use it for cross-artist depth). Tried alpha<1 as a
+        # mitigation -- worse, not better: translucency also breaks
+        # mplot3d's self-sorting of the mesh's OWN overlapping triangles
+        # (fingers self-occlude heavily in 2D projection), producing visible
+        # dark hatching across the surface. Reverted to opaque. Real fix
+        # needs a renderer with actual depth-buffering (e.g. baking frames
+        # via Plotly+Kaleido instead of matplotlib) -- not done here.
         ax.plot_trisurf(v[:, 0], v[:, 1], v[:, 2], triangles=faces,
                          color="#e8a0a0", edgecolor="none", shade=True,
                          antialiased=False, alpha=0.95)
         m = sampled_markers[k]
         finite = np.isfinite(m).all(axis=-1)
         if finite.any():
-            ax.scatter(*m[finite].T, c="#2c3e50", s=18, depthshade=False)
+            ax.scatter(*m[finite].T, c="#2c3e50", s=22, depthshade=False)
         ax.set_xlim(center[0] - half, center[0] + half)
         ax.set_ylim(center[1] - half, center[1] + half)
         ax.set_zlim(center[2] - half, center[2] + half)
