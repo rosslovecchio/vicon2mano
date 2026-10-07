@@ -86,6 +86,10 @@ def main() -> None:
                           "heavier than lines, so default is lower than other scripts)")
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--end", type=int, default=-1)
+    ap.add_argument("--fps", type=float, default=200.0,
+                     help="capture rate in Hz (read from the CSV's Trajectories header, "
+                          "not assumed) -- used to make Play advance at real elapsed "
+                          "time rather than a fixed per-step duration")
     args = ap.parse_args()
 
     import smplx
@@ -108,6 +112,17 @@ def main() -> None:
     frame_idx = np.unique(np.linspace(args.start, end - 1, min(args.n_out, end - args.start)).astype(int))
     print(f"[animate_mesh] animating {len(frame_idx)} frames from source range "
           f"[{frame_idx[0]}, {frame_idx[-1]}]")
+
+    # Real elapsed time per animation step, from the actual (roughly uniform,
+    # after np.unique) gap between sampled source frames -- not a fixed
+    # guessed duration. A sparse n_out over a long trial still finishes in
+    # the trial's real duration, just at coarser visual resolution; use
+    # --start/--end to animate a shorter window at full temporal fidelity
+    # instead if smoother motion (not just correct timing) is wanted.
+    avg_step_frames = (frame_idx[-1] - frame_idx[0]) / max(len(frame_idx) - 1, 1)
+    step_ms = (avg_step_frames / args.fps) * 1000.0
+    print(f"[animate_mesh] {args.fps:.0f} Hz source, {avg_step_frames:.1f} frames/step "
+          f"-> {step_ms:.0f} ms/step (real-time playback)")
 
     print("[animate_mesh] running forward pass for sampled frames...")
     verts_m = forward_vertices(
@@ -179,7 +194,7 @@ def main() -> None:
             updatemenus=[dict(
                 type="buttons", showactive=False, x=0.0, y=1.08, buttons=[
                     dict(label="Play", method="animate", args=[None, {
-                        "frame": {"duration": 80, "redraw": True},
+                        "frame": {"duration": step_ms, "redraw": True},
                         "fromcurrent": True, "transition": {"duration": 0}}]),
                     dict(label="Pause", method="animate", args=[[None], {
                         "frame": {"duration": 0}, "mode": "immediate"}])])],
