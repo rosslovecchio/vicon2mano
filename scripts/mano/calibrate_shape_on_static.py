@@ -107,6 +107,11 @@ def main() -> None:
     ap.add_argument("--lr-beta", type=float, default=1e-2)
     ap.add_argument("--iters", type=int, default=800)
     ap.add_argument("--report-only", action="store_true")
+    ap.add_argument("--static-out", default=None,
+                     help="write an interactive plot of the fit ON THE STATIC ITSELF "
+                          "(the extended, still pose the shape was calibrated from). "
+                          "This is the one to look at to judge mesh-vs-marker agreement; "
+                          "--out instead plots a MOVEMENT frame fitted with these betas.")
     args = ap.parse_args()
 
     import torch
@@ -184,6 +189,41 @@ def main() -> None:
         k = med_dist(st, bs, f + "1", f + "3")
         n = np.linalg.norm(J[m_] - J[t_])
         print(f"{f:8s} {k:18.2f}mm {n:11.2f}mm  {k/n:5.2f}")
+
+    # ---- plot the fit ON THE STATIC itself ----
+    if args.static_out:
+        k0 = S // 2  # the hand is still, so any frame is representative
+        with torch.no_grad():
+            out_s = model(global_orient=g_orient[k0:k0 + 1], hand_pose=hp[k0:k0 + 1],
+                          transl=tr[k0:k0 + 1],
+                          betas=betas.detach().unsqueeze(0), return_verts=True)
+            Js = mano_output_to_joints21(out_s)[0].cpu().numpy() * 1000
+        Vs = out_s.vertices[0].cpu().numpy() * 1000
+        mk_s = st[sf[k0]]
+        fin_s = np.isfinite(mk_s).all(-1)
+        res_s = [np.linalg.norm(Js[jidx[jn]] - mk_s[mi]) for jn, mi in pairs
+                 if np.isfinite(mk_s[mi]).all()]
+        print(f"\nstatic frame {sf[k0]}: mean residual over the {len(res_s)} fitted "
+              f"markers = {np.mean(res_s):.2f} mm")
+        fig_s = go.Figure(data=[
+            go.Mesh3d(x=Vs[:, 0], y=Vs[:, 1], z=Vs[:, 2],
+                      i=model.faces[:, 0], j=model.faces[:, 1], k=model.faces[:, 2],
+                      color="#e8a0a0", opacity=0.95, flatshading=True,
+                      lighting=dict(ambient=1.0, diffuse=0.15, specular=0.0),
+                      name="MANO fitted to the static"),
+            go.Scatter3d(x=mk_s[fin_s, 0], y=mk_s[fin_s, 1], z=mk_s[fin_s, 2],
+                         mode="markers+text", marker=dict(size=5, color="#2c3e50"),
+                         text=[bs[i] for i in np.flatnonzero(fin_s)],
+                         textposition="top center", name="static Vicon markers"),
+        ])
+        fig_s.update_layout(
+            title=f"MANO fitted to the STATIC trial (frame {sf[k0]}) — "
+                  f"mean residual {np.mean(res_s):.1f} mm over fitted markers",
+            scene=dict(aspectmode="data"), width=1000, height=850)
+        sp = Path(args.static_out)
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        fig_s.write_html(str(sp), include_plotlyjs=True)
+        print(f"saved {sp}")
 
     if args.start is None or args.out is None:
         return
