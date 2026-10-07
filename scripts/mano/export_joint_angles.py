@@ -85,7 +85,8 @@ def joint_angles_deg(hand_pose: np.ndarray, model) -> pd.DataFrame:
     return pd.DataFrame(mag_deg, columns=JOINT_COLUMNS)
 
 
-def plot_finger(df: pd.DataFrame, finger: str, time_s: np.ndarray, out_path: Path) -> None:
+def plot_finger(df: pd.DataFrame, finger: str, time_s: np.ndarray, out_path: Path,
+                 title_suffix: str) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -98,7 +99,7 @@ def plot_finger(df: pd.DataFrame, finger: str, time_s: np.ndarray, out_path: Pat
         ax.set_ylabel(f"{suffix.upper()} (deg)")
         ax.grid(alpha=0.3)
     axes[-1].set_xlabel("Time (s)")
-    fig.suptitle(f"{finger.capitalize()} joint angles — P10/Trial2 Hands only")
+    fig.suptitle(f"{finger.capitalize()} joint angles — {title_suffix}")
     fig.tight_layout()
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
@@ -115,6 +116,8 @@ def main() -> None:
                      help="capture rate in Hz, for the time_s column and plot x-axis "
                           "(read from the CSV's Trajectories header, not assumed)")
     ap.add_argument("--plot", action="store_true", help="also write one PNG per finger")
+    ap.add_argument("--title", default=None,
+                     help="label for plot titles (default: derived from --out's parent dir name)")
     args = ap.parse_args()
 
     import smplx
@@ -149,9 +152,10 @@ def main() -> None:
         print(f"  {col:16s} mean {df[col].mean():5.1f}  max {df[col].max():5.1f}")
 
     if args.plot:
+        title_suffix = args.title or Path(args.out).parent.name
         for finger in FINGER_ORDER:
             plot_finger(df, finger, df["time_s"].to_numpy(),
-                        Path(f"{args.out}_{finger}.png"))
+                        Path(f"{args.out}_{finger}.png"), title_suffix)
 
 
 if __name__ == "__main__":
