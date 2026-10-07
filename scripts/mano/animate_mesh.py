@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Interactive HTML animation: fitted MANO mesh surface + Vicon marker overlay.
+"""HTML animation: fitted MANO mesh surface + Vicon marker overlay, at real
+elapsed-time playback speed.
 
-Unlike ``scripts/shared/animate_fit.py`` (skeleton lines only, matplotlib
-frames baked into base64 JPEGs), this renders the actual MANO hand
-*surface* (778 vertices, ~1538 triangles) with Plotly's native frame
-animation -- same Play/Pause + scrub-slider UI already used in
-``scripts/gmm/relabel_trial.py``, reused here rather than re-invented.
-
-The fit's ``.npz`` does not store per-frame vertices (``save_npz`` only
-keeps joints -- see ``vicon2mano/core/export.py``), so this script re-runs
-a cheap, no-grad forward pass through the same MANO model for just the
-sampled frames, not all of them.
+First version of this script used Plotly's live Mesh3d frame animation,
+which looked right in principle but played back noticeably slower than
+real time in the browser: redrawing a 778-vertex/1538-face mesh every
+frame is too expensive for the browser to keep up with the requested
+per-frame duration, so Plotly silently falls behind instead of honouring
+it. Same lesson ``scripts/shared/animate_fit.py`` already learned for the
+skeleton-only animation: render every frame to a static image *offline*
+(no per-frame interactivity cost at playback time) and drive it with a
+fixed-rate JS timer, so playback speed is decoupled from render cost
+entirely. This script now follows that exact pattern -- ``_write_html``
+imported directly from ``animate_fit.py`` rather than reimplemented.
 
 Usage
 -----
@@ -18,7 +20,7 @@ python scripts/mano/animate_mesh.py \\
     --npz results/mano/P10_Trial2_handsonly/mano_fit_right.npz \\
     --csv "<raw Vicon CSV>" \\
     --out results/mano/P10_Trial2_handsonly/eval/mesh_animation.html \\
-    --n-out 150
+    --n-out 1500 --fps 200
 """
 
 from __future__ import annotations
@@ -28,11 +30,16 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import plotly.graph_objects as go
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+SHARED_DIR = REPO_ROOT / "scripts" / "shared"
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
 
 # chumpy (an smplx dependency) uses removed numpy type aliases -- same
 # compat shim as vicon2mano.core.fitter / export_joint_angles.py.
@@ -46,6 +53,7 @@ for _attr, _builtin in {"int": int, "float": float, "bool": bool, "complex": com
         setattr(_np, _attr, _builtin)
 
 from vicon2mano.core.loader import load_csv
+from animate_fit import _write_html  # noqa: E402 -- path inserted above
 
 
 def resolve_model_path(mano_dir: str, side: str) -> Path:
@@ -81,15 +89,14 @@ def main() -> None:
     ap.add_argument("--out", required=True, help="output .html path")
     ap.add_argument("--mano-dir", default="../clean_kinematics/mano_v1_2/models")
     ap.add_argument("--side", choices=["right", "left"], default="right")
-    ap.add_argument("--n-out", type=int, default=150,
-                     help="frames sampled into the animation (mesh rendering is "
-                          "heavier than lines, so default is lower than other scripts)")
+    ap.add_argument("--n-out", type=int, default=1500,
+                     help="frames sampled into the animation")
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--end", type=int, default=-1)
     ap.add_argument("--fps", type=float, default=200.0,
                      help="capture rate in Hz (read from the CSV's Trajectories header, "
-                          "not assumed) -- used to make Play advance at real elapsed "
-                          "time rather than a fixed per-step duration")
+                          "not assumed) -- used only to derive playback speed")
+    ap.add_argument("--dpi", type=int, default=85, help="render resolution (lower = smaller file)")
     args = ap.parse_args()
 
     import smplx
@@ -114,15 +121,13 @@ def main() -> None:
           f"[{frame_idx[0]}, {frame_idx[-1]}]")
 
     # Real elapsed time per animation step, from the actual (roughly uniform,
-    # after np.unique) gap between sampled source frames -- not a fixed
-    # guessed duration. A sparse n_out over a long trial still finishes in
-    # the trial's real duration, just at coarser visual resolution; use
-    # --start/--end to animate a shorter window at full temporal fidelity
-    # instead if smoother motion (not just correct timing) is wanted.
+    # after np.unique) gap between sampled source frames -- the playback fps
+    # passed to _write_html's fixed-rate JS timer, so total playback time
+    # matches the trial's real recording duration regardless of render cost.
     avg_step_frames = (frame_idx[-1] - frame_idx[0]) / max(len(frame_idx) - 1, 1)
-    step_ms = (avg_step_frames / args.fps) * 1000.0
+    playback_fps = args.fps / avg_step_frames
     print(f"[animate_mesh] {args.fps:.0f} Hz source, {avg_step_frames:.1f} frames/step "
-          f"-> {step_ms:.0f} ms/step (real-time playback)")
+          f"-> {playback_fps:.1f} fps playback (real-time)")
 
     print("[animate_mesh] running forward pass for sampled frames...")
     verts_m = forward_vertices(
@@ -133,81 +138,47 @@ def main() -> None:
         fit["betas"],
     )
     verts_mm = verts_m * 1000.0  # metres -> mm, to match raw marker scale
-
     sampled_markers = markers_mm[frame_idx]  # (n, N, 3) mm
 
-    # Fixed camera range across the whole animation (same pattern as
-    # scripts/gmm/relabel_trial.py's build_figure): compute once from every
-    # sampled frame's mesh + markers, not per-frame, so the hand doesn't
-    # visually jump as the window re-centres frame to frame.
+    # Fixed camera range across the whole animation, computed once (same
+    # pattern as scripts/gmm/relabel_trial.py's build_figure), so the hand
+    # doesn't visually jump as the window re-centres frame to frame.
+    flat_markers = sampled_markers.reshape(-1, 3)
     all_pts = np.concatenate([
         verts_mm.reshape(-1, 3),
-        sampled_markers.reshape(-1, 3)[np.isfinite(sampled_markers.reshape(-1, 3)).all(-1)],
+        flat_markers[np.isfinite(flat_markers).all(-1)],
     ], axis=0)
     center = np.nanmean(all_pts, axis=0)
     half = np.nanmax(np.linalg.norm(all_pts - center, axis=-1)) * 1.1
 
-    def marker_xyz(m):
-        ok = np.isfinite(m).all(axis=-1)
-        return (np.where(ok, m[:, 0], np.nan),
-                np.where(ok, m[:, 1], np.nan),
-                np.where(ok, m[:, 2], np.nan))
+    print("[animate_mesh] rendering frames...")
+    fig = plt.figure(figsize=(8, 7))
+    ax = fig.add_subplot(111, projection="3d")
 
-    def mesh_trace(v):
-        return go.Mesh3d(
-            x=v[:, 0], y=v[:, 1], z=v[:, 2],
-            i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
-            color="#e8a0a0", opacity=0.95, flatshading=False,
-            lighting=dict(ambient=0.5, diffuse=0.8, specular=0.2, roughness=0.6),
-            lightposition=dict(x=200, y=200, z=400),
-            name="MANO mesh", hoverinfo="skip",
-        )
-
-    mx0, my0, mz0 = marker_xyz(sampled_markers[0])
-    marker_tr = go.Scatter3d(
-        x=mx0, y=my0, z=mz0, mode="markers",
-        marker=dict(size=5, color="#2c3e50"),
-        hovertext=labels, hoverinfo="text", name="Vicon markers",
-    )
-
-    frames = []
-    for k in range(len(frame_idx)):
-        mx, my, mz = marker_xyz(sampled_markers[k])
-        frames.append(go.Frame(
-            name=str(k),
-            data=[mesh_trace(verts_mm[k]), go.Scatter3d(x=mx, y=my, z=mz)],
-            layout=go.Layout(title=f"frame {int(frame_idx[k])}"),
-        ))
-
-    fig = go.Figure(
-        data=[mesh_trace(verts_mm[0]), marker_tr],
-        frames=frames,
-        layout=go.Layout(
-            title=f"frame {int(frame_idx[0])}",
-            width=950, height=800,
-            scene=dict(
-                xaxis=dict(range=[center[0] - half, center[0] + half], title="X (mm)"),
-                yaxis=dict(range=[center[1] - half, center[1] + half], title="Y (mm)"),
-                zaxis=dict(range=[center[2] - half, center[2] + half], title="Z (mm)"),
-                aspectmode="cube"),
-            margin=dict(t=80),
-            updatemenus=[dict(
-                type="buttons", showactive=False, x=0.0, y=1.08, buttons=[
-                    dict(label="Play", method="animate", args=[None, {
-                        "frame": {"duration": step_ms, "redraw": True},
-                        "fromcurrent": True, "transition": {"duration": 0}}]),
-                    dict(label="Pause", method="animate", args=[[None], {
-                        "frame": {"duration": 0}, "mode": "immediate"}])])],
-            sliders=[dict(currentvalue=dict(prefix="frame: "), steps=[
-                dict(method="animate", label=str(int(t)), args=[[str(k)], {
-                    "frame": {"duration": 0, "redraw": True}, "mode": "immediate"}])
-                for k, t in enumerate(frame_idx)])],
-        ),
-    )
+    def update(k: int) -> None:
+        ax.clear()
+        v = verts_mm[k]
+        ax.plot_trisurf(v[:, 0], v[:, 1], v[:, 2], triangles=faces,
+                         color="#e8a0a0", edgecolor="none", shade=True,
+                         antialiased=False, alpha=0.95)
+        m = sampled_markers[k]
+        finite = np.isfinite(m).all(axis=-1)
+        if finite.any():
+            ax.scatter(*m[finite].T, c="#2c3e50", s=18, depthshade=False)
+        ax.set_xlim(center[0] - half, center[0] + half)
+        ax.set_ylim(center[1] - half, center[1] + half)
+        ax.set_zlim(center[2] - half, center[2] + half)
+        ax.set_box_aspect((1, 1, 1))
+        ax.set_title(f"frame {int(frame_idx[k])}", fontsize=10)
+        ax.set_xlabel("X (mm)", fontsize=7)
+        ax.set_ylabel("Y (mm)", fontsize=7)
+        ax.set_zlabel("Z (mm)", fontsize=7)
+        ax.tick_params(labelsize=6)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_html(str(out_path), include_plotlyjs=True, div_id="meshfig")
+    _write_html(fig, update, len(frame_idx), playback_fps, args.dpi, out_path)
+    plt.close(fig)
     print(f"[animate_mesh] saved {out_path} ({out_path.stat().st_size / 1e6:.1f} MB)")
 
 
