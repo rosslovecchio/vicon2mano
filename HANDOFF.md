@@ -138,6 +138,19 @@ be re-run for every trial.** See Gotchas for what is currently stale.
   segment agrees with the verified movement trial to ±4.4mm. It came from a buggy
   ad-hoc script. The **P9 half of that claim holds**: P9's *palm* markers really are
   mislabelled (`Palm1-Palm3` 28.0mm vs 47.6mm), though its finger chains are clean.
+- **The mapping fix all but eliminated implausible joint angles.** After refitting
+  all 4 trials and regenerating the angles, frames containing any joint >120 deg:
+
+  | Trial | >120 deg | >150 deg |
+  |---|---:|---:|
+  | P10/Trial2 | **0** (0.0%) | 0 |
+  | P15/Trial2 | 27 (0.1%) | 1 |
+  | P5/Trial2  | 11 (0.0%) | 2 |
+  | P3/Trial1  | 81 (0.1%) | 33 (0.06%) |
+
+  P10 is now completely clean; it previously peaked at 129.9 deg (pinky MCP) and
+  112.3 deg (middle MCP), now 109.3 and 79.2. The residual handfuls fall inside the
+  already-documented bad windows (P5 ~t=123s/207s, P3 ~t=242-257s).
 - **GPU enabled**: `.viconvenv` had `torch 2.14.0+cpu` while an RTX A2000 sat idle.
   Swapped to `torch 2.14.0+cu126` (same version, CUDA variant). 2000-frame chunk:
   28.2s, peak VRAM 0.32GB. `chunk_frames` 2000 vs 6000 made no difference (69.9 vs
@@ -147,8 +160,9 @@ be re-run for every trial.** See Gotchas for what is currently stale.
 
 ## Things still worth doing
 
-1. **(BLOCKING) Regenerate stale outputs.** See Gotchas — the joint angles currently
-   on disk were produced with the wrong mapping.
+1. **Regenerate the 4 mesh animations** (pipeline step 3) — they are the last
+   outputs still produced under the old mapping. Fits and joint angles are already
+   done. Optional, purely visual.
 2. **Resolve the thumb mapping.** Left unchanged because the chain test is ambiguous.
    Behavioural evidence now points at `Thumb3` also being a fingertip marker (the
    mesh thumb-tip overshoots `Thumb3` by ~13mm, and the pinch gap is mostly thumb).
@@ -168,21 +182,12 @@ be re-run for every trial.** See Gotchas for what is currently stale.
 
 ## Gotchas to know about
 
-- **STALE OUTPUTS — the main trap.** All four `results/mano/*/joint_angles.csv`
-  (+ per-finger PNGs, timestamped 15:45–15:50) and all four
-  `eval/mesh_animation.html` were generated **before** the mapping fix and are
-  therefore wrong — **re-run pipeline steps 2 and 3 for every trial.**
-  Fit state at time of writing (`ls -la results/mano/*/mano_fit_right.npz`):
-
-  | Trial | npz | post-mapping-fix? |
-  |---|---|---|
-  | P10/Trial2 | 10-07 21:11 | yes |
-  | P15/Trial2 | 10-07 21:28 | yes |
-  | P5/Trial2  | 10-07 21:27 | yes |
-  | **P3/Trial1** | **10-07 15:49** | **NO — refit still running** |
-
-  Anything dated 10-07 15:xx or earlier predates the fix. Check timestamps
-  before trusting anything under `results/mano/`.
+- **STALE OUTPUTS.** Resolved for fits and joint angles, NOT for animations.
+  All four `mano_fit_right.npz` were refit post-mapping-fix (10-07 21:11–21:31)
+  and all four `joint_angles.csv` + per-finger PNGs were regenerated from them
+  (10-07 21:3x). **The four `eval/mesh_animation.html` are still pre-fix
+  (10-07 18:xx) — re-run pipeline step 3 for every trial.** Anything under
+  `results/mano/` dated 10-07 15:xx–18:xx predates the fix; check timestamps.
 - **`MANOFitter`'s shape stage is effectively a no-op.** `w_shape=1e-2` against a
   ~1e-3 joint loss, plus `lr=3e-3` over 100 iters (betas need ±1–3), leaves betas
   pinned at ~0 — verified: fitted betas come back `[0.005, 0, -0, ...]`. Same class
