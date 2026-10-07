@@ -52,22 +52,49 @@ _LABEL_HINTS: dict[str, list[str]] = {
     "thumb_pip":  ["thumb2", "thb2", "thpip"],
     "thumb_dip":  ["thumb3", "thb3", "thdip"],
     "thumb_tip":  ["thumb4", "thb4", "thtip"],
+    # Two different protocols share this table, and they number differently:
+    #
+    #  * bare Index1-3 / Middle1-3 / Ring1-3 / Pinky1-3 -- the data_June25
+    #    3-marker-per-finger protocol. Marker 1 is at the MCP, marker 2 sits on
+    #    the middle phalanx (~60% along the finger) and **marker 3 is at the
+    #    FINGERTIP**, not the DIP. Verified against MANO's own bone lengths on
+    #    6 participants (P3/P5/P7/P10/P13/P15): reading marker 3 as the DIP
+    #    over-predicts the MCP->marker3 span by +18..+48mm in all 18
+    #    finger/subject combinations, reading it as the tip lands within
+    #    -8..+19mm. Correcting this on P10/Trial2 cut the fit residual
+    #    12.0mm -> 9.1mm *and* let betas settle back near the mean hand
+    #    (-1.17 -> -0.17) -- i.e. the model stopped distorting its shape to
+    #    absorb the mismatch, which is the signature of a real fix rather than
+    #    extra freedom soaking up error. Marker 2 maps to the DIP as the
+    #    nearest joint (it is really ~60% along, between PIP at 41% and DIP at
+    #    68%); the leftover is what strategies.mano.relabel's per-marker offset
+    #    calibration exists to model.
+    #  * idx*/ind*/mid*/rng*/pnk*/lit* -- the separate Nexus 4-marker-per-finger
+    #    convention (RIDX1-4 etc.), where 1/2/3/4 = mcp/pip/dip/tip as usual.
+    #    These are distinct strings under _normalise_label ("index2" does not
+    #    contain "ind2"), so the two protocols do not collide.
+    #
+    # The THUMB is deliberately left on the old mapping: the same test is
+    # ambiguous there (Thumb1->Thumb3 spans 74-87mm against MANO's 57.9mm
+    # j1->j3 and 93.3mm j1->tip, and which fits better flips between
+    # participants), and the thumb's anatomy differs anyway (CMC/MCP/IP, two
+    # phalanges not three).
     "index_mcp":  ["index1", "idx1", "ind1", "indmcp"],
-    "index_pip":  ["index2", "idx2", "ind2", "indpip"],
-    "index_dip":  ["index3", "idx3", "ind3", "inddip"],
-    "index_tip":  ["index4", "idx4", "ind4", "indtip"],
+    "index_pip":  ["idx2", "ind2", "indpip"],
+    "index_dip":  ["index2", "idx3", "ind3", "inddip"],
+    "index_tip":  ["index3", "index4", "idx4", "ind4", "indtip"],
     "middle_mcp": ["middle1", "mid1", "midmcp"],
-    "middle_pip": ["middle2", "mid2", "midpip"],
-    "middle_dip": ["middle3", "mid3", "middip"],
-    "middle_tip": ["middle4", "mid4", "midtip"],
+    "middle_pip": ["mid2", "midpip"],
+    "middle_dip": ["middle2", "mid3", "middip"],
+    "middle_tip": ["middle3", "middle4", "mid4", "midtip"],
     "ring_mcp":   ["ring1",   "rng1", "rngmcp"],
-    "ring_pip":   ["ring2",   "rng2", "rngpip"],
-    "ring_dip":   ["ring3",   "rng3", "rngdip"],
-    "ring_tip":   ["ring4",   "rng4", "rngtip"],
+    "ring_pip":   ["rng2", "rngpip"],
+    "ring_dip":   ["ring2",   "rng3", "rngdip"],
+    "ring_tip":   ["ring3",   "ring4", "rng4", "rngtip"],
     "pinky_mcp":  ["pinky1",  "pnk1", "lit1",  "litmcp"],
-    "pinky_pip":  ["pinky2",  "pnk2", "lit2",  "litpip"],
-    "pinky_dip":  ["pinky3",  "pnk3", "lit3",  "litdip"],
-    "pinky_tip":  ["pinky4",  "pnk4", "lit4",  "littip"],
+    "pinky_pip":  ["pnk2", "lit2",  "litpip"],
+    "pinky_dip":  ["pinky2",  "pnk3", "lit3",  "litdip"],
+    "pinky_tip":  ["pinky3",  "pinky4", "pnk4", "lit4",  "littip"],
 }
 
 
