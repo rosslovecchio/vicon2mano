@@ -288,11 +288,19 @@ def main() -> None:
 
     import smplx
     model_path = resolve_model_path(args.mano_dir, args.side)
+    # The pose parameterisation has to match whatever produced the npz:
+    # the stock fitter writes 6 PCA coefficients, the surface-marker fit
+    # writes raw 45-DOF axis-angle. Infer it from the file rather than
+    # assuming, so a 45-DOF npz is not silently misread as PCA.
+    _npz_pose_dim = int(np.load(args.npz)["hand_pose"].shape[1])
     model = smplx.create(
         str(model_path), model_type="mano",
-        is_rhand=(args.side == "right"), use_pca=True, num_pca_comps=6,
+        is_rhand=(args.side == "right"),
+        use_pca=(_npz_pose_dim != 45), num_pca_comps=_npz_pose_dim,
         flat_hand_mean=True, batch_size=1,
     )
+    print(f"[animate_mesh] hand_pose dim {_npz_pose_dim} -> "
+          f"{'PCA' if _npz_pose_dim != 45 else 'full 45-DOF axis-angle'}")
     faces = model.faces  # (nf, 3) int
 
     print(f"[animate_mesh] loading {args.npz}")

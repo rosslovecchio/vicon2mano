@@ -306,18 +306,30 @@ class MANOFitter:
         mask = torch.isfinite(target_t).all(-1)  # (T, 21)
 
         # MANO is rooted at the origin; Vicon markers live in world
-        # coordinates, so a per-frame translation must be fitted too.
-        transl = nn.Parameter(
-            torch.tensor(self._init_transl(target), device=self.device)
-        )
-        opt = torch.optim.Adam([betas, transl], lr=cfg.lr)
+        # coordinates, so a per-frame translation must be fitted too -- and so
+        # must the ORIENTATION. Forcing global_orient to zero here (as this
+        # stage used to) means betas are fitted against a residual that is
+        # mostly rotation: measured on P10's static, 50.3mm residual of which
+        # 53% vanishes under Kabsch alignment alone, with betas unchanged.
+        # Shape cannot represent a rotation, so the stage was driving betas
+        # with an error they are structurally unable to reduce -- the real
+        # reason this stage behaved as a no-op (betas returning ~0), rather
+        # than the w_shape/lr explanation recorded elsewhere.
+        init_go, init_tr = self._init_global_pose(target, np.zeros(10, dtype=np.float32))
+        global_orient = nn.Parameter(torch.tensor(init_go, device=self.device))
+        transl = nn.Parameter(torch.tensor(init_tr, device=self.device))
+        opt = torch.optim.Adam([
+            {"params": [betas], "lr": cfg.lr},
+            {"params": [global_orient], "lr": cfg.lr_orient},
+            {"params": [transl], "lr": cfg.lr},
+        ])
 
         betas_expand = betas.unsqueeze(0).expand(T, -1)
 
         for it in range(cfg.n_iters_shape):
             opt.zero_grad()
             out = self._model(
-                global_orient=torch.zeros(T, 3, device=self.device),
+                global_orient=global_orient,
                 hand_pose=torch.zeros(T, self._pose_dim(), device=self.device),
                 transl=transl,
                 betas=betas_expand,

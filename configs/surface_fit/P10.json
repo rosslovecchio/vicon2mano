@@ -1,0 +1,65 @@
+{
+  "_comment": [
+    "Surface-marker MANO fit for P10, calibrated on P10/static_trial.csv.",
+    "Markers are fitted to the MESH SURFACE, not to joint centres: a joint",
+    "centre is inside the hand, so the old objective necessarily buried every",
+    "marker under the skin.",
+    "",
+    "attach: marker -> MANO mesh vertex, hand-picked. Physical facts about",
+    "this subject's marker placement, so reused unchanged on their movement",
+    "trials rather than re-searched per frame. Thumb3 is deliberately NOT",
+    "pinned: vertex 708 sits on the middle thumb segment and the automatic",
+    "search finds thb-dist correctly (2.71mm vs 7.95mm pinned).",
+    "",
+    "protocol: <finger>1=MCP, 2=PIP, 3=base of nailbed; Thumb1~CMC, 2=MCP,",
+    "3=IP. This differs from core.correspondence._LABEL_HINTS, which maps",
+    "<finger>3 to the fingertip -- unreconciled, see CLAUDE.md."
+  ],
+  "side": "right",
+  "attach_file": "configs/surface_fit/P10_attach.json",
+  "params": {
+    "standoff": 3.0,
+    "icp_rounds": 5,
+    "staged": true,
+    "freeze_root": true,
+    "min_own_weight": 0.0,
+    "marker_init": true,
+    "biomech": 1.0,
+    "torsion_only": true,
+    "twist_weight": 10.0,
+    "w_pose": 0.0,
+    "w_smooth": 1.0,
+    "pca_comps": 45,
+    "no_pca": true,
+    "iters_thumb": 800,
+    "iters_finger": 800,
+    "iters_root": 0,
+    "iters_mv": 1500
+  },
+  "why_these": {
+    "staged + freeze_root": "fingers drag the root otherwise: palm+MCP alone place the hand to 2.6-6.4mm, but letting fingers vote on orient/transl pushes those same markers to 11-28mm",
+    "min_own_weight 0": "a non-zero value moves MCP markers onto finger-dependent skin, which breaks the root stage (it fits them while pose is still at its initial value)",
+    "marker_init": "without it the fit converges to a FLAT hand that scores well on the overall mean because 7 of 18 markers are root-determined; with it every joint articulates",
+    "torsion_only": "zero axial rotation. Load-bearing, not cosmetic: with torsion free the optimiser satisfies the nailbed marker by twisting instead of flexing, leaving the PIP slack and the MCP over-rotated. Pinning it fixed the index split (PIP 26.6 -> 34.8 against a measured 34.7).",
+    "biomech flexion/abduction bounds": "left OFF (--torsion-only). Not yet shown to help; test separately.",
+    "iters_thumb / iters_finger": "per-chain stages: with the root frozen each finger is an independent kinematic chain, so fitting them one at a time is mathematically equivalent but differs in optimisation dynamics -- and that matters. FINGERS 9.54 -> 7.95 (thumb stage) -> 6.65 (per-finger), and unlike every other gain this one did NOT drift the joint angles: index1 44.2 against a measured 42.7, index2 34.8 against 34.7.",
+    "iters_root": "left at 0 (root_frac). Converging the root fully helps palm+MCP (10.28 -> 8.77mm) but costs the fingers (9.54 -> 10.74) and over-rotates the knuckles: middle1 38.4 -> 57.5 deg against a measured 30.2."
+  },
+  "movement_result_pinch_window_31063_31263": {
+    "overall_mm": 8.31,
+    "palm_mcp_mm": 10.38,
+    "fingers_mm": 6.65,
+    "per_chain_mm": {
+      "thumb": 14.82,
+      "index": 9.1,
+      "middle": 7.35,
+      "ring": 6.26,
+      "pinky": 4.44
+    },
+    "worst_markers": {
+      "Thumb1_mm": 22.43,
+      "Palm2_mm": 17.18
+    },
+    "note": "judge FINGERS, not the overall mean -- palm+MCP markers are satisfied by the root transform alone and reward a hand that never articulates. Cross-check against the marker-measured flexion angles, which residual alone can disagree with."
+  }
+}
