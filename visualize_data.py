@@ -25,12 +25,14 @@ for p in (REPO_ROOT, REPO_ROOT / "scripts"):
         sys.path.insert(0, str(p))
 
 from vicon2mano.core.loader import load_csv
+from vicon2mano.core.dataset import DATA_ROOT, REF_CSV, TRIAL_MAP_CSV
 from vicon2mano.strategies.cascade import quality_cascade as lmq
 
 # %% Configuration
-DATA_ROOT = Path(r"D:\ExperimentsJune25")
-REF_CSV = DATA_ROOT / "manual_frames.csv"
-TRIAL_MAP_CSV = DATA_ROOT / "trial_filename_map.csv"
+# DATA_ROOT/REF_CSV/TRIAL_MAP_CSV come from vicon2mano.core.dataset, the one
+# place that path is defined, rather than being re-hardcoded here -- this
+# used to say D:\ExperimentsJune25 verbatim, which went stale (and silently
+# wrong, not missing) when the data moved to OneDrive.
 # Either an explicit list, or ["all"] for every participant that has rows
 # in manual_frames.csv (resolved by _resolve_participants below).
 PARTICIPANTS = ["all"]  # e.g. ["P7", "P8"] to narrow it down
@@ -233,7 +235,9 @@ manual_sessions = load_manual_trial_sessions(REF_CSV)
 participants = _resolve_participants(PARTICIPANTS, manual_sessions)
 
 for participant in participants:
-    participant_dir = DATA_ROOT / participant / participant
+    # Flat layout under the current (OneDrive) DATA_ROOT: DATA_ROOT/P10/*.csv,
+    # not the old D:\ExperimentsJune25\P10\P10\*.csv double nesting.
+    participant_dir = DATA_ROOT / participant
     # manual_frames.csv's CSV-name column is the only source for trial
     # slots — its cell + ".csv" is the filename. find_trial_files' keyword
     # guess is used *only* to locate the extra "static" bone-length

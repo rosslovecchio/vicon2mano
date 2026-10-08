@@ -28,7 +28,7 @@
                 // (find_trial_csv) when neither --csv nor --c3d is given --
                 // the same lookup gmm/mano's relabel_trial.py scripts use.
                 "--ref-csv",
-                "D:/ExperimentsJune25/manual_frames.csv",
+                "C:/Users/RL000009/OneDrive - Vrije Universiteit Brussel/A-Skills/data_June25/manual_frames.csv",
                 // --out omitted too: defaults to
                 // results/cascade/{participant}_{trial}_quality_cascade.csv
                 "--participant",
@@ -53,7 +53,7 @@
                 "--weights",
                 "vicon2mano/weights/deep_labeler.pt",
                 "--real-data",
-                "D:/ExperimentsJune25/P7/P7/Trial1_handsonly.csv",
+                "C:/Users/RL000009/OneDrive - Vrije Universiteit Brussel/A-Skills/data_June25/P7/Trial1_handsonly.csv",
                 "--out-dir",
                 "vicon2mano/eval/deep_labeler"
             ]

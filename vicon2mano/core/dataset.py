@@ -359,22 +359,26 @@ def find_trial_csv(participant: str, trial: str
     static recording is trustworthy for the hand but not the forearm (see
     :data:`MANO_ONLY_STATIC`).
 
-    The trial itself comes from manual_frames.csv: its "Session" column is
-    the trial's identity and "CSV name" + ".csv" is the file. This used to
-    read trial_filename_map.csv, which only covered 34 of 66 trials -- P1-P6
-    and P17 were absent, so ``--all`` silently skipped them. The map remains
-    the source for *statics*, which the log does not track.
+    Both the trial and the static come from manual_frames.csv: its
+    "Session" column is the identity (a static recording gets its own row
+    there, ``Session == "Static"``, like any other trial) and "CSV name" +
+    ".csv" is the file -- "Static" is matched case-insensitively via the
+    same lookup as any other trial name, no special-casing needed. This
+    used to read trial_filename_map.csv for the trial (only covered 34 of
+    66 trials -- P1-P6 and P17 were absent, so ``--all`` silently skipped
+    them) and, separately, for the static (a "static" entry keyed by
+    filename). Both are now manual_frames.csv rows; trial_filename_map.csv
+    is no longer consulted here, which matters in practice: it does not
+    exist at all under the current (OneDrive) ``DATA_ROOT``, so the old
+    static lookup was silently returning ``None`` for every participant.
     """
     pdir = DATA_ROOT / participant
     sessions = load_trial_sessions(REF_CSV).get(participant, {})
     csv_name = sessions.get(trial)
     trial_path = find_session_file(pdir, csv_name) if csv_name else None
 
-    overrides = load_trial_map(TRIAL_MAP_CSV)
-    static_path = None
-    for c in sorted(pdir.glob("*.csv")):
-        if overrides.get((participant, c.name.lower())) == "static":
-            static_path = c
+    static_csv_name = sessions.get("Static") or sessions.get("static")
+    static_path = find_session_file(pdir, static_csv_name) if static_csv_name else None
 
     mano_static = static_path
     extra = MANO_ONLY_STATIC.get(participant)
@@ -406,9 +410,14 @@ def find_static_csv(participant: str) -> Path | None:
     second file tracking exactly the same fact by filename instead of by
     manual_frames.csv row -- redundant, and it no longer exists at the
     current ``DATA_ROOT`` at all, so that path always returned ``None``.
+
+    ``find_trial_csv`` now resolves its own static return value (second
+    element) the same way regardless of which ``trial`` it's asked about,
+    so this is just that -- the ``trial`` argument passed to it here only
+    needs to be *some* valid call, not literally "Static".
     """
-    trial_path, _static_path, _mano_static = find_trial_csv(participant, "Static")
-    return trial_path
+    _trial_path, static_path, _mano_static = find_trial_csv(participant, "")
+    return static_path
 
 
 # A manually-labelled export lives alongside its raw trial, named by

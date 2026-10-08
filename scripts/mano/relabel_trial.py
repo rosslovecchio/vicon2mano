@@ -70,13 +70,19 @@ for _p in (REPO_ROOT, Path(__file__).resolve().parent):
         sys.path.insert(0, str(_p))
 
 from vicon2mano.core.loader import load_csv                      # noqa: E402
+from vicon2mano.core.dataset import (                             # noqa: E402
+    REF_CSV, MANO_DIR, auto_reference, find_trial_csv,
+)
 from vicon2mano.strategies.mano import relabel as mr                   # noqa: E402
 from vicon2mano.strategies.cascade import quality_cascade as lmq
 
-DATA_ROOT = Path(r"D:\ExperimentsJune25")
-REF_CSV = DATA_ROOT / "manual_frames.csv"
-TRIAL_MAP_CSV = DATA_ROOT / "trial_filename_map.csv"
-MANO_DIR = REPO_ROOT.parent / "clean_kinematics" / "mano_v1_2" / "models"
+# REF_CSV/MANO_DIR, and find_trial_csv/auto_reference below, come from
+# vicon2mano.core.dataset -- the one place these are defined -- rather than
+# being duplicated here, which had drifted: this file's own copies still
+# used D:\ExperimentsJune25's double-nested participant/participant layout
+# and trial_filename_map.csv-based static lookup, both stale (silently
+# wrong, not missing -- static resolution always returned None) once the
+# data moved to the flat-layout OneDrive location.
 # Default output home; override with --out-dir. "pass1" is the first full
 # relabelling sweep over every trial in manual_frames.csv.
 OUT_DIR = REPO_ROOT / "results" / "mano"
@@ -117,87 +123,6 @@ def marker_digit(label: str) -> str:
         if ch.isdigit():
             return ch
     return ""
-
-
-def load_trial_map(path: Path) -> dict[tuple[str, str], str]:
-    mapping: dict[tuple[str, str], str] = {}
-    if not path.exists():
-        return mapping
-    with path.open(newline="", encoding="utf-8-sig") as f:
-        for row in csv_mod.DictReader(f):
-            p = (row.get("participant") or "").strip()
-            fn = (row.get("filename") or "").strip()
-            key = (row.get("trial_key") or "").strip()
-            if p and fn:
-                mapping[(p, fn.lower())] = key
-    return mapping
-
-
-# Static recordings that are usable for MANO calibration but NOT as the
-# cascade's bone-length reference. P9's static was taken after a Forearm
-# marker fell off and was reattached, so its forearm-plate geometry no longer
-# matches the trials — folding it into the cascade reference collapsed 3 of
-# P9's 4 trials to 0% correct, and it is deliberately left unmapped in
-# trial_filename_map.csv for that reason. MANO calibration only ever touches
-# the 16 *hand* markers (MANO has no forearm), so the forearm disturbance is
-# irrelevant there and the file is still a valid shape/offset source.
-MANO_ONLY_STATIC = {
-    "P9": "static_after_forerm1_fall.csv",
-}
-
-
-def find_trial_csv(participant: str, trial: str) -> tuple[Path | None, Path | None, Path | None]:
-    """Return (trial csv, cascade-static csv, mano-calibration-static csv).
-
-    The two statics are usually the same file; they differ only where a
-    static recording is trustworthy for the hand but not for the forearm
-    (see MANO_ONLY_STATIC).
-    """
-    pdir = DATA_ROOT / participant / participant
-
-    # The trial itself comes from manual_frames.csv: its "Session" column is
-    # the trial's identity and "CSV name" + ".csv" is the file. This used to
-    # read trial_filename_map.csv, which only ever covered 34 of the 66
-    # trials — P1-P6 and P17 were absent entirely, so --all silently skipped
-    # them. The map is still the source for *statics*, which the log does
-    # not track, and it still carries the curation described in
-    # MANO_ONLY_STATIC below.
-    sessions = lmq.load_trial_sessions(REF_CSV).get(participant, {})
-    csv_name = sessions.get(trial)
-    trial_path = lmq.find_session_file(pdir, csv_name) if csv_name else None
-
-    overrides = load_trial_map(TRIAL_MAP_CSV)
-    static_path = None
-    for c in sorted(pdir.glob("*.csv")):
-        if overrides.get((participant, c.name.lower())) == "static":
-            static_path = c
-
-    mano_static = static_path
-    extra = MANO_ONLY_STATIC.get(participant)
-    if extra is not None:
-        cand = pdir / extra
-        if cand.exists():
-            mano_static = cand
-    return trial_path, static_path, mano_static
-
-
-def auto_reference(markers: np.ndarray, need: int = 300) -> np.ndarray:
-    present = np.isfinite(markers).all(axis=(1, 2))
-    runs, start = [], None
-    for t, ok in enumerate(present):
-        if ok and start is None:
-            start = t
-        elif not ok and start is not None:
-            runs.append((start, t)); start = None
-    if start is not None:
-        runs.append((start, len(present)))
-    runs.sort(key=lambda r: r[1] - r[0], reverse=True)
-    idx: list[int] = []
-    for a, b in runs:
-        idx.extend(range(a, b))
-        if len(idx) >= need:
-            break
-    return np.array(sorted(idx), dtype=int)
 
 
 def relabel_trial(participant: str, trial: str, *, min_correct_pct: float,
