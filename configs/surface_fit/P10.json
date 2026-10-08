@@ -25,7 +25,7 @@
     "min_own_weight": 0.0,
     "marker_init": true,
     "biomech": 1.0,
-    "torsion_only": true,
+    "torsion_only": false,
     "twist_weight": 10.0,
     "w_pose": 0.0,
     "w_smooth": 1.0,
@@ -34,7 +34,10 @@
     "iters_thumb": 800,
     "iters_finger": 800,
     "iters_root": 0,
-    "iters_mv": 1500
+    "iters_mv": 1500,
+    "free_flexion": true,
+    "stretch_file": "configs/surface_fit/P10_stretch.json",
+    "stretch_gate": 45.0
   },
   "why_these": {
     "staged + freeze_root": "fingers drag the root otherwise: palm+MCP alone place the hand to 2.6-6.4mm, but letting fingers vote on orient/transl pushes those same markers to 11-28mm",
@@ -43,23 +46,19 @@
     "torsion_only": "zero axial rotation. Load-bearing, not cosmetic: with torsion free the optimiser satisfies the nailbed marker by twisting instead of flexing, leaving the PIP slack and the MCP over-rotated. Pinning it fixed the index split (PIP 26.6 -> 34.8 against a measured 34.7).",
     "biomech flexion/abduction bounds": "left OFF (--torsion-only). Not yet shown to help; test separately.",
     "iters_thumb / iters_finger": "per-chain stages: with the root frozen each finger is an independent kinematic chain, so fitting them one at a time is mathematically equivalent but differs in optimisation dynamics -- and that matters. FINGERS 9.54 -> 7.95 (thumb stage) -> 6.65 (per-finger), and unlike every other gain this one did NOT drift the joint angles: index1 44.2 against a measured 42.7, index2 34.8 against 34.7.",
-    "iters_root": "left at 0 (root_frac). Converging the root fully helps palm+MCP (10.28 -> 8.77mm) but costs the fingers (9.54 -> 10.74) and over-rotates the knuckles: middle1 38.4 -> 57.5 deg against a measured 30.2."
+    "iters_root": "left at 0 (root_frac). Converging the root fully helps palm+MCP (10.28 -> 8.77mm) but costs the fingers (9.54 -> 10.74) and over-rotates the knuckles: middle1 38.4 -> 57.5 deg against a measured 30.2.",
+    "free_flexion": "bound ABDUCTION and torsion, leave flexion free. Flexion genuinely needs range beyond textbook (markers show MCP flexion to 128 deg) and bounding it collapsed the fingers. Abduction does not: p99 is 22-24 deg, at the anatomical limit, but maxima reached 66-100 deg -- the optimiser splaying a finger sideways THROUGH its neighbour to reach a marker (fingertips out of order in 8.8% of frames, index crossing middle in 1.5%). Bounding it IMPROVED everything: fingers 6.65 -> 5.82mm on the pinch window and 20.11 -> 18.86 on the fist window. Same lesson as torsion -- removing a DOF the hand does not have helps rather than costs.",
+    "stretch_gate": "flexion-dependent marker slide, applied only above 45 deg. Markers are on the dorsum and the skin there stretches ~20% over a flexing knuckle (correlation +0.80..+0.85, palm control +0.22), which a fixed-vertex attachment cannot follow. Worth 0.9mm near a fist, costs 0.5mm at low flexion where the correction is ~1mm and loses to noise -- hence the gate."
   },
   "movement_result_pinch_window_31063_31263": {
-    "overall_mm": 8.31,
-    "palm_mcp_mm": 10.38,
-    "fingers_mm": 6.65,
-    "per_chain_mm": {
-      "thumb": 14.82,
-      "index": 9.1,
-      "middle": 7.35,
-      "ring": 6.26,
-      "pinky": 4.44
-    },
-    "worst_markers": {
-      "Thumb1_mm": 22.43,
-      "Palm2_mm": 17.18
-    },
-    "note": "judge FINGERS, not the overall mean -- palm+MCP markers are satisfied by the root transform alone and reward a hand that never articulates. Cross-check against the marker-measured flexion angles, which residual alone can disagree with."
+    "overall_mm": 6.8,
+    "palm_mcp_mm": 8.02,
+    "fingers_mm": 5.82
+  },
+  "movement_result_fist_window_7930_8130": {
+    "overall_mm": 14.83,
+    "palm_mcp_mm": 9.68,
+    "fingers_mm": 18.86,
+    "note": "high-flexion poses fit ~3x worse than the pinch window in every configuration tried; this is the dominant remaining error and is not yet explained."
   }
 }

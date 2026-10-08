@@ -1,0 +1,67 @@
+{
+  "_comment": [
+    "Flexion-dependent marker slide, calibrated on P10/Trial2_handsonly.",
+    "",
+    "Markers are taped to the dorsum, and the dorsal surface over a flexed",
+    "knuckle is longer than over an extended one, so a marker slides DISTALLY",
+    "along its segment as the governing joint flexes. Measured over the whole",
+    "trial: MCP->PIP marker spacing grows 7-10mm (~20%) from extension to full",
+    "flexion, correlating +0.80..+0.85 with flexion angle, while the palm",
+    "control grows 1.3mm (+0.22). Bone cannot lengthen; this is skin.",
+    "",
+    "A fixed-vertex attachment cannot represent that -- the marker does stay",
+    "at a fixed material point on real skin, but MANO's linear blend skinning",
+    "does not reproduce how far that skin slides over a flexing joint. Hence",
+    "the residual pattern: middle/ring MCPs over-rotate ~20 deg to reach",
+    "markers that separated more than the mesh stretches, and finger-3 markers",
+    "(furthest along the chain, accumulating every segment's stretch) sit",
+    "13-20mm out even in otherwise good frames.",
+    "",
+    "slope_mm_per_deg: distal slide along the segment per degree of flexion of",
+    "the governing joint. r2 is from the linear fit used to derive it -- the",
+    "finger-2 markers are well modelled (0.64-0.73), the finger-3 markers are",
+    "not (0.06-0.43), so expect this to do real work only on finger 2.",
+    "Ring3 at r2=0.06 is noise and is left at zero.",
+    "ref_deg: the flexion ALREADY PRESENT in the static, which is where the attachments were calibrated. The static is not an extended hand -- it carries 19-28 deg of MCP flexion -- so the slide must be applied relative to this, not from zero. Applying it from zero double-counts the stretch already baked into the attachment and made the fit worse (fingers 6.65 -> 8.36mm), which is how this was found."
+  ],
+  "governing": {
+    "Index2": "index_mcp",
+    "Index3": "index_pip",
+    "Middle2": "middle_mcp",
+    "Middle3": "middle_pip",
+    "Ring2": "ring_mcp",
+    "Ring3": "ring_pip",
+    "Pinky2": "pinky_mcp",
+    "Pinky3": "pinky_pip"
+  },
+  "slope_mm_per_deg": {
+    "Index2": 0.1409,
+    "Middle2": 0.1302,
+    "Ring2": 0.1075,
+    "Pinky2": 0.1069,
+    "Index3": 0.0673,
+    "Middle3": 0.0552,
+    "Pinky3": 0.0404,
+    "Ring3": 0.0
+  },
+  "r2": {
+    "Index2": 0.73,
+    "Middle2": 0.64,
+    "Ring2": 0.66,
+    "Pinky2": 0.64,
+    "Index3": 0.43,
+    "Middle3": 0.26,
+    "Pinky3": 0.21,
+    "Ring3": 0.06
+  },
+  "ref_deg": {
+    "Index2": 28.31,
+    "Index3": 11.26,
+    "Middle2": 27.11,
+    "Middle3": 7.24,
+    "Ring2": 19.53,
+    "Ring3": 9.65,
+    "Pinky2": 26.86,
+    "Pinky3": 2.43
+  }
+}

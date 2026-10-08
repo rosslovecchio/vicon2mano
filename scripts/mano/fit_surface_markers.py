@@ -307,7 +307,7 @@ _LIMITS_BASIS = {
 }
 
 
-def basis_limit_bounds(torsion_only=False):
+def basis_limit_bounds(torsion_only=False, free_flexion=False):
     """(15,3) lo/hi in the measured per-joint basis."""
     lo = np.zeros((15, 3), np.float32)
     hi = np.zeros((15, 3), np.float32)
@@ -316,7 +316,17 @@ def basis_limit_bounds(torsion_only=False):
             "mcp" if name.endswith("1") else "pip" if name.endswith("2") else "dip")
         for c in range(3):
             lo[ji, c], hi[ji, c] = _LIMITS_BASIS[key][c]
-    if torsion_only:
+    if free_flexion:
+        # Bound abduction and torsion, leave FLEXION unbounded. Flexion
+        # genuinely needs range beyond textbook (markers show MCP flexion up
+        # to 128 deg here) and bounding it collapsed the fingers. Abduction
+        # does not: measured on the whole trial its p99 is 22-24 deg, right at
+        # the anatomical limit, but the maxima reach 66-100 deg -- the
+        # optimiser splaying a finger sideways THROUGH its neighbour to reach
+        # a marker. Fingertips come out in the wrong order in 8.8% of frames
+        # and the index crosses the middle in 1.5%.
+        lo[:, 0], hi[:, 0] = -10.0, 10.0      # flexion: unbounded
+    elif torsion_only:
         # Keep ONLY the zero-torsion constraint; open the flexion and
         # abduction bounds wide. Measured: applying all three together
         # collapsed the middle finger's PIP/DIP back to the extension bound
@@ -399,6 +409,63 @@ def angles_from_markers(mk, names, Bmat):
             ji = jbase + off
             hp[:, ji * 3:ji * 3 + 3] = th[:, None] * Bmat[ji, :, 0][None, :]
     return hp
+
+
+# marker-name suffix -> (governing joint index in _FINGER_JOINTS,
+#                        proximal repo joint, distal repo joint of its segment)
+_STRETCH_SEG = {
+    "Index2": (0, 5, 6), "Index3": (1, 6, 7),
+    "Middle2": (3, 9, 10), "Middle3": (4, 10, 11),
+    "Pinky2": (6, 17, 18), "Pinky3": (7, 18, 19),
+    "Ring2": (9, 13, 14), "Ring3": (10, 14, 15),
+}
+
+
+def stretch_offsets(J21, hp, Bt, names, slopes, ref_deg=None, gate=45.0):
+    """Distal slide of each attachment, as a function of fitted flexion.
+
+    A marker is taped to one material point of skin, but the dorsal surface
+    over a flexed knuckle is longer than over an extended one, so that point
+    travels distally along the segment as the joint flexes. Measured on
+    P10/Trial2: MCP->PIP marker spacing grows 7-10mm (~20%) from extension to
+    full flexion, correlating +0.80..+0.85 with flexion, while the palm
+    control grows 1.3mm. MANO's linear blend skinning does not reproduce that,
+    so a FIXED attachment is structurally unable to follow the marker.
+
+    Returns (T, P, 3) metres to add to each attachment point: the calibrated
+    slope times the joint's current flexion, along the segment's own axis.
+    Differentiable in the pose, so the slide tracks the fit rather than being
+    baked in from a prior estimate.
+    """
+    import torch
+    T = J21.shape[0]
+    off = torch.zeros((T, len(names), 3), device=J21.device, dtype=J21.dtype)
+    hpj = hp.view(T, 15, 3)
+    for k, nm in enumerate(names):
+        if nm not in _STRETCH_SEG or not slopes.get(nm):
+            continue
+        ji, a, b = _STRETCH_SEG[nm]
+        # flexion of the governing joint, in degrees, from the measured basis
+        th = torch.einsum("tk,k->t", hpj[:, ji], Bt[ji, :, 0]) * (180.0 / np.pi)
+        # relative to the flexion already present in the static, where the
+        # attachment was calibrated -- the static is NOT an extended hand
+        # (19-28 deg of MCP flexion), so measuring the slide from zero
+        # double-counts the stretch the attachment already encodes
+        if ref_deg:
+            th = th - float(ref_deg.get(nm, 0.0))
+        if gate > 0:
+            # Gated: no correction below `gate` degrees of flexion. Measured
+            # both ways -- the slide helps where the stretch actually exists
+            # (fist window, fingers 21.01 -> 20.11mm) and hurts where it does
+            # not (pinch window, 6.65 -> 7.14), because there the correction is
+            # ~1mm and competes with noise. The static's own flexion (19-28 deg)
+            # sits below the gate, so relu(ref - gate) is zero and the
+            # reference subtraction above is left undisturbed.
+            th = torch.relu(th + float(ref_deg.get(nm, 0.0)) - gate)
+        u = J21[:, b] - J21[:, a]
+        u = u / torch.sqrt((u ** 2).sum(-1, keepdim=True) + 1e-18)
+        off[:, k] = (slopes[nm] * 1e-3 * th).unsqueeze(-1) * u
+    return off
 
 
 def onehot_attachment(F, vid):
@@ -606,6 +673,15 @@ def main() -> None:
                      help="attachment faces must have normal.dorsal above this. "
                           "0 = any face on the back half; raise it to insist on "
                           "faces squarely facing the back.")
+    ap.add_argument("--stretch", default=None,
+                     help="JSON of flexion-dependent marker slide (see "
+                          "configs/surface_fit/P10_stretch.json). Lets each "
+                          "attachment travel distally along its segment as the "
+                          "joint flexes, which is what the skin actually does.")
+    ap.add_argument("--stretch-gate", type=float, default=45.0,
+                     help="degrees of flexion below which no slide is applied. "
+                          "The correction is worth ~1mm at low flexion and "
+                          "loses to noise there; it is worth 7-10mm near a fist.")
     ap.add_argument("--attach", default=None,
                      help='JSON mapping marker name -> mesh vertex id, e.g. '
                           '{"Index2": 237, "Middle2": 396}. Either inline JSON '
@@ -638,6 +714,10 @@ def main() -> None:
     ap.add_argument("--staged", action="store_true",
                      help="root-first: solve global orient/transl from the palm "
                           "and MCP markers alone, then fit the fingers")
+    ap.add_argument("--free-flexion", action="store_true",
+                     help="bound abduction and torsion but NOT flexion. Stops "
+                          "fingers splaying through each other without "
+                          "re-imposing flexion limits that collapse them.")
     ap.add_argument("--torsion-only", action="store_true",
                      help="apply ONLY the zero-torsion constraint, leaving "
                           "flexion and abduction unbounded")
@@ -789,7 +869,7 @@ def main() -> None:
     if fitter._pose_dim() == 45:
         Bmat = joint_axis_basis(model, dev, fitter._pose_dim())
         Bt = torch.tensor(Bmat, device=dev)
-        _lo, _hi = basis_limit_bounds(args.torsion_only)
+        _lo, _hi = basis_limit_bounds(args.torsion_only, args.free_flexion)
         jl_lo = torch.tensor(_lo, device=dev)
         jl_hi = torch.tensor(_hi, device=dev)
     if args.biomech <= 0:
@@ -829,6 +909,18 @@ def main() -> None:
     V0 = out.vertices[k0].cpu().numpy() * 1000
     mk0 = st[sf[k0]][[mi for _, mi in pairs]]
     surface_report(V0, F, mk0, names, "stage 1 (joint-centre fit, what static_fit.html shows)")
+
+    # ---- flexion-dependent slide -----------------------------------------
+    slopes: dict[str, float] = {}
+    ref_deg: dict[str, float] = {}
+    if args.stretch:
+        import json as _json
+        _sd = _json.loads(Path(args.stretch).read_text())
+        slopes = {k: float(v) for k, v in _sd.get("slope_mm_per_deg", {}).items()}
+        ref_deg = {k: float(v) for k, v in _sd.get("ref_deg", {}).items()}
+        used = {k: v for k, v in slopes.items() if v}
+        print(f"flexion-dependent slide for {len(used)} markers: "
+              + ", ".join(f"{k} {v:.3f}mm/deg" for k, v in sorted(used.items())))
 
     # ---- parse hand-picked attachments ---------------------------------
     pinned: dict[str, int] = {}
@@ -1187,6 +1279,11 @@ def main() -> None:
                     nr = torch.cross(Vt[:, :, 1] - Vt[:, :, 0],
                                      Vt[:, :, 2] - Vt[:, :, 0], dim=-1)
                     nr = nr / torch.sqrt((nr ** 2).sum(-1, keepdim=True) + 1e-18)
+                    if slopes and Bt is not None:
+                        Jc = mano_output_to_joints21(om)
+                        P = P + stretch_offsets(Jc, hp_m, Bt,
+                                                [names[q] for q in ch_k], slopes,
+                                                ref_deg, args.stretch_gate)
                     dt = (P + args.standoff * 1e-3 * nr
                           - Mm_s[:, ch_k])[mmk[:, ch_k]]
                     lt = (dt ** 2).sum(-1).mean()
@@ -1224,6 +1321,10 @@ def main() -> None:
                 nrm = torch.cross(Vt[:, :, 1] - Vt[:, :, 0],
                                   Vt[:, :, 2] - Vt[:, :, 0], dim=-1)
                 nrm = nrm / torch.sqrt((nrm ** 2).sum(-1, keepdim=True) + 1e-18)
+                if slopes and Bt is not None:
+                    Jc = mano_output_to_joints21(om)
+                    P = P + stretch_offsets(Jc, hp_m, Bt, names, slopes, ref_deg,
+                                            args.stretch_gate)
                 dd = (P + args.standoff * 1e-3 * nrm - Mm_s)[mmk]
                 inw = torch.relu(-((Mm_s - P) * nrm).sum(-1))[mmk]
                 loss = (dd ** 2).sum(-1).mean() + args.w_inside * (inw ** 2).mean()
@@ -1269,6 +1370,20 @@ def main() -> None:
                 Vall.append(om.vertices.cpu().numpy() * 1000)
         Vm_all = np.concatenate(Vall)
         Pm = (Vm_all[:, F[fid]] * bary[None, :, :, None]).sum(2)
+        if slopes and Bmat is not None:
+            with torch.no_grad():
+                _J = torch.tensor(np.concatenate([
+                    mano_output_to_joints21(model(
+                        global_orient=torch.tensor(GO[sl0], device=dev),
+                        hand_pose=torch.tensor(HP[sl0], device=dev),
+                        transl=torch.tensor(TR[sl0], device=dev),
+                        betas=betas_f.unsqueeze(0).expand(sl0.stop - sl0.start, -1),
+                        return_verts=True)).cpu().numpy()
+                    for sl0 in [slice(ci * chunk, min((ci + 1) * chunk, len(mf)))
+                                for ci in range(n_chunks)]]), device=dev)
+                Pm = Pm + stretch_offsets(
+                    _J, torch.tensor(HP, device=dev), Bt, names, slopes, ref_deg,
+                    args.stretch_gate).cpu().numpy() * 1000
         per = np.linalg.norm(Pm - mv[mf][:, cols], axis=-1)
         print("\n--- movement: per-marker mean distance to its attached point ---")
         for kk, nm in enumerate(names):

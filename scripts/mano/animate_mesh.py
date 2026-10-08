@@ -54,6 +54,27 @@ for _attr, _builtin in {"int": int, "float": float, "bool": bool, "complex": com
 
 from vicon2mano.core.loader import load_csv
 
+# Segments of the MARKER SET itself -- the chains the Vicon labels describe,
+# drawn so the markers read as a hand rather than a cloud of dots. This is
+# raw measured geometry, independent of the fitted model: where a bone and
+# the mesh disagree, that is the fit's error made visible.
+_MARKER_BONES = [
+    ("Palm1", "Palm2"), ("Palm2", "Palm3"), ("Palm3", "Palm1"),
+    ("Palm2", "Thumb1"), ("Thumb1", "Thumb2"), ("Thumb2", "Thumb3"),
+    ("Palm2", "Index1"), ("Index1", "Index2"), ("Index2", "Index3"),
+    ("Palm2", "Middle1"), ("Middle1", "Middle2"), ("Middle2", "Middle3"),
+    ("Palm2", "Ring1"), ("Ring1", "Ring2"), ("Ring2", "Ring3"),
+    ("Palm2", "Pinky1"), ("Pinky1", "Pinky2"), ("Pinky2", "Pinky3"),
+    ("Index1", "Middle1"), ("Middle1", "Ring1"), ("Ring1", "Pinky1"),
+]
+
+
+def marker_bone_pairs(labels):
+    """(i, j) index pairs for _MARKER_BONES present in this label set."""
+    idx = {l: i for i, l in enumerate(labels)}
+    return [(idx[a], idx[b]) for a, b in _MARKER_BONES
+            if a in idx and b in idx]
+
 _HTML_TEMPLATE = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -116,6 +137,7 @@ const facesI = {faces_i};
 const facesJ = {faces_j};
 const facesK = {faces_k};
 const markerLabels = {marker_labels};
+const bonePairs = {bone_pairs};   // index pairs into the marker array
 const center = {center};
 const half = {half};
 
@@ -124,6 +146,20 @@ function frameSlice(flat, nPts, k) {{
   const x = new Array(nPts), y = new Array(nPts), z = new Array(nPts);
   for (let p = 0; p < nPts; p++) {{
     x[p] = flat[off + p * 3]; y[p] = flat[off + p * 3 + 1]; z[p] = flat[off + p * 3 + 2];
+  }}
+  return {{x, y, z}};
+}}
+
+// One polyline per bone, separated by nulls so Plotly breaks the line
+// between segments instead of joining them end to end.
+function boneCoords(m) {{
+  const x = [], y = [], z = [];
+  for (const [ia, ib] of bonePairs) {{
+    const ax = m.x[ia], bx = m.x[ib];
+    if (!isFinite(ax) || !isFinite(bx)) continue;
+    x.push(m.x[ia], m.x[ib], null);
+    y.push(m.y[ia], m.y[ib], null);
+    z.push(m.z[ia], m.z[ib], null);
   }}
   return {{x, y, z}};
 }}
@@ -144,7 +180,13 @@ function updatePlotly(k) {{
       marker: {{size: 4, color: "#2c3e50"}},
       text: markerLabels, hoverinfo: "text",
     }};
-    Plotly.newPlot(meshDiv, [meshTrace, markerTrace], {{
+    const b = boneCoords(m);
+    const boneTrace = {{
+      type: "scatter3d", mode: "lines", x: b.x, y: b.y, z: b.z,
+      line: {{color: "#16a34a", width: 3}}, hoverinfo: "skip",
+      name: "marker bones",
+    }};
+    Plotly.newPlot(meshDiv, [meshTrace, markerTrace, boneTrace], {{
       scene: {{
         xaxis: {{range: [center[0]-half, center[0]+half], title: "X (mm)"}},
         yaxis: {{range: [center[1]-half, center[1]+half], title: "Y (mm)"}},
@@ -156,7 +198,10 @@ function updatePlotly(k) {{
     }}, {{displaylogo: false}});
     plotlyInited = true;
   }} else {{
-    Plotly.restyle(meshDiv, {{x: [v.x, m.x], y: [v.y, m.y], z: [v.z, m.z]}}, [0, 1]);
+    const b2 = boneCoords(m);
+    Plotly.restyle(meshDiv,
+      {{x: [v.x, m.x, b2.x], y: [v.y, m.y, b2.y], z: [v.z, m.z, b2.z]}},
+      [0, 1, 2]);
   }}
 }}
 
@@ -211,7 +256,7 @@ show(0); play();
 
 
 def _write_html(frames_b64, n_frames, playback_fps, verts_mm, markers_mm, faces,
-                 marker_labels, center, half, out: Path) -> None:
+                 marker_labels, center, half, out: Path, bone_pairs=()) -> None:
     """Write the hybrid player: baked JPEGs for real-time Play/scrub, plus a
     live Plotly Mesh3d of the current frame for free rotation while paused
     ("Inspect"). Embeds plotly.js inline (``get_plotlyjs()``) so the page
@@ -238,6 +283,7 @@ def _write_html(frames_b64, n_frames, playback_fps, verts_mm, markers_mm, faces,
         faces_j=json.dumps(faces[:, 1].tolist()),
         faces_k=json.dumps(faces[:, 2].tolist()),
         marker_labels=json.dumps(list(marker_labels)),
+        bone_pairs=json.dumps(bone_pairs),
         center=json.dumps([float(c) for c in center]),
         half=float(half),
     ), encoding="utf-8")
@@ -352,6 +398,8 @@ def main() -> None:
 
     fig = plt.figure(figsize=(8, 7))
     ax = fig.add_subplot(111, projection="3d")
+    bone_pairs = marker_bone_pairs(labels)
+    print(f"[animate_mesh] drawing {len(bone_pairs)} marker bones")
     frames_b64 = []
     for k in range(len(frame_idx)):
         ax.clear()
@@ -373,6 +421,10 @@ def main() -> None:
                          antialiased=False, alpha=0.95)
         m = sampled_markers[k]
         finite = np.isfinite(m).all(axis=-1)
+        for ia, ib in bone_pairs:
+            if finite[ia] and finite[ib]:
+                ax.plot([m[ia, 0], m[ib, 0]], [m[ia, 1], m[ib, 1]],
+                        [m[ia, 2], m[ib, 2]], c="#16a34a", lw=1.4)
         if finite.any():
             ax.scatter(*m[finite].T, c="#2c3e50", s=22, depthshade=False)
         ax.set_xlim(center[0] - half, center[0] + half)
@@ -393,7 +445,7 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"[animate_mesh] writing hybrid HTML player ({len(frame_idx)} frames)...")
     _write_html(frames_b64, len(frame_idx), playback_fps, verts_mm, sampled_markers,
-                faces, labels, center, half, out_path)
+                faces, labels, center, half, out_path, bone_pairs)
     print(f"[animate_mesh] saved {out_path} ({out_path.stat().st_size / 1e6:.1f} MB)")
 
 
