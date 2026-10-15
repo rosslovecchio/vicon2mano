@@ -98,6 +98,44 @@ def main():
           ", ".join(f"{nr[c]} {100*dv[:, c].sum()/max(pres[:, c].sum(), 1):.1f}%"
                     for c in np.argsort(-dv.sum(0))[:6] if dv[:, c].any()))
 
+    # ---- label-free: finger segments must keep their length under correct
+    # labels; another finger's marker in a slot stretches or shrinks them.
+    # Share of frames within +-6mm of that labelling's own median length.
+    sets = [("Vicon", relabelled_markers(raw, vicon, M)), ("SOMA", relabelled_markers(raw, voted, M))]
+    if args.truth:
+        sets.insert(1, (args.truth_name, relabelled_markers(raw, np.where(ident >= 0, ident, -1), M)))
+    print("  segment consistency (% of frames within 6mm of own median): " +
+          " | ".join(k for k, _ in sets))
+    for f in ("Thumb", "Index", "Middle", "Ring", "Pinky"):
+        for a, b in ((1, 2), (2, 3)):
+            ia, ib = labels.index(f"{f}{a}"), labels.index(f"{f}{b}")
+            row = f"    {f}{a}-{f}{b}:".ljust(22)
+            for k, X in sets:
+                d = np.linalg.norm(X[:, ia] - X[:, ib], axis=-1); d = d[np.isfinite(d)]
+                row += f" {100*(np.abs(d - np.median(d)) < 6).mean():6.1f}%" if len(d) else "      -"
+            print(row)
+
+    # ---- label-free: side-to-side finger order. Along the Index1->Pinky1
+    # axis, index markers lie before middle, middle before ring, ring before
+    # pinky; fingers do not cross. Verified P10 labels are in order in
+    # 98-100% of frames at every level. Unlike segment consistency this
+    # catches a whole-chain swap between neighbouring fingers.
+    print("  finger order (% of frames Index<Middle|Middle<Ring|Ring<Pinky, levels 1/2/3): " +
+          " | ".join(k for k, _ in sets))
+    for lvl in "123":
+        row = f"    level {lvl}:".ljust(22)
+        for k, X in sets:
+            i1 = X[:, labels.index("Index1")]
+            u = X[:, labels.index("Pinky1")] - i1
+            u = u / np.linalg.norm(u, axis=-1, keepdims=True)
+            lat = [((X[:, labels.index(f + lvl)] - i1) * u).sum(-1) for f in ("Index", "Middle", "Ring", "Pinky")]
+            fr = []
+            for a, b in zip(lat[:-1], lat[1:]):
+                ok = np.isfinite(a) & np.isfinite(b)
+                fr.append(f"{100*(a[ok] < b[ok]).mean():5.1f}" if ok.any() else "    -")
+            row += " " + "|".join(fr) + " "
+        print(row)
+
     # ---- against a labelled export, if given
     if args.truth:
         judge = ident >= 0

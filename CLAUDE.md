@@ -35,7 +35,7 @@ vicon2mano/
     gmm/         labeler.py           strategyGMM: spatial GMM + Viterbi
     deep/        labeler.py, synth_data.py, real_data.py   CNN labeler
     template/    (lives in core/correspondence.py; see docs)
-    soma/        library.py, synth.py   learned labeller (SOMA-style)
+    soma/        library.py, synth.py, model.py, realdata.py, calibrate.py   learned labeller (SOMA-style)
 scripts/   cascade/ · mano/ · gmm/ · deep/ · soma/ · shared/
 tests/     core/ · cascade/ · mano/ · gmm/ · deep/ · soma/
 results/   cascade/ · mano/ · gmm/ · soma/   (gitignored, regenerable)

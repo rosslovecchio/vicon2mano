@@ -2,9 +2,11 @@
 """Train the strategySOMA labeller on synthetic clouds only.
 
 Every --eval-every steps it reports accuracy on held-out synthetic clouds and,
-for monitoring only, on real raw P10/Trial2 frames (<= 4 markers missing)
-against the manual labels. Real data is never trained on and never used to
-pick the checkpoint -- the saved model is simply the last one.
+for monitoring only, on real raw frames (<= 4 markers missing) against a
+labelled export -- by default P10/Trial2 and its manual relabel. For a
+partly trusted export, --monitor-name makes the log say "agree" instead of
+"REAL". Real data is never trained on and never used to pick the checkpoint
+-- the saved model is simply the last one.
 
     python scripts/soma/train.py --steps 30000 --out results/soma/labeler.pt
 """
@@ -59,6 +61,9 @@ def main():
     ap.add_argument("--layers", type=int, default=8)
     ap.add_argument("--eval-every", type=int, default=1000)
     ap.add_argument("--real-frames", type=int, default=2000)
+    ap.add_argument("--monitor-raw", default=str(Path(DATA_ROOT) / "P10/Trial2_handsonly.csv"))
+    ap.add_argument("--monitor-truth", default=str(Path(DATA_ROOT) / "P10/Trial2_handsonly_manuallylabelled_filled.csv"))
+    ap.add_argument("--monitor-name", default="REAL", help="log label for the monitor accuracy")
     ap.add_argument("--out", default=str(REPO / "results/soma/labeler.pt"))
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -75,18 +80,18 @@ def main():
     # held-out synthetic set (different generator seed)
     vgen = SynthGenerator(lib, mano, SynthConfig(), device=dev, seed=args.seed + 999)
     sv = vgen.sample(4000)
-    # real monitoring set: raw P10/Trial2, identities from the manual labels
-    p10 = Path(DATA_ROOT) / "P10"
-    man, nm = load_csv(str(p10 / "Trial2_handsonly_manuallylabelled_filled.csv"))[:2]
-    raw, nr = load_csv(str(p10 / "Trial2_handsonly.csv"))[:2]
-    assert [n.split(":")[-1] for n in nm] == lib.labels
-    ident = raw_identities(raw, man)
+    # real monitoring set: raw frames, identities from the labelled export
+    man, nm = load_csv(args.monitor_truth)[:2]
+    raw, nr = load_csv(args.monitor_raw)[:2]
+    nm = [n.split(":")[-1] for n in nm]
+    ident = raw_identities(raw, man[:, [nm.index(l) for l in lib.labels]])
     n_pres = (ident > -2).sum(1)
     ok = np.flatnonzero((n_pres >= M - 4) & (n_pres <= N))
     rf = np.random.default_rng(0).choice(ok, min(args.real_frames, len(ok)), replace=False)
     rp, rv, rl, _ = clouds(raw, ident, rf, N)
     rset = [torch.tensor(a, device=dev) for a in (rp, rv, rl)]
-    print(f"real monitor: {len(rf)} frames with <=4 missing (of {len(ok)} eligible)")
+    print(f"monitor ({args.monitor_name}): {Path(args.monitor_raw).name}, {len(rf)} frames with <=4 missing "
+          f"(of {len(ok)} eligible)")
 
     opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
     warm = 1000
@@ -108,7 +113,7 @@ def main():
                        min=(time.time() - t0) / 60)
             log.append(rec)
             print(f"step {step:6d}  loss {run:.4f}  synth {100*sh:5.2f}% (argmax {100*sa:5.2f}%)  "
-                  f"REAL {100*rh:5.2f}% (argmax {100*ra:5.2f}%)  {rec['min']:.1f} min", flush=True)
+                  f"{args.monitor_name} {100*rh:5.2f}% (argmax {100*ra:5.2f}%)  {rec['min']:.1f} min", flush=True)
             Path(args.out).parent.mkdir(parents=True, exist_ok=True)
             torch.save(dict(state=net.state_dict(), labels=lib.labels, n_points=N,
                             d_model=args.d_model, layers=args.layers, step=step), args.out)
