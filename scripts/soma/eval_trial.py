@@ -24,7 +24,8 @@ sys.path.insert(0, str(REPO))
 from vicon2mano.core.dataset import DATA_ROOT
 from vicon2mano.core.loader import load_csv
 from vicon2mano.strategies.soma.model import SomaLabeler, hard_assign
-from vicon2mano.strategies.soma.realdata import clouds, pieces, raw_identities, vote_pieces
+from vicon2mano.strategies.soma.realdata import (clouds, pieces, raw_identities, relabelled_markers,
+                                                 vote_pieces, write_wide_csv)
 
 
 def main():
@@ -33,6 +34,7 @@ def main():
     ap.add_argument("--raw", default=str(Path(DATA_ROOT) / "P10/Trial2_handsonly.csv"))
     ap.add_argument("--truth", default=str(Path(DATA_ROOT) / "P10/Trial2_handsonly_manuallylabelled_filled.csv"))
     ap.add_argument("--out", default=None, help="npz of per-frame and voted labels per raw slot")
+    ap.add_argument("--csv-out", default=None, help="relabelled trial as a wide CSV (voted labels)")
     args = ap.parse_args()
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -83,6 +85,10 @@ def main():
     d = judge & (voted != vicon) & (voted >= 0)
     print(f"  voted labels that differ from Vicon: {int(d.sum())} slots -> SOMA right {100*(voted==ident)[d].mean():.1f}%, "
           f"Vicon right {100*(vicon==ident)[d].mean():.1f}%")
+    if args.csv_out:
+        X = relabelled_markers(raw, voted, M)
+        write_wide_csv(args.csv_out, X, labels)
+        print(f"saved {args.csv_out}")
     if args.out:
         np.savez_compressed(args.out, per_frame=lab, voted=voted, conf=conf, labels=np.array(labels))
         print(f"saved {args.out}")

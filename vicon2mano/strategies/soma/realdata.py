@@ -91,3 +91,28 @@ def vote_pieces(frame_label: np.ndarray, frame_conf: np.ndarray, pid: np.ndarray
                 keep = cs[sh[t, cs].argmax()]
                 out[t, cs[cs != keep]] = -1
     return out
+
+
+def relabelled_markers(raw: np.ndarray, slot_label: np.ndarray, n_labels: int) -> np.ndarray:
+    """(T, n_labels, 3): each raw point moved to the column of its assigned
+    label. Unlabelled points (-1) are dropped; positions are never altered."""
+    T, C, _ = raw.shape
+    out = np.full((T, n_labels, 3), np.nan, dtype=np.float64)
+    t, c = np.nonzero(slot_label >= 0)
+    out[t, slot_label[t, c]] = raw[t, c]
+    return out
+
+
+def write_wide_csv(path, markers: np.ndarray, labels: list[str]) -> None:
+    """(T, N, 3) mm -> single-header wide Nexus CSV that
+    ``vicon2mano.core.loader.load_csv`` reads back; blank cells for NaN."""
+    import csv
+    from pathlib import Path
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["_Frame", "_Sub Frame"] + [h for l in labels for h in (f"{l}_X", "_Y", "_Z")])
+        for t in range(markers.shape[0]):
+            v = markers[t].reshape(-1)
+            w.writerow([t + 1, 0] + ["" if not np.isfinite(x) else f"{x:.6f}" for x in v])

@@ -357,8 +357,26 @@ def basis_limit_penalty(hp, Bt, lo, hi, twist_w=1.0):
     return pen.sum((-1, -2)).mean()
 
 
-def angles_from_markers(mk, names, Bmat):
+def _interp_gaps(th):
+    """Fill NaN entries of a per-frame angle series by linear interpolation
+    in time (nearest value past either end); all-NaN stays NaN."""
+    ok = np.isfinite(th)
+    if ok.all() or not ok.any():
+        return th
+    t = np.arange(len(th))
+    return np.interp(t, t[ok], th[ok]).astype(th.dtype)
+
+
+def angles_from_markers(mk, names, Bmat, gap_fill=True):
     """Initial hand_pose read straight off the markers, per frame.
+
+    Where a finger's angle is unobservable in a frame (one of its markers,
+    or Palm2, missing) it is interpolated in time from the frames either side
+    (``gap_fill``). It used to become 0 -- a straight finger -- and a straight
+    start got stuck: on SOMA-labelled P10/Trial2 (raw gaps kept) the fit left
+    pinky/ring at ~0-13 deg PIP for hundreds of frames where the real markers
+    show ~90-100 deg, while the same markers gap-filled fitted correctly, and
+    the temporal smoothness spread the straight pose to neighbouring frames.
 
     The fit starts every frame from a flat hand, so a pinch has to travel a
     long way with nothing guiding it -- a reliable way to find a local
@@ -403,6 +421,8 @@ def angles_from_markers(mk, names, Bmat):
         d0, v1u, v2u = _u(d0), _u(v1), _u(v2)
         th_mcp = np.arccos(np.clip((d0 * v1u).sum(-1), -1, 1))
         th_pip = np.arccos(np.clip((v1u * v2u).sum(-1), -1, 1))
+        if gap_fill:
+            th_mcp, th_pip = _interp_gaps(th_mcp), _interp_gaps(th_pip)
         th_mcp = np.nan_to_num(th_mcp)
         th_pip = np.nan_to_num(th_pip)
         for off, th in ((0, th_mcp), (1, th_pip), (2, th_pip * (2.0 / 3.0))):
@@ -836,6 +856,9 @@ def main() -> None:
     ap.add_argument("--w-smooth", type=float, default=1.0,
                      help="temporal smoothness on pose/orient/transl "
                           "(2nd difference). 0 = independent per-frame fits.")
+    ap.add_argument("--no-seed-gap-fill", dest="seed_gap_fill", action="store_false",
+                     help="old behaviour: seed an unobservable finger angle as 0 (straight) "
+                          "instead of interpolating it across the gap")
     ap.add_argument("--from-npz", default=None,
                      help="skip the movement optimisation and load pose from "
                           "this npz (an earlier --npz-out with the same config)")
@@ -1259,7 +1282,7 @@ def main() -> None:
                 # marker sits on proximal skin, so it cannot constrain the PIP)
                 # while still measuring the angle perfectly well from geometry.
                 # Excluding it from the objective should not blind the seed.
-                hp0 = angles_from_markers(mv[idx], bm, Bmat)
+                hp0 = angles_from_markers(mv[idx], bm, Bmat, gap_fill=args.seed_gap_fill)
                 print(f"    seeded pose from markers: mean |angle| "
                       f"{np.abs(hp0).mean():.3f} rad")
             # Warm start from the previous chunk's last solved frame -- but
