@@ -16,7 +16,7 @@ own page rather than one ever-growing log.
 - Extra runtime deps not in pyproject: `plotly`, `matplotlib`
 
 ```bash
-.viconvenv/Scripts/python.exe -m pytest tests/ -q     # 117 tests
+.viconvenv/Scripts/python.exe -m pytest tests/ -q     # 268 tests
 ```
 
 ## Layout
@@ -35,9 +35,10 @@ vicon2mano/
     gmm/         labeler.py           strategyGMM: spatial GMM + Viterbi
     deep/        labeler.py, synth_data.py, real_data.py   CNN labeler
     template/    (lives in core/correspondence.py; see docs)
-scripts/   cascade/ · mano/ · gmm/ · deep/ · shared/
-tests/     core/ · cascade/ · mano/ · gmm/ · deep/
-results/   cascade/ · mano/ · gmm/          (gitignored, regenerable)
+    soma/        library.py, synth.py   learned labeller (SOMA-style)
+scripts/   cascade/ · mano/ · gmm/ · deep/ · soma/ · shared/
+tests/     core/ · cascade/ · mano/ · gmm/ · deep/ · soma/
+results/   cascade/ · mano/ · gmm/ · soma/   (gitignored, regenerable)
 docs/      fitting.md · strategies/*.md
 ```
 
@@ -55,6 +56,7 @@ strategy driver just to locate a trial CSV.
 | **gmm** | per-marker spatial GMM + Kalman/Viterbi, no kinematic model | [docs/strategies/gmm.md](docs/strategies/gmm.md) |
 | **deep** | 3-D U-Net on a voxelised cloud; the only order-agnostic one | [docs/strategies/deep.md](docs/strategies/deep.md) |
 | **template** | distance-descriptor match to a labelled template recording | [docs/strategies/template.md](docs/strategies/template.md) |
+| **soma** | SOMA-style learned per-frame labeller trained on synthetic clouds from a MANO surface model; self-contained (imports `core` only) | [docs/strategies/soma.md](docs/strategies/soma.md) |
 
 Core MANO fitting (not a relabelling strategy): [docs/fitting.md](docs/fitting.md).
 
