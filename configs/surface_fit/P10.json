@@ -13,7 +13,8 @@
     "",
     "protocol: <finger>1=MCP, 2=PIP, 3=base of nailbed; Thumb1~CMC, 2=MCP,",
     "3=IP. This differs from core.correspondence._LABEL_HINTS, which maps",
-    "<finger>3 to the fingertip -- unreconciled, see CLAUDE.md."
+    "<finger>3 to the fingertip -- unreconciled, see CLAUDE.md.",
+    "INPUT FILE: use the manuallylabelled_filled export, not the raw Trial2_handsonly.csv. The raw file is only 42.7% complete across all 22 markers (Thumb3 76%, Palm1 85%) and carries Vicon's own labelling errors; the relabelled version is 100% complete. Measured difference with an identical config: pinch window unchanged (fingers 5.82 -> 5.81mm), fist window 18.86 -> 18.29mm. So input quality is NOT what makes high-flexion poses fit ~3x worse than the pinch -- that is a model limitation and is still unexplained."
   ],
   "side": "right",
   "attach_file": "configs/surface_fit/P10_attach.json",
@@ -60,5 +61,6 @@
     "palm_mcp_mm": 9.68,
     "fingers_mm": 18.86,
     "note": "high-flexion poses fit ~3x worse than the pinch window in every configuration tried; this is the dominant remaining error and is not yet explained."
-  }
+  },
+  "movement_csv": "P10/Trial2_handsonly_manuallylabelled_filled.csv"
 }

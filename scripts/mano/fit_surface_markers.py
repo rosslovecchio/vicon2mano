@@ -413,6 +413,9 @@ def angles_from_markers(mk, names, Bmat):
 
 # marker-name suffix -> (governing joint index in _FINGER_JOINTS,
 #                        proximal repo joint, distal repo joint of its segment)
+# (marker repo joint, proximal, distal) for the segment-frame offset model
+_OFFSET_SEG = []     # filled per run from the fitted marker set
+
 _STRETCH_SEG = {
     "Index2": (0, 5, 6), "Index3": (1, 6, 7),
     "Middle2": (3, 9, 10), "Middle3": (4, 10, 11),
@@ -466,6 +469,59 @@ def stretch_offsets(J21, hp, Bt, names, slopes, ref_deg=None, gate=45.0):
         u = u / torch.sqrt((u ** 2).sum(-1, keepdim=True) + 1e-18)
         off[:, k] = (slopes[nm] * 1e-3 * th).unsqueeze(-1) * u
     return off
+
+
+def segment_frames_t(J21):
+    """(T, P, 3, 3) per-joint frames aligned to each joint's own bone, in torch.
+
+    A torch port of strategies.mano.relabel._segment_frames, so the
+    offset-target mode can be differentiated through the pose exactly as the
+    surface mode is. x runs along the bone (joint -> child); the parent
+    direction fixes the roll.
+    """
+    import torch
+    T = J21.shape[0]
+    out = []
+    for j, a, b in _OFFSET_SEG:
+        x = J21[:, b] - J21[:, a]
+        x = x / torch.sqrt((x ** 2).sum(-1, keepdim=True) + 1e-18)
+        ref = J21[:, a] - J21[:, 0]
+        ref = ref / torch.sqrt((ref ** 2).sum(-1, keepdim=True) + 1e-18)
+        z = torch.cross(x, ref, dim=-1)
+        z = z / torch.sqrt((z ** 2).sum(-1, keepdim=True) + 1e-18)
+        y = torch.cross(z, x, dim=-1)
+        out.append(torch.stack([x, y, z], dim=-1))      # columns = axes
+    return torch.stack(out, dim=1)
+
+
+def calibrate_segment_offsets(J21, M, names, repo_of):
+    """Per-marker offset in its joint's segment frame -- the ALTERNATIVE to a
+    mesh attachment, ported from scripts/mano/refit_with_marker_offsets.py.
+
+    The marker is modelled as a fixed 3-vector from its joint centre, in a
+    frame that rotates with the bone. That is pose-invariant for a rigid
+    offset but, unlike a barycentric point on the mesh, it cannot deform with
+    shape or with the neighbouring joints, and it knows nothing about the
+    surface -- so it cannot tell that a marker has ended up inside the hand or
+    on the palmar side.
+
+    Returns (offsets (P,3) metres, spread (P,) mm). A large spread means the
+    rigid-offset model does not hold for that marker.
+    """
+    import torch
+    R = segment_frames_t(J21)                       # (T,P,3,3)
+    d = M - torch.stack([J21[:, r] for _, r in zip(names, repo_of)], dim=1)
+    loc = torch.einsum("tpij,tpj->tpi", R.transpose(-1, -2), d)
+    ok = torch.isfinite(loc).all(-1)
+    offs, spread = [], []
+    for k in range(len(names)):
+        v = loc[:, k][ok[:, k]]
+        if len(v) < 5:
+            offs.append(torch.zeros(3, device=J21.device)); spread.append(0.0); continue
+        mu = v.mean(0)
+        offs.append(mu)
+        spread.append(float((v - mu).norm(dim=-1).mean() * 1000))
+    return torch.stack(offs), spread
 
 
 def onehot_attachment(F, vid):
@@ -673,6 +729,14 @@ def main() -> None:
                      help="attachment faces must have normal.dorsal above this. "
                           "0 = any face on the back half; raise it to insist on "
                           "faces squarely facing the back.")
+    ap.add_argument("--offset-mode", action="store_true",
+                     help="ABLATION: model each marker as a rigid offset from "
+                          "its joint in that joint's segment frame (the "
+                          "refit_with_marker_offsets.py approach) instead of as "
+                          "a point on the mesh surface. Everything else -- "
+                          "staging, marker init, joint limits, smoothing -- is "
+                          "unchanged, so the comparison isolates the attachment "
+                          "representation.")
     ap.add_argument("--stretch", default=None,
                      help="JSON of flexion-dependent marker slide (see "
                           "configs/surface_fit/P10_stretch.json). Lets each "
@@ -772,6 +836,12 @@ def main() -> None:
     ap.add_argument("--w-smooth", type=float, default=1.0,
                      help="temporal smoothness on pose/orient/transl "
                           "(2nd difference). 0 = independent per-frame fits.")
+    ap.add_argument("--from-npz", default=None,
+                     help="skip the movement optimisation and load pose from "
+                          "this npz (an earlier --npz-out with the same config)")
+    ap.add_argument("--pred-out", default=None,
+                     help="npz of predicted marker positions per movement "
+                          "frame (pred_mm (T,K,3), frames, names)")
     ap.add_argument("--movement-out", default=None,
                      help="HTML for a representative movement frame")
     ap.add_argument("--png", default=None, help="also bake a static PNG view")
@@ -1107,6 +1177,31 @@ def main() -> None:
         fig.write_image(args.png, width=1000, height=850, scale=1)
         print(f"saved {args.png}")
 
+    # ---- ABLATION: rigid segment-frame offsets instead of mesh points ----
+    # Calibrated on the SAME static fit the surface attachments come from, so
+    # the only thing that differs downstream is how a marker's predicted
+    # position is computed: J[joint] + R_segment @ offset, versus a barycentric
+    # point on the mesh plus a standoff along its normal.
+    off_vec = None
+    if args.offset_mode:
+        global _OFFSET_SEG
+        _OFFSET_SEG = []
+        repo_of = []
+        for (j, _), nm in zip(pairs, names):
+            rj = j if j >= 0 else 0
+            a, b = _SEGMENT_OF.get(rj, (0, 9))
+            _OFFSET_SEG.append((rj, a, b))
+            repo_of.append(rj)
+        with torch.no_grad():
+            Js = mano_output_to_joints21(fwd())
+        off_vec, off_spread = calibrate_segment_offsets(Js, M, names, repo_of)
+        print("\noffset mode: per-marker rigid offset in its segment frame")
+        print(f"{'marker':10s} {'|offset|':>9s} {'spread':>8s}")
+        for k, nm in enumerate(names):
+            mag = float(off_vec[k].norm()) * 1000
+            flag = "  <-- not pose-invariant" if off_spread[k] > 0.6 * mag else ""
+            print(f"  {nm:10s} {mag:7.2f}mm {off_spread[k]:7.2f}mm{flag}")
+
     # ---- apply to a movement trial -------------------------------------
     # Pose only. Both the shape (betas) and the attachments (which patch of
     # skin each marker is taped to) are physical facts about this subject and
@@ -1136,10 +1231,17 @@ def main() -> None:
 
         GO, HP, TR = [], [], []
         prev_hp = prev_go = prev_tr = None
+        # --from-npz: reuse a finished movement fit (same static/attach/stretch
+        # config) and only rebuild its predictions -- ~80s instead of ~70min.
+        pre = np.load(args.from_npz) if args.from_npz else None
         for ci in range(n_chunks):
             sl = slice(ci * chunk, min((ci + 1) * chunk, len(mf)))
             idx = mf[sl]
             Tm = len(idx)
+            if pre is not None:
+                GO.append(pre["global_orient"][idx]); HP.append(pre["hand_pose"][idx])
+                TR.append(pre["transl"][idx])
+                continue
             Mm = torch.tensor(mv[idx][:, cols] * 1e-3, dtype=torch.float32, device=dev)
             mmk = torch.isfinite(Mm).all(-1)
             Mm_s = torch.nan_to_num(Mm, nan=0.0)   # see the note in stage 2
@@ -1221,8 +1323,13 @@ def main() -> None:
                 om = model(global_orient=orient_m, hand_pose=hp_m, transl=tr_m2,
                            betas=betas_f.unsqueeze(0).expand(Tm, -1),
                            return_verts=True)
-                Vt = om.vertices[:, fidx[root_k]]
-                P = (Vt * bw[:, root_k]).sum(2)
+                if off_vec is not None:
+                    Jc = mano_output_to_joints21(om)
+                    R = segment_frames_t(Jc)[:, root_k]
+                    P = torch.stack([Jc[:, _OFFSET_SEG[q][0]] for q in root_k], 1)                         + torch.einsum("tpij,pj->tpi", R, off_vec[root_k])
+                else:
+                    Vt = om.vertices[:, fidx[root_k]]
+                    P = (Vt * bw[:, root_k]).sum(2)
                 dr = (P - Mm_s[:, root_k])[mmk[:, root_k]]
                 lr_ = (dr ** 2).sum(-1).mean()
                 if args.w_smooth > 0 and Tm > 2:
@@ -1274,11 +1381,17 @@ def main() -> None:
                                transl=tr_m2,
                                betas=betas_f.unsqueeze(0).expand(Tm, -1),
                                return_verts=True)
-                    Vt = om.vertices[:, fidx[ch_k]]
-                    P = (Vt * bw[:, ch_k]).sum(2)
-                    nr = torch.cross(Vt[:, :, 1] - Vt[:, :, 0],
-                                     Vt[:, :, 2] - Vt[:, :, 0], dim=-1)
-                    nr = nr / torch.sqrt((nr ** 2).sum(-1, keepdim=True) + 1e-18)
+                    if off_vec is not None:
+                        Jc = mano_output_to_joints21(om)
+                        R = segment_frames_t(Jc)[:, ch_k]
+                        P = torch.stack([Jc[:, _OFFSET_SEG[q][0]] for q in ch_k], 1)                             + torch.einsum("tpij,pj->tpi", R, off_vec[ch_k])
+                        nr = torch.zeros_like(P)
+                    else:
+                        Vt = om.vertices[:, fidx[ch_k]]
+                        P = (Vt * bw[:, ch_k]).sum(2)
+                        nr = torch.cross(Vt[:, :, 1] - Vt[:, :, 0],
+                                         Vt[:, :, 2] - Vt[:, :, 0], dim=-1)
+                        nr = nr / torch.sqrt((nr ** 2).sum(-1, keepdim=True) + 1e-18)
                     if slopes and Bt is not None:
                         Jc = mano_output_to_joints21(om)
                         P = P + stretch_offsets(Jc, hp_m, Bt,
@@ -1316,11 +1429,17 @@ def main() -> None:
                 om = model(global_orient=orient_m, hand_pose=hp_m, transl=tr_m2,
                            betas=betas_f.unsqueeze(0).expand(Tm, -1),
                            return_verts=True)
-                Vt = om.vertices[:, fidx]
-                P = (Vt * bw).sum(2)
-                nrm = torch.cross(Vt[:, :, 1] - Vt[:, :, 0],
-                                  Vt[:, :, 2] - Vt[:, :, 0], dim=-1)
-                nrm = nrm / torch.sqrt((nrm ** 2).sum(-1, keepdim=True) + 1e-18)
+                if off_vec is not None:
+                    Jc = mano_output_to_joints21(om)
+                    R = segment_frames_t(Jc)
+                    P = torch.stack([Jc[:, sg[0]] for sg in _OFFSET_SEG], 1)                         + torch.einsum("tpij,pj->tpi", R, off_vec)
+                    nrm = torch.zeros_like(P)
+                else:
+                    Vt = om.vertices[:, fidx]
+                    P = (Vt * bw).sum(2)
+                    nrm = torch.cross(Vt[:, :, 1] - Vt[:, :, 0],
+                                      Vt[:, :, 2] - Vt[:, :, 0], dim=-1)
+                    nrm = nrm / torch.sqrt((nrm ** 2).sum(-1, keepdim=True) + 1e-18)
                 if slopes and Bt is not None:
                     Jc = mano_output_to_joints21(om)
                     P = P + stretch_offsets(Jc, hp_m, Bt, names, slopes, ref_deg,
@@ -1369,7 +1488,23 @@ def main() -> None:
                            return_verts=True)
                 Vall.append(om.vertices.cpu().numpy() * 1000)
         Vm_all = np.concatenate(Vall)
-        Pm = (Vm_all[:, F[fid]] * bary[None, :, :, None]).sum(2)
+        if off_vec is not None:
+            with torch.no_grad():
+                Jall = []
+                for ci in range(n_chunks):
+                    sl0 = slice(ci * chunk, min((ci + 1) * chunk, len(mf)))
+                    om = model(global_orient=torch.tensor(GO[sl0], device=dev),
+                               hand_pose=torch.tensor(HP[sl0], device=dev),
+                               transl=torch.tensor(TR[sl0], device=dev),
+                               betas=betas_f.unsqueeze(0).expand(sl0.stop - sl0.start, -1),
+                               return_verts=True)
+                    Jall.append(mano_output_to_joints21(om))
+                Jc = torch.cat(Jall)
+                R = segment_frames_t(Jc)
+                Pm = (torch.stack([Jc[:, sg[0]] for sg in _OFFSET_SEG], 1)
+                      + torch.einsum("tpij,pj->tpi", R, off_vec)).cpu().numpy() * 1000
+        else:
+            Pm = (Vm_all[:, F[fid]] * bary[None, :, :, None]).sum(2)
         if slopes and Bmat is not None:
             with torch.no_grad():
                 _J = torch.tensor(np.concatenate([
@@ -1384,11 +1519,19 @@ def main() -> None:
                 Pm = Pm + stretch_offsets(
                     _J, torch.tensor(HP, device=dev), Bt, names, slopes, ref_deg,
                     args.stretch_gate).cpu().numpy() * 1000
+        if args.pred_out:
+            Path(args.pred_out).parent.mkdir(parents=True, exist_ok=True)
+            np.savez(args.pred_out, pred_mm=Pm.astype(np.float32), frames=mf,
+                     names=np.array(names))
+            print(f"saved {args.pred_out}")
         per = np.linalg.norm(Pm - mv[mf][:, cols], axis=-1)
         print("\n--- movement: per-marker mean distance to its attached point ---")
         for kk, nm in enumerate(names):
             v = per[:, kk]
             v = v[np.isfinite(v)]
+            if not len(v):          # marker absent for the whole window
+                print(f"  {nm:10s}   (never observed)")
+                continue
             print(f"  {nm:10s} {v.mean():7.2f} mm   (p95 {np.percentile(v, 95):6.2f})")
         allv = per[np.isfinite(per)]
         print(f"  {'OVERALL':10s} {allv.mean():7.2f} mm   "

@@ -44,3 +44,32 @@ model is less accurate than the distance between adjacent markers, so only
 **Label-agnostic mode** (`--fit-on label-agnostic`) lets a marker move even
 if its own label was never flagged, iterating fit -> reassign -> refit until
 the mapping stabilises, with cycle detection for mappings that oscillate.
+
+## Tested and rejected (2026-10-15): robust loss in the surface fit
+
+Hypothesis: a Geman-McClure loss on the marker terms of
+`scripts/mano/fit_surface_markers.py` would stop a mislabelled marker pulling
+the pose, so model predictions could relabel it. Measured on P10/Trial2 raw
+labels against the manual labels, two 1000-frame windows, scales 10/20mm vs
+plain squared loss: no improvement anywhere, slightly worse at every setting
+(mislabelled-frame angle error 17.5 -> 18.1 deg on the typical window; net
+relabel effect +500 -> -330 on the dense one). The option was removed.
+
+Why it cannot work: 90% of P10/Trial2's wrong labels are a *different
+finger's* marker (median 40mm away), and each finger has only 3 markers, each
+setting its own joint. A wrong fingertip marker is explained exactly by
+bending or spreading the finger toward it, so it leaves no residual for a
+robust loss to reject. Per-frame fit residual carries no identity information
+for these markers.
+
+The same measurement showed what does carry it: split each raw trajectory at
+gaps and >5mm jumps and 99.9% of the 7,833 pieces have a single true identity,
+with 99% of wrong slots in pieces that are wrong end to end (973 pieces). Vicon
+tracks correctly and misnames pieces after gaps, so labelling is a per-piece
+problem, not per-frame.
+
+Same session, for scale: fitting raw instead of manual labels leaves angles
+within 1.2 deg where the raw labels are right, but ~20 deg off (62% of frames
+>10 deg) where they are wrong. And with a clean pose, `relabel_frame` at a 30mm
+gate fixes 70% of wrong labels and breaks 0.5% of right ones; with the pose
+fitted on raw labels it is net harmful at every gate (circularity).
