@@ -12,12 +12,14 @@ then voted per raw trajectory piece (SOMA's "tracklet labelling").
 Self-contained by design: imports `vicon2mano.core` only, never another
 strategy or `scripts/`.
 
-- Code: `vicon2mano/strategies/soma/` (`library.py`, `synth.py`)
-- Scripts: `scripts/soma/` (`build_library.py`, `preview_synth.py`)
+- Code: `vicon2mano/strategies/soma/` (`library.py`, `synth.py`, `model.py`, `realdata.py`)
+- Scripts: `scripts/soma/` (`build_library.py`, `preview_synth.py`, `train.py`, `eval_trial.py`)
 - Tests: `tests/soma/`
 - Output: `results/soma/` (gitignored, regenerable)
 
-Status (2026-10-15): **generator done and checked; network not built yet.**
+Status (2026-10-15): **trained; on raw P10/Trial2 it cuts Vicon's labelling
+errors ~20x (97.72% -> 99.89% correct).** Generalisation to other trials and
+participants not yet tested -- see the caveat under Results.
 
 ## Why this, after the hand-built scores
 
@@ -69,15 +71,51 @@ the same. Both were cut. Close Index3/Pinky3 approaches are still somewhat
 under-represented; if the trained network confuses exactly those, weight
 library frames by fingertip proximity.
 
+## Network (`model.py`)
+
+Per-point MLP embedding -> 8 pre-norm transformer encoder layers (d 128,
+4 heads) -> linear score per label -> log-space Sinkhorn (30 iters) with one
+learnable dustbin score bordering the matrix (SuperGlue-style marginals:
+1 per point / label, M for the dustbin row, n for the dustbin column).
+1.08M parameters. Loss: NLL of the true assignment (point -> label, ghost ->
+dustbin column, absent label -> dustbin row). Inference: one-to-one
+Hungarian where each point may also take its own dustbin; then per piece
+(raw column cut at gaps / >5mm jumps) the label with the largest summed
+confidence, clashes resolved by vote share (`realdata.vote_pieces`).
+
+Early in training Sinkhorn leaks a present label's mass into the dustbin row,
+leaving label-vs-ghost ties (hard accuracy ~0 while argmax was ~40% at 400
+steps). It is gone by step 1000 (98.73% vs 98.71%), so no fix was needed.
+
+## Results (2026-10-15)
+
+`scripts/soma/train.py`: 30k steps, batch 256, AdamW 1e-3 cosine, synthetic
+only, 44 min on the RTX A2000 laptop GPU. Real-data monitor (2,000 raw
+Trial2 frames, never trained on, never used for checkpoint choice): 98.73%
+at step 1k, 99.94% at 3k, flat at 99.95% thereafter.
+
+`scripts/soma/eval_trial.py` on the whole raw P10/Trial2 (874,091 judgeable
+slots, truth = manual labels; 34 s):
+
+| labels | all frames | <=4 missing (96% of frames) |
+|---|---|---|
+| raw Vicon | 97.72% | 97.84% |
+| SOMA per frame | 99.83% (0.05% unlabelled) | 99.92% |
+| **SOMA + piece vote** | **99.89%** (0.01% unlabelled) | **99.95%** |
+
+Where the voted labels differ from Vicon's (20,677 slots) SOMA is right 95.9%,
+Vicon 3.9%. For scale, the best hand-built piece labeller reached 99.20% on
+the held-out half (`mano.md`), GMM was net harmful.
+
+**Caveat:** the library -- attachments, residuals, poses -- comes from this
+same trial, so the network has seen Trial2's hand and marker placement
+(never its labels). This is a best case. P10's other trials and other
+participants are the real test.
+
 ## Next
 
-1. Network: SOMA-style transformer + Sinkhorn with dustbins, ~1-2M params.
-2. Evaluate with no real data in training: label raw P10/Trial2 per frame,
-   vote per piece, score against the manual labels. The bar is the raw Vicon
-   labels' 97.6%.
-3. Only if needed: fine-tune on half of Trial2's real observations, score the
-   other half.
-
-The library is built from P10's own Trial2, so evaluating on Trial2 shares
-its geometry (not its labels -- the network never sees them). P10's other
-trials and other participants are the honest generalisation test.
+1. Joint angles: fit SOMA-labelled Trial2 with the calibrated surface fit and
+   compare with the manual-label fit (raw Vicon labels cost ~20 deg on
+   mislabelled frames).
+2. Generalisation: P10 Trial1 / HOI trials, then other participants (no
+   manual labels -- judge by fit residuals, implausible angles, spot checks).
