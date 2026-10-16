@@ -160,6 +160,16 @@ hands-only length, Vicon / manual / SOMA: Middle 67 / 62 / 99.9%, Ring
 truth at the fingertips. ~5% of raw points are object markers/reflections the
 manual file deleted; SOMA (trained with <= 2 ghosts) tends to label them.
 
+**HOI joint angles** (surface fits, P10 configs, gap fix; no trusted
+reference): finger residual Vicon labels 19.26 mm vs SOMA labels 13.20 mm;
+frames with any finger joint > 120 deg 3,427 vs 14 (of 36,486); PIP p99
+114-140 vs 89-110 deg. Where SOMA and Vicon agree on a finger both fits track
+the bend measured off its markers equally (r 0.98-0.999). Where they
+disagree, Vicon's labels give plausible segment lengths (within 8 mm of
+hands-only) in 0.1-44% of frames, SOMA's in 99.2-99.9%, and the SOMA-label fit
+tracks its labels' bend at r 0.97-1.00: the Vicon-label fit's impossible
+poses come from bending fingers onto other fingers' markers.
+
 ## Static calibration for a new participant (`calibrate.py`)
 
 Shape and each marker's mean offset come from the participant's static;
