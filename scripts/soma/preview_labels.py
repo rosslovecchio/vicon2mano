@@ -31,12 +31,11 @@ FOREARM = ["Forearm1", "Forearm2", "Forearm3", "Forearm4", "Forearm1"]
 
 def chains(X, L):
     """Line segments per finger + palm + forearm, as (name, colour, (k,3) with NaN breaks)."""
-    out = []
-    for f, c in FINGERS.items():
-        idx = [L.index("Palm2")] + [L.index(f"{f}{i}") for i in (1, 2, 3)]
-        out.append((f, c, X[idx]))
-    out.append(("Palm", "#444444", X[[L.index(n) for n in PALM]]))
-    out.append(("Forearm", "#aaaaaa", X[[L.index(n) for n in FOREARM]]))
+    def pts(names):                      # markers this model does not know are skipped
+        return X[[L.index(n) for n in names if n in L]]
+    out = [(f, c, pts(["Palm2"] + [f"{f}{i}" for i in (1, 2, 3)])) for f, c in FINGERS.items()]
+    out.append(("Palm", "#444444", pts(PALM)))
+    out.append(("Forearm", "#aaaaaa", pts(FOREARM)))
     return out
 
 

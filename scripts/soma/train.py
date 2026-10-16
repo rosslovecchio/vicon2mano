@@ -66,11 +66,18 @@ def main():
     ap.add_argument("--monitor-name", default="REAL", help="log label for the monitor accuracy")
     ap.add_argument("--out", default=str(REPO / "results/soma/models/labeler_P10.pt"))
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--drop-labels", default="",
+                    help="markers the target data never has, e.g. Forearm3,Forearm4,Palm3 for P1/P2; "
+                         "the model is trained without them and the monitor drops them too")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     lib = MarkerLibrary.load(args.library)
+    drop = [d for d in args.drop_labels.split(",") if d]
+    if drop:
+        lib = lib.subset([l for l in lib.labels if l not in drop])
+        print(f"reduced marker set: dropped {drop}, {len(lib.labels)} labels")
     mano = MANOFitter(FitConfig(mano_model_path=args.mano_dir, hand_side="right", use_pca=False))._model
     gen = SynthGenerator(lib, mano, SynthConfig(), device=dev, seed=args.seed)
     M, N = gen.M, gen.n_points
@@ -83,6 +90,8 @@ def main():
     # real monitoring set: raw frames, identities from the labelled export
     man, nm = load_csv(args.monitor_truth)[:2]
     raw, nr = load_csv(args.monitor_raw)[:2]
+    nr = [n.split(":")[-1] for n in nr]
+    raw = raw[:, [nr.index(l) for l in lib.labels]]      # only the markers this model knows
     nm = [n.split(":")[-1] for n in nm]
     ident = raw_identities(raw, man[:, [nm.index(l) for l in lib.labels]])
     n_pres = (ident > -2).sum(1)

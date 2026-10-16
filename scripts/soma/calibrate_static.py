@@ -59,6 +59,8 @@ def main():
     ap.add_argument("--base-library", default=str(REPO / "results/soma/libraries/library_P10_Trial2.npz"))
     ap.add_argument("--mano-dir", default=str(REPO / "../clean_kinematics/mano_v1_2/models"))
     ap.add_argument("--n-frames", type=int, default=200)
+    ap.add_argument("--w-pose", type=float, default=20.0,
+                    help="pull of the static pose toward a flat hand (see calibrate.fit_static)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--html", default=None, help="fitted static mesh + markers (plotly)")
     args = ap.parse_args()
@@ -75,7 +77,7 @@ def main():
           f"median motion {info['motion_mm']:.2f} mm/frame; absent there: "
           f"{[n for n, p in zip(lib.labels, info['present']) if p < 0.5] or 'none'}")
 
-    out = fit_static(model, lib, cloud, device=dev)
+    out = fit_static(model, lib, cloud, device=dev, w_pose=args.w_pose)
     print(f"betas: {np.round(out['betas'], 2).tolist()}  (base subject: {np.round(lib.betas, 2).tolist()})")
     print(f"{'marker':9s} {'fit err mm':>10s}  note")
     for m, n in enumerate(lib.labels):

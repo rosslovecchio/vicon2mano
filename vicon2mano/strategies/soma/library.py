@@ -55,6 +55,17 @@ class MarkerLibrary:
     miss_rate: np.ndarray      # (M,) fraction of raw frames each marker is absent
     source: str = ""
 
+    def subset(self, labels: list[str]) -> "MarkerLibrary":
+        """The same library restricted to ``labels`` (in that order) -- e.g. a
+        reduced marker set such as P1/P2's, where Forearm3, Forearm4 and Palm3
+        were never placed. Poses and every kept marker's geometry are
+        unchanged."""
+        idx = [self.labels.index(l) for l in labels]
+        return MarkerLibrary(labels=list(labels), face_idx=self.face_idx[idx], bary=self.bary[idx],
+                             hand_pose=self.hand_pose, betas=self.betas,
+                             residual=self.residual[:, idx], frames=self.frames,
+                             miss_rate=self.miss_rate[idx], source=f"{self.source} | subset {len(idx)}")
+
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(path, labels=np.array(self.labels), face_idx=self.face_idx,

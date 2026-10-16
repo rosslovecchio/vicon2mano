@@ -88,8 +88,16 @@ def _axis_angle(R: np.ndarray) -> np.ndarray:
 
 def fit_static(model, lib: MarkerLibrary, cloud_mm: np.ndarray, *, device: str = "cpu",
                iters_root: int = 300, iters: int = 1500, w_beta: float = 2.0,
-               w_pose: float = 1.0, suspect_mm: float = 15.0, rounds: int = 2) -> dict:
+               w_pose: float = 20.0, suspect_mm: float = 15.0, rounds: int = 2) -> dict:
     """Fit MANO shape and pose to one static cloud (mm). See module docstring.
+
+    ``w_pose`` (mm^2 per rad^2) holds the static near a flat hand. At 1.0 the
+    fit kinked the fingertips to land attachment points on markers: on P12's
+    flat static the PIP/DIP joints came out rotated 28-63 deg (index and pinky
+    tips visibly broken). 20 leaves the 4-17 deg of a relaxed hand at a fit
+    error of median 7.0 mm (vs 5.0); 100+ forces it so flat that Palm1 no
+    longer fits (flagged suspect). The extra error moves into each marker's
+    measured offset, where placement differences belong.
 
     Returns betas (10,), hand_pose (45,), global_orient (3,), transl (3,) m,
     the posed vertices (778, 3) mm, per-marker fit error ``err_mm`` (M,),

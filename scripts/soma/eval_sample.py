@@ -73,6 +73,9 @@ def main():
         nc = [n.split(":")[-1] for n in nc]
         if not set(labels) <= set(nr) or not set(labels) <= set(nc):
             print(f"[skip] {p}/{trial}: label set differs from the model's"); continue
+        if len(raw) != len(cor):
+            print(f"[skip] {p}/{trial}: corrected export has {len(cor)} frames, raw {len(raw)} "
+                  f"({Path(corr).name} vs {Path(trial_path).name}) -- cannot align frames"); continue
         raw = raw[:, [nr.index(l) for l in labels]]
         frames = np.array(sorted(g.frame.unique()), int)
         frames = frames[frames < len(raw)]

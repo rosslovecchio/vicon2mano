@@ -103,3 +103,19 @@ def test_corruption_invariants(gen):
     assert (M - real.sum(1)).float().mean() <= cfg.max_missing
     # valid points come first, and the cloud is median-centred
     assert all(valid[b, :valid[b].sum()].all() for b in range(512))
+
+
+@needs_lib
+def test_reduced_marker_subset(gen):
+    """P1/P2 never had Forearm3, Forearm4, Palm3: a subset library keeps every
+    other marker's geometry exactly, and the generator runs on 19 markers."""
+    keep = [l for l in gen.lib.labels if l not in ("Forearm3", "Forearm4", "Palm3")]
+    sub = gen.lib.subset(keep)
+    assert sub.labels == keep and sub.residual.shape[1] == 19
+    for l in keep:
+        i, j = gen.lib.labels.index(l), keep.index(l)
+        assert sub.face_idx[j] == gen.lib.face_idx[i]
+        np.testing.assert_array_equal(sub.residual[:, j], gen.lib.residual[:, i])
+    g = SynthGenerator(sub, gen.model, device="cpu", seed=1)
+    pts, valid, lab = g.sample(64)
+    assert pts.shape == (64, 19 + g.cfg.max_ghosts, 3) and int(lab.max()) < 19
