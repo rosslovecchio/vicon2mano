@@ -265,3 +265,34 @@ fitted with the P12 model's labels and with Vicon's.
    mislabelled frames).
 2. Generalisation: P10 Trial1 / HOI trials, then other participants (no
    manual labels -- judge by fit residuals, implausible angles, spot checks).
+
+## Running the whole dataset (`scripts/soma/run_fullset.py`)
+
+One driver for static -> calibrate -> train -> label -> surface fit -> flags,
+per participant and trial, resumable (finished outputs are skipped; files are
+written under `.part` names and renamed on success). Outputs go to
+`results/soma/fullset/<P>/<trial>/`: `soma_labelled.csv`, `labels.npz`,
+`fit.npz` (full `hand_pose`/`global_orient`/`transl`), `pred.npz`, `flags.csv`
+and `angles.csv` (per-frame joint angles with the flag columns merged in).
+
+```
+python scripts/soma/run_fullset.py --dry-run          # what would run; nothing executed
+python scripts/soma/run_fullset.py                    # everything (P1,P2 skipped by default)
+python scripts/soma/run_fullset.py --shard 0/2        # second process / machine: --shard 1/2
+python scripts/soma/run_fullset.py --participants P12 --trials "Trial 1 Hands only" --max-frames 2000   # smoke test
+```
+
+Trial identity comes from `manual_frames.csv` (so only P1-P17 are known; Px/Pxh
+need their own list). The static is taken from the log's `Static` row, then
+`MANO_ONLY_STATIC` (P9), then an exact file name (`Static`, `Static trial`...);
+numbered files (`Static_trial01`, `Static01`) are movement trials and are never
+used. The static is **assumed good**; a participant is *flagged and left alone*
+(listed in `fullset/flagged.csv`, never guessed around) when it has no static
+(P5-P8 as of 2026-10-16), or the static looks bad: suspect markers after the
+fit, `|beta|` > 3, more than 2 hand markers absent, or a stage-2 static
+surface fit worse than 8 mm (known-good: P10 5.25, P12 4.65). `--static-map
+P5=path,...` supplies a static explicitly once you have fixed one.
+
+Fit settings are P10's validated ones (`--fit-config`) plus `--cuda-graph
+--mv-chunk 3000 --mv-overlap 150` (see `docs/fitting.md`). Each trial repeats
+the ~75 s static stage inside the fit script (~1% of the total).
