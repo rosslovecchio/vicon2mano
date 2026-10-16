@@ -12,10 +12,13 @@ then voted per raw trajectory piece (SOMA's "tracklet labelling").
 Self-contained by design: imports `vicon2mano.core` only, never another
 strategy or `scripts/`.
 
-- Code: `vicon2mano/strategies/soma/` (`library.py`, `synth.py`, `model.py`, `realdata.py`, `calibrate.py`)
-- Scripts: `scripts/soma/` (`build_library.py`, `preview_synth.py`, `train.py`, `eval_trial.py`, `calibrate_static.py`)
+- Code: `vicon2mano/strategies/soma/` (`library.py`, `synth.py`, `model.py`, `realdata.py`, `calibrate.py`, `infer.py`)
+- Scripts: `scripts/soma/` (`build_library.py`, `preview_synth.py`, `train.py`, `eval_trial.py`, `calibrate_static.py`,
+  `eval_sample.py`, `preview_labels.py`)
 - Tests: `tests/soma/`
-- Output: `results/soma/` (gitignored, regenerable)
+- Output: `results/soma/` (gitignored, regenerable; index in its `README.md`):
+  `libraries/`, `models/`, `labels/<P>/<trial>/`, `calibration/`, `fits/<P>_<trial>/`,
+  `mesh/`, `previews/`, `eval/`
 
 Status (2026-10-15): **trained; on raw P10/Trial2 it cuts Vicon's labelling
 errors ~20x (97.72% -> 99.89% correct).** Generalisation to other trials and
@@ -215,6 +218,45 @@ manual 70%, SOMA 99.9%). Under Vicon's and the manual labels index and middle
 would be crossed in about a third of frames, which a hand does not do: the
 P12 manual files carry an index/middle confusion at PIP and fingertip, and
 "agreement with manual" penalises SOMA for not copying it.
+
+## Tools
+
+- `infer.label_trial` labels a whole raw trial (per frame, then piece vote);
+  `eval_trial.py` and `eval_sample.py` both use it.
+- `preview_labels.py`: side-by-side 3-D animation of Vicon's vs SOMA's labels,
+  each finger drawn as a chain, no fit needed. Defaults to the window where the
+  two disagree most. A mislabel shows as a crossed, stretched or folded finger.
+
+## Cross-participant evaluation: the reviewed 500-frame sample (`eval_sample.py`)
+
+`results/shared/frame_sample/`: 500 anchor frames across 64 trials of P1-P17
+(categories random, largest_anomaly, poor_availability,
+geometry_availability_disagreement, static_or_calibration), reviewed in
+Nexus. The corrected exports (`<stem>_manuallylabelled.csv`) are full trials,
+but **only the reviewed frames were checked** -- elsewhere they inherit
+Vicon's labels or worse (the HOI fingertip segments and P12's index/middle
+swap above). So ground truth is the corrected export *at the reviewed frames
+only* (those in `manual_annotations.csv`): a raw point's identity is the label
+whose corrected position coincides with it (< 1 mm); a point deleted in
+review is a ghost and should be left unlabelled. `manual_annotations.csv`
+itself can't be scored directly: its `wrong_label` rows carry no correct
+label. Each trial is labelled in full (the piece vote needs it), scored on
+its reviewed frames; summaries per participant, category and missing-marker
+count, and over all participants except P10 (held out).
+
+P1 is skipped: its label names differ from the model's (P1/P2 also lack
+Forearm3/4 and Palm3 -- a reduced-marker model is needed).
+
+*Results: running (2026-10-16).*
+
+## P12 joint angles
+
+`configs/surface_fit/P12.json`: P10's settings and hand-picked attachments
+(protocol vertices on MANO's shared mesh) and P10's skin-slide slopes, on the
+SOMA-relabelled P12 static (surface fit ~3.4 mm). Trial 1 hands only is being
+fitted with the P12 model's labels and with Vicon's.
+
+*Results: running (2026-10-16).*
 
 ## Next
 

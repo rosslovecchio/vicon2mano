@@ -13,7 +13,7 @@ NOT caught by the fit error -- a finger bends to reach it -- but shows up
 here as an implausible segment).
 
     python scripts/soma/calibrate_static.py --participant P12 \\
-        --static "<DATA_ROOT>/P12/Static_trial.csv" --out results/soma/library_P12.npz
+        --static "<DATA_ROOT>/P12/Static_trial.csv" --out results/soma/libraries/library_P12.npz
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--participant", required=True)
     ap.add_argument("--static", required=True)
-    ap.add_argument("--base-library", default=str(REPO / "results/soma/library_P10_Trial2.npz"))
+    ap.add_argument("--base-library", default=str(REPO / "results/soma/libraries/library_P10_Trial2.npz"))
     ap.add_argument("--mano-dir", default=str(REPO / "../clean_kinematics/mano_v1_2/models"))
     ap.add_argument("--n-frames", type=int, default=200)
     ap.add_argument("--out", required=True)

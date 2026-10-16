@@ -9,7 +9,7 @@ what is left unlabelled, where SOMA and Vicon disagree). With ``--truth`` the
 labels are also compared to a labelled export; ``--truth-name`` says how much
 to trust it -- a partly trusted file prints as "agreement", not "correct".
 
-    python scripts/soma/eval_trial.py --model results/soma/labeler.pt
+    python scripts/soma/eval_trial.py --model results/soma/models/labeler_P10.pt
 """
 
 from __future__ import annotations
@@ -26,14 +26,13 @@ sys.path.insert(0, str(REPO))
 
 from vicon2mano.core.dataset import DATA_ROOT
 from vicon2mano.core.loader import load_csv
-from vicon2mano.strategies.soma.model import SomaLabeler, hard_assign
-from vicon2mano.strategies.soma.realdata import (clouds, pieces, raw_identities, relabelled_markers,
-                                                 vote_pieces, write_wide_csv)
+from vicon2mano.strategies.soma.infer import label_trial, load_model
+from vicon2mano.strategies.soma.realdata import raw_identities, relabelled_markers, write_wide_csv
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default=str(REPO / "results/soma/labeler.pt"))
+    ap.add_argument("--model", default=str(REPO / "results/soma/models/labeler_P10.pt"))
     ap.add_argument("--raw", default=str(Path(DATA_ROOT) / "P10/Trial2_handsonly.csv"))
     ap.add_argument("--truth", default=str(Path(DATA_ROOT) / "P10/Trial2_handsonly_manuallylabelled_filled.csv"),
                     help="labelled export to compare with; '' for none")
@@ -44,11 +43,8 @@ def main():
     args = ap.parse_args()
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    ck = torch.load(args.model, map_location=dev)
-    labels, N = ck["labels"], ck["n_points"]
+    net, labels, N = load_model(args.model, dev)
     M = len(labels)
-    net = SomaLabeler(M, d_model=ck["d_model"], n_layers=ck["layers"]).to(dev)
-    net.load_state_dict(ck["state"]); net.eval()
 
     raw, nr = load_csv(args.raw)[:2]
     nr = [n.split(":")[-1] for n in nr]
@@ -60,22 +56,7 @@ def main():
     else:
         ident = np.where(np.isfinite(raw).all(-1), -1, -2)
     n_pres = np.isfinite(raw).all(-1).sum(1)
-    frames = np.flatnonzero((n_pres > 0) & (n_pres <= N))
-    pts, valid, _, col = clouds(raw, np.where(np.isfinite(raw).all(-1), 0, -2), frames, N)
-
-    lab = np.full((T, C), -1); conf = np.zeros((T, C))
-    with torch.no_grad():
-        for s in range(0, len(frames), 2048):
-            lp = net(torch.tensor(pts[s:s + 2048], device=dev),
-                     torch.tensor(valid[s:s + 2048], device=dev)).float().cpu().numpy()
-            for b in range(lp.shape[0]):
-                k = s + b; nv = int(valid[k].sum()); t = frames[k]
-                h = hard_assign(lp[b], nv)
-                c = col[k, :nv]
-                lab[t, c] = h
-                conf[t, c] = np.where(h >= 0, np.exp(lp[b, np.arange(nv), np.maximum(h, 0)]), 0)
-    pid = pieces(raw)
-    voted = vote_pieces(lab, conf, pid, M)
+    lab, conf, voted, pid = label_trial(net, raw, N, dev)
 
     vicon = np.where(np.isfinite(raw).all(-1), np.array([labels.index(n) if n in labels else -1 for n in nr])[None], -1)
     pres = np.isfinite(raw).all(-1)

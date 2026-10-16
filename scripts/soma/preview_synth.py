@@ -6,7 +6,7 @@ observations only) on: per-pair marker distances, nearest-neighbour spacing
 (how close the labeller's confusable markers sit) and missing-marker counts.
 Writes an HTML with real and synthetic clouds side by side, coloured by label.
 
-    python scripts/soma/preview_synth.py --out results/soma/preview_synth.html
+    python scripts/soma/preview_synth.py --out results/soma/previews/synth_vs_real_P10.html
 """
 
 from __future__ import annotations
@@ -38,10 +38,10 @@ def colour(name):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--library", default=str(REPO / "results/soma/library_P10_Trial2.npz"))
+    ap.add_argument("--library", default=str(REPO / "results/soma/libraries/library_P10_Trial2.npz"))
     ap.add_argument("--mano-dir", default=str(REPO / "../clean_kinematics/mano_v1_2/models"))
     ap.add_argument("--n", type=int, default=20000)
-    ap.add_argument("--out", default=str(REPO / "results/soma/preview_synth.html"))
+    ap.add_argument("--out", default=str(REPO / "results/soma/previews/synth_vs_real_P10.html"))
     args = ap.parse_args()
 
     lib = MarkerLibrary.load(args.library)

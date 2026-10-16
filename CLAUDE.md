@@ -35,7 +35,7 @@ vicon2mano/
     gmm/         labeler.py           strategyGMM: spatial GMM + Viterbi
     deep/        labeler.py, synth_data.py, real_data.py   CNN labeler
     template/    (lives in core/correspondence.py; see docs)
-    soma/        library.py, synth.py, model.py, realdata.py, calibrate.py   learned labeller (SOMA-style)
+    soma/        library.py, synth.py, model.py, realdata.py, calibrate.py, infer.py   learned labeller (SOMA-style)
 scripts/   cascade/ · mano/ · gmm/ · deep/ · soma/ · shared/
 tests/     core/ · cascade/ · mano/ · gmm/ · deep/ · soma/
 results/   cascade/ · mano/ · gmm/ · soma/   (gitignored, regenerable)
@@ -120,6 +120,21 @@ can only bootstrap from that 7–15% clean core, and that core is one
 near-static pose. A few hundred hand-labelled frames **spanning poses** is
 the highest-value thing to add; label where a strategy disagrees with the
 on-disk labels, starting with P10/Trial2 Hands only (15.1%, the cleanest).
+
+**The `*_manuallylabelled.csv` exports are trustworthy only at the frames
+that were reviewed** (the 500-frame sample, listed in
+`results/shared/frame_sample/manual_annotations.csv`). They are full-trial
+Nexus exports, so elsewhere they carry Vicon's labels or worse: P10 Trial2
+HOI keeps physically impossible fingertip segments, and P12's swap index and
+middle at PIP/fingertip in ~30% of frames (fingers crossed under those
+labels). The one exception is `P10/Trial2_handsonly_manuallylabelled_filled.csv`,
+a verified full-trial relabel (its gap-*fills* are still unreliable).
+
+**P12's file names are misleading.** Per `manual_frames.csv`, `Static_trial01`
+-`04` are its movement trials (Trial 1 Hands only, Trial 1 HOI, Trial2 Hands
+only, Trial2 HOI). The real static is the unmapped `Static_trial.csv`, and
+Vicon's labels on it are wrong almost everywhere -- use it SOMA-relabelled
+(`docs/strategies/soma.md`). `manual_frames.csv` maps a static only for P10.
 
 **P1 and P2 have a different physical marker configuration than every other
 participant**: both have the same 22 marker *columns* on disk, but

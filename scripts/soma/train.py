@@ -8,7 +8,7 @@ partly trusted export, --monitor-name makes the log say "agree" instead of
 "REAL". Real data is never trained on and never used to pick the checkpoint
 -- the saved model is simply the last one.
 
-    python scripts/soma/train.py --steps 30000 --out results/soma/labeler.pt
+    python scripts/soma/train.py --steps 30000 --out results/soma/models/labeler_P10.pt
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def accuracy(net, pts, valid, label, bs=512):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--library", default=str(REPO / "results/soma/library_P10_Trial2.npz"))
+    ap.add_argument("--library", default=str(REPO / "results/soma/libraries/library_P10_Trial2.npz"))
     ap.add_argument("--mano-dir", default=str(REPO / "../clean_kinematics/mano_v1_2/models"))
     ap.add_argument("--steps", type=int, default=30000)
     ap.add_argument("--batch", type=int, default=256)
@@ -64,7 +64,7 @@ def main():
     ap.add_argument("--monitor-raw", default=str(Path(DATA_ROOT) / "P10/Trial2_handsonly.csv"))
     ap.add_argument("--monitor-truth", default=str(Path(DATA_ROOT) / "P10/Trial2_handsonly_manuallylabelled_filled.csv"))
     ap.add_argument("--monitor-name", default="REAL", help="log label for the monitor accuracy")
-    ap.add_argument("--out", default=str(REPO / "results/soma/labeler.pt"))
+    ap.add_argument("--out", default=str(REPO / "results/soma/models/labeler_P10.pt"))
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 

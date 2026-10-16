@@ -11,7 +11,7 @@ from vicon2mano.strategies.soma.calibrate import calibrated_library, fit_static,
 from vicon2mano.strategies.soma.library import MarkerLibrary, face_frames
 
 REPO = Path(__file__).resolve().parents[2]
-LIB = REPO / "results/soma/library_P10_Trial2.npz"
+LIB = REPO / "results/soma/libraries/library_P10_Trial2.npz"
 MANO = REPO / "../clean_kinematics/mano_v1_2/models"
 needs_lib = pytest.mark.skipif(not (LIB.exists() and MANO.exists()),
                                reason="needs results/soma library and MANO weights")

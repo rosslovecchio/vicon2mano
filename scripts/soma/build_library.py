@@ -7,7 +7,7 @@ where it coincides (<1mm) with a point in the raw Vicon export -- elsewhere it
 was gap-filled and is not copied (the manual fill folds the pinky to 180 deg
 around frames 12600-13300, for one).
 
-    python scripts/soma/build_library.py --out results/soma/library_P10_Trial2.npz
+    python scripts/soma/build_library.py --out results/soma/libraries/library_P10_Trial2.npz
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def main():
     ap.add_argument("--mano-dir", default=str(REPO / "../clean_kinematics/mano_v1_2/models"))
     ap.add_argument("--min-real", type=int, default=20,
                     help="library frames need at least this many real (unfilled) markers")
-    ap.add_argument("--out", default=str(REPO / "results/soma/library_P10_Trial2.npz"))
+    ap.add_argument("--out", default=str(REPO / "results/soma/libraries/library_P10_Trial2.npz"))
     args = ap.parse_args()
 
     man, nm = load_csv(args.labelled)[:2]

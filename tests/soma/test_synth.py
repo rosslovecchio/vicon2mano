@@ -11,7 +11,7 @@ from vicon2mano.strategies.soma.library import (MarkerLibrary, closest_point_on_
 from vicon2mano.strategies.soma.synth import GHOST, PAD, SynthConfig, SynthGenerator, random_rotations
 
 REPO = Path(__file__).resolve().parents[2]
-LIB = REPO / "results/soma/library_P10_Trial2.npz"
+LIB = REPO / "results/soma/libraries/library_P10_Trial2.npz"
 FIT = REPO / "results/mano/P10_Trial2_handsonly/mano_fit_right_calibrated.npz"
 MANO = REPO / "../clean_kinematics/mano_v1_2/models"
 
