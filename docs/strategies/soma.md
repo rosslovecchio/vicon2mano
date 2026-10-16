@@ -247,16 +247,94 @@ count, and over all participants except P10 (held out).
 P1 is skipped: its label names differ from the model's (P1/P2 also lack
 Forearm3/4 and Palm3 -- a reduced-marker model is needed).
 
-*Results: running (2026-10-16).*
+**Results (2026-10-16), uncalibrated P10 model, 386 frames / 7,580 points
+across 15 participants** (P1/P2 need the reduced model below; P5 Trial2 HOI,
+P6 Trial 1 HOI and P7 Trial2 Hands only are skipped -- their corrected export
+has a different frame count from the raw file, so frames cannot be aligned):
+
+| | Vicon | SOMA |
+|---|---|---|
+| all except P10 (held out) | 79.2% | **87.0%** |
+| `random` frames | 90.8% | **95.4%** |
+| `largest_anomaly` frames | 68.4% | **79.6%** |
+
+Better than Vicon for 11 of 15 participants (P7 19.7 -> 92.8%, P11 53.4 ->
+86.5%, P4 79.8 -> 94.2%, P12 75.0 -> 91.2%). Two systematic failures:
+**P9 Trial2 Hands only** 91.7 -> 52.1% (confusion spread over the whole hand
+-- P9's layout differs: a forearm marker fell and was reattached, its static's
+palm is mislabelled) and **P16 Trial 1 HOI** 95.8 -> 51.6% (Forearm1<->3,
+2<->4 and Palm1<->Thumb1 swapped: the hand read as turned round, a wrist or
+forearm orientation outside P10's poses). Both point at per-participant
+calibration and wider wrist/forearm variation in the generator.
+
+**Calibrated models on the same reviewed frames:**
+
+| participant | Vicon | uncalibrated | calibrated |
+|---|---|---|---|
+| P12 (static, pose prior 20) | 75.0% | 91.2% | **97.6%** |
+| P2 (19 markers, pseudo-static) | 97.5% | 83.8% | **98.9%** |
+| P1 (19 markers, pseudo-static) | 98.9% | 71.3% | 83.9% |
+
+P1's 83.9% is 5 scorable frames: four are 88-100% right, the fifth (Trial 1
+HOI frame 35875) has 5 markers missing -- beyond the <= 4 trained for -- and
+is 14% right. Too few frames to judge P1.
+
+## Reduced marker set: P1 and P2
+
+`Forearm3`, `Forearm4`, `Palm3` are never present for P1/P2, and their
+corrected exports have exactly the remaining 19 columns. A 19-marker model
+(`MarkerLibrary.subset`, `train.py --drop-labels`) reaches 99.95% on P10
+Trial2 restricted to those 19 markers -- so losing the three markers costs
+almost nothing -- but only 71-84% on P1/P2's reviewed frames uncalibrated:
+**P1/P2's marker layout itself differs.** Measured on their own trials:
+Forearm1-Forearm2 52-56 mm (P10 25, P12 30), Palm2-Index1 35-40 mm (P10 59),
+Palm1-Palm2 43-49 mm (P10 33), Thumb1-Thumb2 49-58 mm (P10 40).
+
+Calibration handles it, with two additions:
+- **No static**: the stillest, flattest 200 frames of the participant's
+  Trial 1 Hands only stand in (`calibrate_static.py --session ... --window`):
+  P1 frames 13700-13900 (0.04 mm/frame, mean finger bend 6 deg), P2
+  25750-25950 (0.07 mm/frame, 8 deg), on Vicon's labels (~98% right here).
+- **`--offset-only`**: markers placed differently are not mislabelled; fitting
+  them drags the hand, and flagging them as suspect (the first attempt did:
+  Palm1/Palm2, Thumb1) throws the layout away. They are left out of the fit
+  and their offsets recorded: Forearm1, Forearm2, Palm1, Palm2, Thumb1.
+  Fitted markers then sit 1.1-9.7 mm from the model; all 19 calibrated.
+
+## Static pose prior (`fit_static(w_pose=...)`)
+
+At the original `w_pose = 1` the static fit kinked fingertips onto markers
+(P12: PIP/DIP rotated 28-63 deg on a flat static; index and pinky tips looked
+broken), and those angles leaked into the measured offsets. Sweep on P12:
+w 1 / 20 / 100 / 500 -> joint rotations 28-63 / 4-17 / 1-7 / 0-3 deg, median
+fit error 5.0 / 7.0 / 8.3 / 9.1 mm, Palm1 flagged from 100 up. Default is now
+20. Retraining P12 on the corrected library raised its reviewed-frame score
+95.2 -> 97.6% and cut unlabelled points 1.4 -> 0.5%.
+
+## Scripts resolve trials through `manual_frames.csv`
+
+`eval_trial.py`, `calibrate_static.py` and `train.py` take `--participant`
+and `--session` ("Trial 1 Hands only", ...) and resolve the file with
+`core.dataset.find_trial_csv`. Raw paths remain only for files the mapping
+does not hold (P12's real static). With `--session`, `eval_trial.py` scores
+against nothing unless `--truth` is given.
 
 ## P12 joint angles
 
 `configs/surface_fit/P12.json`: P10's settings and hand-picked attachments
 (protocol vertices on MANO's shared mesh) and P10's skin-slide slopes, on the
-SOMA-relabelled P12 static (surface fit ~3.4 mm). Trial 1 hands only is being
-fitted with the P12 model's labels and with Vicon's.
+SOMA-relabelled P12 static (surface fit ~3.4 mm). Trial 1 Hands only, labels
+from the P12 model trained before the pose-prior fix:
 
-*Results: running (2026-10-16).*
+| | Vicon labels | SOMA labels |
+|---|---|---|
+| finger residual | 27.95 mm | **13.93 mm** |
+| frames with any finger joint > 120 deg (of 47,108) | 8,836 | **2,293** |
+
+Where the labellings disagree, segments are plausible (vs P12's own static)
+in 13.9-80.4% of frames under Vicon's labels, 92.5-99.1% under SOMA's.
+2,293 implausible frames is far above P10's 176: most likely the reused P10
+attachments and skin-slide slopes on P12's larger hand, not the labels.
 
 ## Next
 

@@ -88,7 +88,8 @@ def _axis_angle(R: np.ndarray) -> np.ndarray:
 
 def fit_static(model, lib: MarkerLibrary, cloud_mm: np.ndarray, *, device: str = "cpu",
                iters_root: int = 300, iters: int = 1500, w_beta: float = 2.0,
-               w_pose: float = 20.0, suspect_mm: float = 15.0, rounds: int = 2) -> dict:
+               w_pose: float = 20.0, suspect_mm: float = 15.0, rounds: int = 2,
+               offset_only: tuple[str, ...] = ()) -> dict:
     """Fit MANO shape and pose to one static cloud (mm). See module docstring.
 
     ``w_pose`` (mm^2 per rad^2) holds the static near a flat hand. At 1.0 the
@@ -102,7 +103,17 @@ def fit_static(model, lib: MarkerLibrary, cloud_mm: np.ndarray, *, device: str =
     Returns betas (10,), hand_pose (45,), global_orient (3,), transl (3,) m,
     the posed vertices (778, 3) mm, per-marker fit error ``err_mm`` (M,),
     the static offset ``r_s`` (M, 3) in each attachment face's frame (NaN
-    where absent, suspect or forearm), and the ``suspects`` (label list).
+    where absent, suspect, or forearm not listed in ``offset_only``), and the
+    ``suspects`` (label list).
+
+    ``offset_only``: markers left out of the fit whose static offsets are
+    still recorded. For a participant whose marker LAYOUT differs from the
+    base subject's, those markers are not mislabelled -- they sit elsewhere,
+    and fitting them would drag the hand; recording their offset is exactly
+    what calibration is for. P1/P2: Forearm1-Forearm2 52-56 mm apart vs P10's
+    25, Palm2 ~20 mm more distal, Thumb1-Thumb2 49-58 vs 40 mm. A forearm
+    offset also bakes in that recording's wrist angle, a smaller error than
+    the wrong layout.
     """
     model = model.to(device)
     F = np.asarray(model.faces, dtype=np.int64)
@@ -112,6 +123,10 @@ def fit_static(model, lib: MarkerLibrary, cloud_mm: np.ndarray, *, device: str =
     present = np.isfinite(cloud_mm).all(-1)
     hand = np.array([not is_forearm(n) for n in lib.labels])
     root = np.array([is_root(n) for n in lib.labels])
+    oo = np.array([n in offset_only for n in lib.labels])
+    unknown = set(offset_only) - set(lib.labels)
+    if unknown:
+        raise ValueError(f"offset_only names not in the library: {sorted(unknown)}")
 
     def forward(betas, pose, orient, transl):
         o = model(betas=betas[None], hand_pose=pose[None], global_orient=orient[None],
@@ -124,7 +139,7 @@ def fit_static(model, lib: MarkerLibrary, cloud_mm: np.ndarray, *, device: str =
     z = lambda k: torch.zeros(k, device=device)
     with torch.no_grad():
         _, P0, J0 = forward(z(10), z(45), z(3), z(3))
-    use = root & present
+    use = root & present & ~oo
     R0, t0 = _kabsch(P0[use].cpu().numpy(), cloud_mm[use])
     orient = torch.tensor(_axis_angle(R0), dtype=torch.float32, device=device, requires_grad=True)
     transl = torch.tensor((t0 + R0 @ J0.cpu().numpy() - J0.cpu().numpy()) / 1000.0,
@@ -132,7 +147,7 @@ def fit_static(model, lib: MarkerLibrary, cloud_mm: np.ndarray, *, device: str =
     betas = z(10).requires_grad_(True)
     pose = z(45).requires_grad_(True)
 
-    active = present & hand
+    active = present & hand & ~oo
     suspects: list[str] = []
     for rnd in range(rounds + 1):
         act = torch.tensor(active, device=device)
@@ -163,7 +178,7 @@ def fit_static(model, lib: MarkerLibrary, cloud_mm: np.ndarray, *, device: str =
         Vn = V.cpu().numpy()
         P, R = face_frames(Vn, F, lib.face_idx, lib.bary)
         r_s = np.einsum("mji,mj->mi", R, cloud_mm - P)
-    keep = present & hand & np.array([n not in suspects for n in lib.labels])
+    keep = present & ((hand & np.array([n not in suspects for n in lib.labels])) | oo)
     r_s[~keep] = np.nan
     err[~present] = np.nan
     return dict(betas=betas.detach().cpu().numpy(), hand_pose=pose.detach().cpu().numpy(),
