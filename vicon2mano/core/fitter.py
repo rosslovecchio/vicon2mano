@@ -45,6 +45,50 @@ try:
 except ImportError:
     _SMPLX_AVAILABLE = False
 
+
+_PARENT_LISTS: dict = {}
+
+
+def _batch_rigid_transform_nosync(rot_mats, joints, parents, dtype=torch.float32):
+    """smplx's ``batch_rigid_transform`` with the kinematic tree read from a cached
+    Python list.
+
+    Upstream does ``transform_chain[parents[i]]`` with ``parents`` a CUDA tensor,
+    so every step of the chain is a hidden device->host sync: it stalls the
+    stream each iteration and makes the forward pass impossible to capture in a
+    CUDA graph. Same maths; the list is built once per tree (during the first,
+    eager call).
+    """
+    import torch.nn.functional as F
+    from smplx.lbs import transform_mat
+    key = (parents.data_ptr(), tuple(parents.shape))
+    plist = _PARENT_LISTS.get(key)
+    if plist is None:
+        plist = _PARENT_LISTS[key] = [int(p) for p in parents.cpu().tolist()]
+
+    joints = torch.unsqueeze(joints, dim=-1)
+    rel_joints = joints.clone()
+    rel_joints[:, 1:] -= joints[:, parents[1:]]
+    transforms_mat = transform_mat(
+        rot_mats.reshape(-1, 3, 3),
+        rel_joints.reshape(-1, 3, 1)).reshape(-1, joints.shape[1], 4, 4)
+    transform_chain = [transforms_mat[:, 0]]
+    for i in range(1, len(plist)):
+        transform_chain.append(torch.matmul(transform_chain[plist[i]],
+                                            transforms_mat[:, i]))
+    transforms = torch.stack(transform_chain, dim=1)
+    posed_joints = transforms[:, :, :3, 3]
+    joints_homogen = F.pad(joints, [0, 0, 0, 1])
+    rel_transforms = transforms - F.pad(
+        torch.matmul(transforms, joints_homogen), [3, 0, 0, 0, 0, 0, 0, 0])
+    return posed_joints, rel_transforms
+
+
+if _SMPLX_AVAILABLE:
+    import smplx.lbs as _smplx_lbs
+    _UPSTREAM_BATCH_RIGID_TRANSFORM = _smplx_lbs.batch_rigid_transform   # kept for tests
+    _smplx_lbs.batch_rigid_transform = _batch_rigid_transform_nosync
+
 from vicon2mano.core.correspondence import MANO_JOINT_NAMES, get_assignment
 
 # ---------------------------------------------------------------------------
@@ -63,11 +107,30 @@ _TIP_VERTEX_IDS = [744, 320, 443, 554, 671]  # thumb, index, middle, ring, pinky
 _REPO_TIP_SLOTS = [4, 8, 12, 16, 20]
 
 
+_SLOT_INDEX: dict = {}
+
+
+def _slot_index(device):
+    """The four index lists as device tensors, built once per device.
+
+    Indexing with Python lists copies them host->device on every call, which
+    stalls the stream and cannot be captured in a CUDA graph.
+    """
+    idx = _SLOT_INDEX.get(device)
+    if idx is None:
+        import torch
+        idx = tuple(torch.tensor(v, dtype=torch.long, device=device) for v in
+                    (_REPO_JOINT_SLOTS, _SMPLX_JOINT_ORDER, _REPO_TIP_SLOTS, _TIP_VERTEX_IDS))
+        _SLOT_INDEX[device] = idx
+    return idx
+
+
 def mano_output_to_joints21(out) -> "torch.Tensor":
     """Map an smplx MANO forward output to (B, 21, 3) in repo joint order."""
+    rj, sj, rt, tv = _slot_index(out.joints.device)
     j21 = out.joints.new_zeros((out.joints.shape[0], 21, 3))
-    j21[:, _REPO_JOINT_SLOTS] = out.joints[:, _SMPLX_JOINT_ORDER]
-    j21[:, _REPO_TIP_SLOTS] = out.vertices[:, _TIP_VERTEX_IDS]
+    j21[:, rj] = out.joints[:, sj]
+    j21[:, rt] = out.vertices[:, tv]
     return j21
 
 

@@ -16,7 +16,7 @@ own page rather than one ever-growing log.
 - Extra runtime deps not in pyproject: `plotly`, `matplotlib`
 
 ```bash
-.viconvenv/Scripts/python.exe -m pytest tests/ -q     # 268 tests
+.viconvenv/Scripts/python.exe -m pytest tests/ -q     # 282 tests (6 skipped)
 ```
 
 ## Layout

@@ -56,3 +56,63 @@ recorded anywhere) — `--rate` overrides.
   joints with smoothed per-axis adaptive zoom (`set_box_aspect`), and
   `.html` output writes a self-contained scrubbing player for phones that
   can't render GIF/mp4.
+
+## Full-dataset speed and frame flags (2026-10-16, RTX 5090)
+
+Measured on P10 Trial2 hands-only with SOMA labels, `configs/surface_fit/P10.json`
+settings, GPU shared with another job (65-93% busy). Stage 3 (labelling) takes
+13 s for the 42k-frame trial.
+
+**Where the surface fit's time went.** The movement fit is ~5,500 Adam
+iterations per chunk and was launch-latency bound (~22 ms/iteration at any batch
+size), not compute bound. Two hidden causes: smplx's `batch_rigid_transform`
+indexes a Python list with a CUDA tensor (`transform_chain[parents[i]]`, a
+device->host sync per kinematic step), and the loss used boolean-mask indexing.
+Fixes, all numerically equivalent (eager refactor is bit-identical to the old
+code; graph mode differs by ~0.08 deg mean, 1 deg max):
+
+- `core.fitter`: patched `smplx.lbs.batch_rigid_transform` (cached parent list)
+  and cached index tensors in `mano_output_to_joints21`.
+- `fit_surface_markers.py --cuda-graph`: whole step (forward, backward, Adam)
+  captured in a CUDA graph; falls back to eager if capture fails. Masked means
+  replace boolean indexing; constants are sliced outside the loss closures
+  (a Python-list index or a scalar write into a CUDA tensor is a host->device
+  copy and cannot be captured). `torch.compile` is unavailable here (no Triton /
+  C++ compiler on Windows).
+- `--mv-overlap N`: each chunk also fits N frames either side and keeps only its
+  own. Independent chunks used to jump by up to 19 deg at the boundary
+  (typical frame step 0.34 deg); with 150 frames of overlap the boundary steps
+  are 0.9-2.4 deg.
+
+| 6,000-frame window (frames 6274-12273) | ms/frame | angle err vs old baseline |
+|---|---|---|
+| old: eager, chunk 1500 | 104 | - |
+| `--cuda-graph`, chunk 1500 | 18.0 | 0.21 deg mean, p99 2.1 |
+| `--cuda-graph --mv-chunk 1500 --mv-overlap 150` | 19.7 | 0.25 deg mean, p99 2.3 |
+| `--cuda-graph`, one 6000 chunk | 15.7 | 0.53 deg mean, p99 3.1 |
+| `--cuda-graph`, one 12000 chunk | 17.6 | - |
+| 3 processes x (chunk 3000, overlap 150) | 46 each = 15.4 aggregate | - |
+
+Once launch overhead is gone the GPU is the limit: bigger chunks and extra
+processes add little (~15%). **Recommended: `--cuda-graph --mv-chunk 3000
+--mv-overlap 150`**, one or two processes, ~19 ms/frame, i.e. ~105 h for 20M
+frames (the old eager chunk-1500 setting was ~580 h).
+
+Not worth doing (measured against the old baseline on the same window):
+fewer iterations (2,000 vs 5,500) cost 5.7 deg mean / 16% of joint-frames
+>10 deg; fitting every 2nd/4th/8th frame and interpolating (slerp) cost
+1.3 / 2.4 / 4.1 deg mean, and the error is already present *at the fitted
+frames*, so it is the sparse fit drifting, not the interpolation. A post-fit
+Gaussian/Savitzky-Golay smoother changes angles by <0.13 deg mean: the fit is
+already smooth (jitter 0.033 deg/frame^2); the only large steps were the chunk
+boundaries.
+
+**Frame flags.** `scripts/soma/flag_frames.py` grades every fitted frame
+0 (no signal) / 1 (review) / 2 (unreliable) from three independent signals:
+label doubt (low confidence, per-frame label != piece vote), fit residual (a
+marker far above its own robust median), and implausible angles. On P10 only
+0.114% of points are wrong after the vote and 60% of those wrong labels have
+confidence >= 0.9, so confidence alone catches at most ~40% of them; the
+thresholds are uncalibrated starting points and need checking against reviewed
+frames (`eval_sample.py`) and injected swaps before being trusted on other
+participants.

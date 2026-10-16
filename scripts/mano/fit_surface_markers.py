@@ -338,6 +338,9 @@ def basis_limit_bounds(torsion_only=False, free_flexion=False):
     return lo, hi
 
 
+_TWIST_W: dict = {}
+
+
 def basis_limit_penalty(hp, Bt, lo, hi, twist_w=1.0):
     """Hinge penalty on the projection onto each joint's measured basis.
 
@@ -351,10 +354,100 @@ def basis_limit_penalty(hp, Bt, lo, hi, twist_w=1.0):
     c = torch.einsum("tjk,jkc->tjc", hpj, Bt)      # project into the basis
     pen = torch.relu(c - hi) ** 2 + torch.relu(lo - c) ** 2
     if twist_w != 1.0:
-        w = torch.ones(3, device=pen.device)
-        w[2] = twist_w
+        # cached: writing a Python scalar into a CUDA tensor is a host->device
+        # copy, which a CUDA graph cannot capture (built in the eager warm-up)
+        key = (str(pen.device), float(twist_w))
+        w = _TWIST_W.get(key)
+        if w is None:
+            w = _TWIST_W[key] = torch.tensor([1.0, 1.0, float(twist_w)], device=pen.device)
         pen = pen * w
     return pen.sum((-1, -2)).mean()
+
+
+def _masked_sq_mean(d, w, cnt):
+    """Mean over observed markers of |d|^2.
+
+    Sync-free stand-in for ``(d ** 2).sum(-1)[mask].mean()``: boolean-mask
+    indexing forces a host round-trip every iteration and cannot be captured
+    in a CUDA graph. ``w`` is the 0/1 mask as float, ``cnt`` its sum.
+    """
+    return ((d ** 2).sum(-1) * w).sum() / cnt
+
+
+def run_adam(opt, loss_fn, n_iters, graph=False, label="", post_grad=None,
+             report=None, check_every=100):
+    """Run ``n_iters`` Adam steps of ``loss_fn()``; return ``report()``.
+
+    The loop is launch-latency bound (a 1500-frame batch costs ~22 ms per
+    iteration whatever the batch size), so with ``graph=True`` one whole step
+    -- forward, backward, Adam -- is captured into a CUDA graph and replayed.
+    ``opt`` must then have been built with ``capturable=True``. If capture
+    fails the remaining iterations run eagerly, so results never depend on
+    the graph path working. ``post_grad`` runs between backward and the step
+    (used to mask gradients); ``report`` is evaluated while the graph's
+    tensors are still alive.
+    """
+    import torch
+
+    def one():
+        loss = loss_fn()
+        loss.backward()
+        if post_grad is not None:
+            post_grad()
+        return loss
+
+    def check(loss, it):
+        if not bool(torch.isfinite(loss)):
+            raise RuntimeError(f"{label} loss non-finite at iteration {it}")
+
+    done, loss = 0, None
+    if graph and n_iters > 8 and torch.cuda.is_available():
+        g = None
+        try:
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):                  # warm-up = 3 real steps
+                for _ in range(3):
+                    opt.zero_grad(set_to_none=True)
+                    loss = one()
+                    opt.step()
+            torch.cuda.current_stream().wait_stream(side)
+            done = 3
+            check(loss, done)
+            loss = None            # drop the warm-up autograd graph before capturing
+            g = torch.cuda.CUDAGraph()
+            opt.zero_grad(set_to_none=True)
+            with torch.cuda.graph(g):
+                loss = one()
+                opt.step()
+            while done < n_iters:
+                g.replay()
+                done += 1
+                if done % check_every == 0:
+                    check(loss, done)
+            check(loss, done)
+            return report() if report else None
+        except Exception as e:                       # capture can fail in several ways
+            if "non-finite" in str(e):
+                raise
+            print(f"    [cuda-graph unavailable for {label or 'stage'}: {str(e)[:200]}; "
+                  f"finishing {n_iters - done} iterations eagerly]")
+            g = None
+            for _ in range(2):                       # a failed capture leaves a sticky error
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+    for it in range(done, n_iters):
+        opt.zero_grad()
+        loss = one()
+        opt.step()
+        if (it + 1) % check_every == 0:
+            check(loss, it + 1)
+    if loss is not None:
+        check(loss, n_iters)
+    return report() if report else None
+
 
 
 def _interp_gaps(th):
@@ -844,6 +937,14 @@ def main() -> None:
                      help="frames per optimisation chunk; a whole trial does "
                           "not fit in one batch. Chunks warm-start from the "
                           "previous chunk's last frame.")
+    ap.add_argument("--mv-overlap", type=int, default=0,
+                     help="extra frames fitted on each side of a chunk and then "
+                          "discarded, so the kept frames are never at a chunk edge "
+                          "(independent chunks otherwise jump by up to ~16 deg at "
+                          "the boundary). 0 = off.")
+    ap.add_argument("--cuda-graph", action="store_true",
+                     help="capture each optimisation step in a CUDA graph; same "
+                          "maths, far less launch overhead")
     ap.add_argument("--npz-out", default=None,
                      help="write a FitResult-style npz (readable by "
                           "scripts/mano/animate_mesh.py)")
@@ -1258,13 +1359,17 @@ def main() -> None:
         # config) and only rebuild its predictions -- ~80s instead of ~70min.
         pre = np.load(args.from_npz) if args.from_npz else None
         for ci in range(n_chunks):
-            sl = slice(ci * chunk, min((ci + 1) * chunk, len(mf)))
-            idx = mf[sl]
-            Tm = len(idx)
+            sl = slice(ci * chunk, min((ci + 1) * chunk, len(mf)))   # frames this chunk keeps
             if pre is not None:
+                idx = mf[sl]
                 GO.append(pre["global_orient"][idx]); HP.append(pre["hand_pose"][idx])
                 TR.append(pre["transl"][idx])
                 continue
+            ov = max(0, args.mv_overlap)
+            sle = slice(max(0, sl.start - ov), min(len(mf), sl.stop + ov))  # frames it fits
+            idx = mf[sle]
+            Tm = len(idx)
+            core = slice(sl.start - sle.start, sl.stop - sle.start)
             Mm = torch.tensor(mv[idx][:, cols] * 1e-3, dtype=torch.float32, device=dev)
             mmk = torch.isfinite(Mm).all(-1)
             Mm_s = torch.nan_to_num(Mm, nan=0.0)   # see the note in stage 2
@@ -1328,59 +1433,74 @@ def main() -> None:
                 n_root = args.iters_root
             else:
                 n_root = int(n_it * args.root_frac)
+            opt_kw = dict(capturable=True) if args.cuda_graph else {}
             opt_root = torch.optim.Adam([{"params": [orient_m], "lr": 1e-2},
-                                         {"params": [tr_m2], "lr": 5e-3}])
+                                         {"params": [tr_m2], "lr": 5e-3}], **opt_kw)
             # In staged mode the finger stage must NOT keep re-optimising the
             # root. Measured: palm+MCP alone place the hand to 2.6-6.4mm, but
             # letting the fingers vote on orient/transl afterwards pushes those
             # same markers to 11-28mm -- the finger error drags the root. So
             # stage 2 solves pose only, against a root that is now fixed.
             if args.staged and args.freeze_root:
-                opt = torch.optim.Adam([{"params": [hp_m], "lr": 2e-2}])
+                opt = torch.optim.Adam([{"params": [hp_m], "lr": 2e-2}], **opt_kw)
             else:
                 opt = torch.optim.Adam([{"params": [hp_m], "lr": 2e-2},
                                         {"params": [orient_m], "lr": 5e-3},
-                                        {"params": [tr_m2], "lr": 3e-3}])
-            for it in range(n_root):
-                opt_root.zero_grad()
+                                        {"params": [tr_m2], "lr": 3e-3}], **opt_kw)
+            # Observed-marker weights: masked means without boolean indexing,
+            # so no iteration needs a host round-trip (see run_adam).
+            w_all = mmk.float()
+            c_all = w_all.sum().clamp(min=1.0)
+            bexp = betas_f.unsqueeze(0).expand(Tm, -1)
+
+            def _wc(cols):
+                w = w_all[:, cols]
+                return w, w.sum().clamp(min=1.0)
+
+            def _smooth(loss, a, scale=1.0):
+                return loss + args.w_smooth * scale * (
+                    (a[2:] - 2 * a[1:-1] + a[:-2]) ** 2).sum(-1).mean()
+
+            def _mean_mm(d, w, cnt):
+                return ((d.norm(dim=-1) * w).sum() / cnt).item() * 1000
+
+            # ---- root stage: palm + MCP markers fix orient/transl first ----
+            w_r, c_r = _wc(root_k)
+            # Slice the constants once, outside the closures: indexing with a
+            # Python list copies it host->device, which a CUDA graph forbids.
+            fidx_r, bw_r, M_r = fidx[root_k], bw[:, root_k], Mm_s[:, root_k]
+            root_stats = {}
+
+            def root_loss():
                 om = model(global_orient=orient_m, hand_pose=hp_m, transl=tr_m2,
-                           betas=betas_f.unsqueeze(0).expand(Tm, -1),
-                           return_verts=True)
+                           betas=bexp, return_verts=True)
                 if off_vec is not None:
                     Jc = mano_output_to_joints21(om)
                     R = segment_frames_t(Jc)[:, root_k]
-                    P = torch.stack([Jc[:, _OFFSET_SEG[q][0]] for q in root_k], 1)                         + torch.einsum("tpij,pj->tpi", R, off_vec[root_k])
+                    P = torch.stack([Jc[:, _OFFSET_SEG[q][0]] for q in root_k], 1) \
+                        + torch.einsum("tpij,pj->tpi", R, off_vec[root_k])
                 else:
-                    Vt = om.vertices[:, fidx[root_k]]
-                    P = (Vt * bw[:, root_k]).sum(2)
-                dr = (P - Mm_s[:, root_k])[mmk[:, root_k]]
-                lr_ = (dr ** 2).sum(-1).mean()
+                    Vt = om.vertices[:, fidx_r]
+                    P = (Vt * bw_r).sum(2)
+                dr_ = P - M_r
+                root_stats["dr"] = dr_
+                lr_ = _masked_sq_mean(dr_, w_r, c_r)
                 if args.w_smooth > 0 and Tm > 2:
-                    lr_ = lr_ + args.w_smooth * (
-                        (orient_m[2:] - 2 * orient_m[1:-1] + orient_m[:-2]) ** 2
-                    ).sum(-1).mean()
-                if not torch.isfinite(lr_):
-                    raise RuntimeError(f"root stage non-finite at chunk {ci} it {it}")
-                lr_.backward()
-                opt_root.step()
-            # ---- thumb stage: root fixed, ONLY thumb joints, ONLY thumb
-            # markers. The thumb's CMC is a saddle joint whose axes separate
-            # far less cleanly than a finger's (0.93 palmward / 0.30 sideways
-            # against ~0.99/0.02), so it is the chain most likely to be
-            # out-competed when all 18 markers pull at once. Solving it first,
-            # against its own markers alone, gives it the same protection the
-            # root stage gives the palm.
+                    lr_ = _smooth(lr_, orient_m)
+                return lr_
+
+            if n_root > 0:
+                run_adam(opt_root, root_loss, n_root, graph=args.cuda_graph,
+                         label=f"root stage, chunk {ci}",
+                         report=lambda: root_stats.__setitem__(
+                             "resid", _mean_mm(root_stats["dr"].detach(), w_r, c_r)))
             # ---- per-chain stage ------------------------------------
-            # With the root frozen, each finger is an INDEPENDENT kinematic
-            # chain: its joints move only its own markers, so fitting the
-            # chains separately is mathematically equivalent to fitting them
-            # together. What differs is the optimisation: the data term is a
-            # mean over all markers while the smoothness and joint-limit
-            # penalties are summed over all joints, so per chain those sit at
-            # a different relative weight, and each chain gets its own
-            # convergence rather than a share of one budget. That this
-            # matters is not theoretical -- fitting the thumb alone first
-            # moved Index3 from ~27mm to 10.7mm.
+            # With the root frozen each finger is an INDEPENDENT kinematic
+            # chain, so fitting the chains separately is mathematically
+            # equivalent to fitting them together; what differs is the
+            # optimisation: each chain gets its own convergence rather than a
+            # share of one budget (fitting the thumb alone first moved Index3
+            # from ~27mm to 10.7mm).
             # pose component blocks, in MANO's joint order
             _CHAIN_C = {"Index": (0, 9), "Middle": (9, 18), "Pinky": (18, 27),
                         "Ring": (27, 36), "Thumb": (36, 45)}
@@ -1397,21 +1517,24 @@ def main() -> None:
                 lo_c, hi_c = _CHAIN_C[cname]
                 gmask = torch.zeros(fitter._pose_dim(), device=dev)
                 gmask[lo_c:hi_c] = 1.0
-                opt_c = torch.optim.Adam([{"params": [hp_m], "lr": 2e-2}])
-                for it in range(n_ch):
-                    opt_c.zero_grad()
-                    om = model(global_orient=orient_m, hand_pose=hp_m,
-                               transl=tr_m2,
-                               betas=betas_f.unsqueeze(0).expand(Tm, -1),
-                               return_verts=True)
+                opt_c = torch.optim.Adam([{"params": [hp_m], "lr": 2e-2}], **opt_kw)
+                w_c, c_c = _wc(ch_k)
+                fidx_c, bw_c, M_c = fidx[ch_k], bw[:, ch_k], Mm_s[:, ch_k]
+                ch_stats = {}
+
+                def chain_loss(ch_k=ch_k, w_c=w_c, c_c=c_c, ch_stats=ch_stats,
+                               fidx_c=fidx_c, bw_c=bw_c, M_c=M_c):
+                    om = model(global_orient=orient_m, hand_pose=hp_m, transl=tr_m2,
+                               betas=bexp, return_verts=True)
                     if off_vec is not None:
                         Jc = mano_output_to_joints21(om)
                         R = segment_frames_t(Jc)[:, ch_k]
-                        P = torch.stack([Jc[:, _OFFSET_SEG[q][0]] for q in ch_k], 1)                             + torch.einsum("tpij,pj->tpi", R, off_vec[ch_k])
+                        P = torch.stack([Jc[:, _OFFSET_SEG[q][0]] for q in ch_k], 1) \
+                            + torch.einsum("tpij,pj->tpi", R, off_vec[ch_k])
                         nr = torch.zeros_like(P)
                     else:
-                        Vt = om.vertices[:, fidx[ch_k]]
-                        P = (Vt * bw[:, ch_k]).sum(2)
+                        Vt = om.vertices[:, fidx_c]
+                        P = (Vt * bw_c).sum(2)
                         nr = torch.cross(Vt[:, :, 1] - Vt[:, :, 0],
                                          Vt[:, :, 2] - Vt[:, :, 0], dim=-1)
                         nr = nr / torch.sqrt((nr ** 2).sum(-1, keepdim=True) + 1e-18)
@@ -1420,25 +1543,23 @@ def main() -> None:
                         P = P + stretch_offsets(Jc, hp_m, Bt,
                                                 [names[q] for q in ch_k], slopes,
                                                 ref_deg, args.stretch_gate)
-                    dt = (P + args.standoff * 1e-3 * nr
-                          - Mm_s[:, ch_k])[mmk[:, ch_k]]
-                    lt = (dt ** 2).sum(-1).mean()
+                    dt = P + args.standoff * 1e-3 * nr - M_c
+                    ch_stats["dt"] = dt
+                    lt = _masked_sq_mean(dt, w_c, c_c)
                     if args.w_smooth > 0 and Tm > 2:
-                        lt = lt + args.w_smooth * (
-                            (hp_m[2:] - 2 * hp_m[1:-1] + hp_m[:-2]) ** 2
-                        ).sum(-1).mean()
+                        lt = _smooth(lt, hp_m)
                     if args.biomech > 0 and jl_lo is not None:
                         lt = lt + args.biomech * basis_limit_penalty(
                             hp_m, Bt, jl_lo, jl_hi, args.twist_weight)
-                    if not torch.isfinite(lt):
-                        raise RuntimeError(f"{cname} stage non-finite, chunk {ci}")
-                    lt.backward()
-                    hp_m.grad.mul_(gmask)      # only this chain may move
-                    opt_c.step()
-                with torch.no_grad():
-                    print(f"    {cname:7s} stage: "
-                          f"{dt.norm(dim=-1).mean().item()*1000:6.2f} mm over "
-                          f"{len(ch_k)} markers")
+                    return lt
+
+                run_adam(opt_c, chain_loss, n_ch, graph=args.cuda_graph,
+                         label=f"{cname} stage, chunk {ci}",
+                         post_grad=lambda gm=gmask: hp_m.grad.mul_(gm),  # only this chain may move
+                         report=lambda ch_stats=ch_stats, w_c=w_c, c_c=c_c: ch_stats.__setitem__(
+                             "mm", _mean_mm(ch_stats["dt"].detach(), w_c, c_c)))
+                print(f"    {cname:7s} stage: {ch_stats['mm']:6.2f} mm over "
+                      f"{len(ch_k)} markers")
 
             # An explicit --iters-root is additive: it buys the root more
             # iterations rather than taking them from the fingers. (Setting it
@@ -1446,16 +1567,16 @@ def main() -> None:
             # iterations, so nothing was fitted and `dd` was never assigned.)
             n_fing = 0 if args.root_only else (
                 n_it if args.iters_root > 0 else n_it - n_root)
-            dd = None
-            for it in range(n_fing):
-                opt.zero_grad()
+            main_stats = {}
+
+            def main_loss():
                 om = model(global_orient=orient_m, hand_pose=hp_m, transl=tr_m2,
-                           betas=betas_f.unsqueeze(0).expand(Tm, -1),
-                           return_verts=True)
+                           betas=bexp, return_verts=True)
                 if off_vec is not None:
                     Jc = mano_output_to_joints21(om)
                     R = segment_frames_t(Jc)
-                    P = torch.stack([Jc[:, sg[0]] for sg in _OFFSET_SEG], 1)                         + torch.einsum("tpij,pj->tpi", R, off_vec)
+                    P = torch.stack([Jc[:, sg[0]] for sg in _OFFSET_SEG], 1) \
+                        + torch.einsum("tpij,pj->tpi", R, off_vec)
                     nrm = torch.zeros_like(P)
                 else:
                     Vt = om.vertices[:, fidx]
@@ -1467,32 +1588,34 @@ def main() -> None:
                     Jc = mano_output_to_joints21(om)
                     P = P + stretch_offsets(Jc, hp_m, Bt, names, slopes, ref_deg,
                                             args.stretch_gate)
-                dd = (P + args.standoff * 1e-3 * nrm - Mm_s)[mmk]
-                inw = torch.relu(-((Mm_s - P) * nrm).sum(-1))[mmk]
-                loss = (dd ** 2).sum(-1).mean() + args.w_inside * (inw ** 2).mean()
+                dd_ = P + args.standoff * 1e-3 * nrm - Mm_s
+                main_stats["dd"] = dd_
+                inw = torch.relu(-((Mm_s - P) * nrm).sum(-1))
+                loss = _masked_sq_mean(dd_, w_all, c_all) \
+                    + args.w_inside * ((inw ** 2) * w_all).sum() / c_all
                 if args.w_smooth > 0 and Tm > 2:
-                    loss = loss + args.w_smooth * (
-                        (hp_m[2:] - 2 * hp_m[1:-1] + hp_m[:-2]) ** 2).sum(-1).mean()
-                    loss = loss + args.w_smooth * (
-                        (orient_m[2:] - 2 * orient_m[1:-1] + orient_m[:-2]) ** 2
-                    ).sum(-1).mean()
-                    loss = loss + args.w_smooth * 1e2 * (
-                        (tr_m2[2:] - 2 * tr_m2[1:-1] + tr_m2[:-2]) ** 2).sum(-1).mean()
+                    loss = _smooth(loss, hp_m)
+                    loss = _smooth(loss, orient_m)
+                    loss = _smooth(loss, tr_m2, 1e2)
                 if args.biomech > 0 and jl_lo is not None:
-                    loss = loss + args.biomech * basis_limit_penalty(hp_m, Bt, jl_lo, jl_hi, args.twist_weight)
-                if not torch.isfinite(loss):
-                    raise RuntimeError(
-                        f"movement loss became non-finite at chunk {ci} iter {it}")
-                loss.backward()
-                opt.step()
-            with torch.no_grad():
-                _r = dr if (args.root_only or dd is None) else dd
-                resid = _r.norm(dim=-1).mean().item() * 1000
-            print(f"  chunk {ci+1}/{n_chunks}  frames {idx[0]}..{idx[-1]}  "
+                    loss = loss + args.biomech * basis_limit_penalty(
+                        hp_m, Bt, jl_lo, jl_hi, args.twist_weight)
+                return loss
+
+            if n_fing > 0:
+                run_adam(opt, main_loss, n_fing, graph=args.cuda_graph,
+                         label=f"movement stage, chunk {ci}",
+                         report=lambda: main_stats.__setitem__(
+                             "resid", _mean_mm(main_stats["dd"].detach(), w_all, c_all)))
+            resid = root_stats.get("resid", float("nan")) if (
+                args.root_only or n_fing == 0) else main_stats["resid"]
+            print(f"  chunk {ci+1}/{n_chunks}  frames {mf[sl][0]}..{mf[sl][-1]}  "
                   f"resid {resid:6.2f} mm")
-            GO.append(orient_m.detach().cpu().numpy())
-            HP.append(hp_m.detach().cpu().numpy())
-            TR.append(tr_m2.detach().cpu().numpy())
+            # keep only the chunk's own frames; the overlap existed so the kept
+            # ones are never optimised at a chunk edge
+            GO.append(orient_m.detach().cpu().numpy()[core])
+            HP.append(hp_m.detach().cpu().numpy()[core])
+            TR.append(tr_m2.detach().cpu().numpy()[core])
             prev_hp = HP[-1][-1].copy()
             prev_go = GO[-1][-1].copy()
             prev_tr = TR[-1][-1].copy()
