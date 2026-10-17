@@ -124,6 +124,33 @@ def fit_args_from_config(cfg_path: Path) -> list[str]:
     return args
 
 
+HAND_MARKERS = [f"{f}{i}" for f in ("Palm", "Thumb", "Index", "Middle", "Ring", "Pinky") for i in (1, 2, 3)]
+
+
+def present_markers(static_csv: Path) -> set[str]:
+    """Hand markers the fit can use: seen in at least one frame of the static
+    (the same rule fit_surface_markers.py applies when it builds its marker list)."""
+    import numpy as np
+    from vicon2mano.core.loader import load_csv
+    X, names = load_csv(str(static_csv))[:2]
+    names = [n.split(":")[-1] for n in names]
+    return {n for i, n in enumerate(names) if np.isfinite(X[:, i]).all(-1).any()}
+
+
+def prune_attach(cfg_path: Path, present: set[str], out: Path) -> tuple[Path | None, list[str]]:
+    """Copy of the config's attachment map restricted to markers the static has.
+    The fit script refuses an attachment for a marker it is not fitting, and a
+    marker absent from the static cannot be fitted. Returns (file, dropped)."""
+    cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
+    if not cfg.get("attach_file"):
+        return None, []
+    full = json.loads((REPO / cfg["attach_file"]).read_text(encoding="utf-8"))
+    keep = {k: v for k, v in full.items() if k in present}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(keep), encoding="utf-8")
+    return out, sorted(set(full) - set(keep))
+
+
 def parse_calibration(text: str) -> dict:
     """Quality facts from calibrate_static.py's printout."""
     m = re.search(r"betas:\s*\[([^\]]*)\]", text)
@@ -166,6 +193,7 @@ class Run:
         self.out.mkdir(parents=True, exist_ok=True)
         self.status = self.out / "status.jsonl"
         self.flagged: list[dict] = []
+        self.warnings: list[dict] = []
         self.failed = 0
 
     def note(self, p, trial, stage, status, secs=0.0, detail=""):
@@ -175,6 +203,11 @@ class Run:
             f.write(json.dumps(rec) + "\n")
         print(f"[{rec['t'][11:]}] {p:4s} {trial or '-':22s} {stage:9s} {status}"
               f"{' (%.0fs)' % secs if secs else ''}{'  ' + detail if detail else ''}", flush=True)
+
+    def warn(self, p, reason, detail):
+        """Not blocking: the participant is processed, but the result is weaker."""
+        self.warnings.append(dict(participant=p, reason=reason, detail=detail))
+        self.note(p, "", "WARN", reason, detail=detail)
 
     def flag(self, p, reason, detail):
         self.flagged.append(dict(participant=p, reason=reason, detail=detail))
@@ -292,12 +325,25 @@ def do_participant(R: Run, p: str, sessions: dict[str, str]):
             text = lg.read_text(encoding="utf-8", errors="replace") if lg.exists() else ""
         cal = parse_calibration(text) if text else {}
 
+    # ---- markers the static lacks cannot be fitted: drop their attachments, warn
+    fit_cfg = fit_args_from_config(a.fit_config)
+    if static_use.exists():
+        present = present_markers(static_use)
+        att, dropped = prune_attach(a.fit_config, present, pout / "static/attach.json")
+        absent = [m for m in HAND_MARKERS if m not in present]
+        if att is not None:
+            fit_cfg += ["--attach", att]               # later --attach wins
+        if absent:
+            R.warn(p, "reduced marker set",
+                   f"{absent} not seen in the static, so not fitted (attachments dropped: {dropped}); "
+                   f"the fingers they sit on are constrained by fewer markers")
+
     # ---- static quality gate: cheap static-only surface fit
     fit_mm = None
     if "static" in stages:
         sf = pout / "static/surface_fit.html"
         cmd = [PY, "scripts/mano/fit_surface_markers.py", "--mano-dir", mano, "--static", static_use,
-               "--out", part(sf)] + fit_args_from_config(a.fit_config)
+               "--out", part(sf)] + fit_cfg
         ok, text = step(R, p, "", "staticfit", [(part(sf), sf)], cmd, pout / "static/surface_fit.log")
         if not ok:
             return
@@ -354,7 +400,7 @@ def do_participant(R: Run, p: str, sessions: dict[str, str]):
             ok, _ = step(R, p, sg, "fit", [(part(fit_npz), fit_npz), (part(pred_npz), pred_npz)],
                          [PY, "scripts/mano/fit_surface_markers.py", "--mano-dir", mano,
                           "--static", static_use, "--movement", lab_csv,
-                          "--out", tdir / "static_fit.html"] + fit_args_from_config(a.fit_config)
+                          "--out", tdir / "static_fit.html"] + fit_cfg
                          + ["--cuda-graph", "--mv-chunk", a.chunk, "--mv-overlap", a.overlap,
                             "--npz-out", part(fit_npz), "--pred-out", part(pred_npz)] + extra,
                          tdir / "fit.log")
@@ -461,8 +507,13 @@ def main():
               "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["participant", "reason", "detail"])
         w.writeheader(); w.writerows(R.flagged)
+    wname = f"warnings{'' if args.shard == '0/1' else '_' + args.shard.replace('/', 'of')}.csv"
+    with open(R.out / wname, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["participant", "reason", "detail"])
+        w.writeheader(); w.writerows(R.warnings)
     print(f"\n{len(ps)} participants in {(time.time()-t0)/60:.1f} min: "
-          f"{len(R.flagged)} flagged (for you to fix), {R.failed} failed step(s). Status: {R.status}")
+          f"{len(R.flagged)} flagged (for you to fix), {len(R.warnings)} warning(s), "
+          f"{R.failed} failed step(s). Status: {R.status}")
     for fl in R.flagged:
         print(f"  FLAG {fl['participant']}: {fl['reason']} - {fl['detail']}")
     sys.exit(1 if R.failed else 0)

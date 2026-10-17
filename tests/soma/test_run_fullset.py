@@ -154,3 +154,18 @@ def test_unknown_participant_is_an_error_not_a_guess():
 
 def test_part_name_keeps_extension():
     assert rf.part(Path("a/b/fit.npz")).name == "fit.part.npz"
+
+
+def test_prune_attach_drops_only_markers_the_static_lacks(tmp_path):
+    cfg = rf.REPO / "configs/surface_fit/P10.json"
+    full = json.loads((rf.REPO / "configs/surface_fit/P10_attach.json").read_text())
+    present = set(full) - {"Ring2"}
+    out, dropped = rf.prune_attach(cfg, present, tmp_path / "attach.json")
+    kept = json.loads(out.read_text())
+    assert dropped == ["Ring2"] and "Ring2" not in kept and set(kept) == present
+
+
+def test_prune_attach_without_attach_file(tmp_path):
+    cfg = tmp_path / "c.json"
+    cfg.write_text(json.dumps({"params": {}}))
+    assert rf.prune_attach(cfg, {"Palm1"}, tmp_path / "a.json") == (None, [])

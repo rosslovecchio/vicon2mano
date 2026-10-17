@@ -296,3 +296,18 @@ P5=path,...` supplies a static explicitly once you have fixed one.
 Fit settings are P10's validated ones (`--fit-config`) plus `--cuda-graph
 --mv-chunk 3000 --mv-overlap 150` (see `docs/fitting.md`). Each trial repeats
 the ~75 s static stage inside the fit script (~1% of the total).
+
+**Markers the static lacks.** The P10 attachment map pins a vertex for every
+hand marker, and `fit_surface_markers.py` refuses an attachment for a marker it
+is not fitting. A hand marker never seen in a participant's static cannot be
+fitted, so the driver drops just those entries (writing
+`<P>/static/attach.json`), fits with the reduced marker set, and records a
+non-blocking `WARN` (`status.jsonl`, `fullset/warnings.csv`). P13 (no Thumb2,
+Ring2) and P17 (no Palm1, Thumb1) were the first cases: they crashed before
+this, and the fingers those markers sit on are constrained by fewer markers.
+
+**Meshes.** `python scripts/soma/make_meshes.py [--watch]` renders the fitted-MANO
+mesh animation (`animate_mesh.py`: mesh + the SOMA-relabelled markers, 1,500
+sampled frames, playback rate from the raw CSV's `Trajectories` header, else
+200 Hz assumed) to `results/soma/mesh/<P>_<trial>.html` (~82 MB, ~110 s each)
+for every trial whose `angles.csv` exists; `--watch` keeps going while fits run.
