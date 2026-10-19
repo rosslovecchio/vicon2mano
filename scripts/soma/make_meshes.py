@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Render the fitted-MANO mesh animation for every trial that run_fullset.py has
-finished fitting: results/soma/mesh/<P>_<trial>.html (the same naming and viewer
+finished fitting: results/soma/mesh/<P>/<P>_<trial>.html (the same naming and viewer
 as the earlier P10/P12 meshes; scripts/mano/animate_mesh.py does the rendering).
 
 A trial is ready when its ``angles.csv`` exists (fit and flags done). Trials
@@ -73,7 +73,8 @@ def flagged_participants(status: Path) -> set[str]:
 
 
 def render(p, sg, raw, tdir, mesh_dir, args) -> bool:
-    final = mesh_dir / f"{p}_{sg}.html"
+    final = mesh_dir / p / f"{p}_{sg}.html"
+    final.parent.mkdir(parents=True, exist_ok=True)
     tmp = final.with_name(final.stem + ".part.html")
     hz = capture_rate(raw)
     note = "" if hz else f" (no rate in header: assuming {DEFAULT_HZ:.0f} Hz)"
@@ -115,7 +116,7 @@ def main():
     while True:
         rows = trial_list(out, ps)
         todo = [r for r in rows if (r[3] / "angles.csv").exists() and (r[3] / "fit.npz").exists()
-                and not (mesh_dir / f"{r[0]}_{r[1]}.html").exists() and (r[0], r[1]) not in failed]
+                and not (mesh_dir / r[0] / f"{r[0]}_{r[1]}.html").exists() and (r[0], r[1]) not in failed]
         for p, sg, raw, tdir in todo:
             if not render(p, sg, raw, tdir, mesh_dir, args):
                 failed.add((p, sg))
@@ -123,7 +124,7 @@ def main():
             break
         skip = flagged_participants(status)
         left = [r for r in rows if r[0] not in skip and (r[0], r[1]) not in failed
-                and not (mesh_dir / f"{r[0]}_{r[1]}.html").exists()]
+                and not (mesh_dir / r[0] / f"{r[0]}_{r[1]}.html").exists()]
         quiet = (time.time() - status.stat().st_mtime) / 60 if status.exists() else 1e9
         if not left:
             print("all trials have a mesh (or their participant is flagged)", flush=True)
