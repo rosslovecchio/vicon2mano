@@ -704,7 +704,7 @@ _SEGMENT_OF = {1: (0, 1), 2: (1, 2), 3: (2, 3),
                17: (0, 17), 18: (17, 18), 19: (18, 19)}
 
 
-def segment_dorsals(J, palm_dorsal, repo_joints):
+def segment_dorsals(J, palm_dorsal, repo_joints, thumb_mode="cross"):
     """Per-marker dorsal direction that rotates with the finger.
 
     A single palm-level dorsal is fine for an extended static but wrong the
@@ -717,6 +717,13 @@ def segment_dorsals(J, palm_dorsal, repo_joints):
     normal). So ``cross(ulnar, segment_axis)`` tracks the segment's own dorsal
     as it flexes, where a fixed palm normal does not. The sign is pinned once
     against the palm dorsal using the palm itself, which never flexes.
+
+    ``thumb_mode="proj"``: the thumb does not flex about the ulnar axis (it is
+    rotated and abducted relative to the fingers), so ``cross(ulnar, axis)``
+    can point at the wrong side of it and rule out the face the marker is
+    taped to -- on P1 that left Thumb2 attached 9.3 mm away, behind the
+    segment. "proj" uses the palm dorsal with the component along the thumb
+    segment removed. Default "cross" keeps every earlier result unchanged.
     """
     ulnar = J[17] - J[5]
     ulnar = ulnar / np.linalg.norm(ulnar)
@@ -730,6 +737,12 @@ def segment_dorsals(J, palm_dorsal, repo_joints):
         nu = np.linalg.norm(u)
         if nu < 1e-9:
             out.append(palm_dorsal)
+            continue
+        if thumb_mode == "proj" and rj <= 3:              # repo joints 1-3 = thumb
+            uu = u / nu
+            d = palm_dorsal - (palm_dorsal @ uu) * uu
+            nd = np.linalg.norm(d)
+            out.append(d / nd if nd > 1e-6 else palm_dorsal)
             continue
         d = np.cross(ulnar, u / nu)
         nd = np.linalg.norm(d)
@@ -843,6 +856,10 @@ def main() -> None:
                      help="attachment faces must have normal.dorsal above this. "
                           "0 = any face on the back half; raise it to insist on "
                           "faces squarely facing the back.")
+    ap.add_argument("--thumb-dorsal", choices=["cross", "proj"], default="cross",
+                     help="how the dorsal side of the thumb segments is defined for "
+                          "attachment. cross = as for the fingers (default, all earlier "
+                          "results); proj = palm dorsal projected off the thumb axis.")
     ap.add_argument("--offset-mode", action="store_true",
                      help="ABLATION: model each marker as a rigid offset from "
                           "its joint in that joint's segment frame (the "
@@ -1156,7 +1173,7 @@ def main() -> None:
             Jm = mano_output_to_joints21(fwd()).cpu().numpy().mean(0)
         if "Palm2" in names:
             pd_ = dorsal_direction(Jm, mkm[names.index("Palm2")])
-            dors = segment_dorsals(Jm, pd_, [j for j, _ in pairs])
+            dors = segment_dorsals(Jm, pd_, [j for j, _ in pairs], args.thumb_dorsal)
         else:
             dors = None
         fid, bary = closest_point_on_faces(Vm, F, mkm, allow=allow,
