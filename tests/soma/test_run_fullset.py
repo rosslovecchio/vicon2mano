@@ -169,3 +169,24 @@ def test_prune_attach_without_attach_file(tmp_path):
     cfg = tmp_path / "c.json"
     cfg.write_text(json.dumps({"params": {}}))
     assert rf.prune_attach(cfg, {"Palm1"}, tmp_path / "a.json") == (None, [])
+
+
+def test_parse_kv():
+    assert rf.parse_kv("P5=1900:2100,P6=47975:48175") == {"P5": "1900:2100", "P6": "47975:48175"}
+    assert rf.parse_kv("") == {} and rf.parse_kv("P3=Palm1+Palm2") == {"P3": "Palm1+Palm2"}
+
+
+def test_pseudo_static_window_is_written_with_all_columns(tmp_path):
+    import numpy as np
+    from vicon2mano.strategies.soma.realdata import write_wide_csv
+    from vicon2mano.core.loader import load_csv
+    X = np.arange(10 * 3 * 3, dtype=float).reshape(10, 3, 3)
+    X[4, 1] = np.nan
+    raw = tmp_path / "raw.csv"
+    write_wide_csv(raw, X, ["A", "B", "C"])
+    out = tmp_path / "w.csv"
+    assert rf.make_pseudo_static(raw, "2:7", out) == 5
+    Y, names = load_csv(str(out))[:2]
+    assert [n.split(":")[-1] for n in names] == ["A", "B", "C"] and Y.shape[0] == 5
+    np.testing.assert_allclose(Y[0], X[2])
+    assert np.isnan(Y[2, 1]).all()                      # NaN gap preserved (row 4 -> index 2)

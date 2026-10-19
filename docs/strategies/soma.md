@@ -389,3 +389,40 @@ mesh animation (`animate_mesh.py`: mesh + the SOMA-relabelled markers, 1,500
 sampled frames, playback rate from the raw CSV's `Trajectories` header, else
 200 Hz assumed) to `results/soma/mesh/<P>_<trial>.html` (~82 MB, ~110 s each)
 for every trial whose `angles.csv` exists; `--watch` keeps going while fits run.
+
+## Statics SOMA cannot fully relabel; pseudo-static windows (2026-10-19)
+
+SOMA abstains (leaves a point unlabelled, never a conflicting label) on markers
+that are *placed differently* from the base subject: the model and its library
+expect the base placement. On a static this drops those markers, and
+calibration cannot record their offset because they are absent. Measured:
+
+| participant | markers missing from the SOMA-relabelled static | a second round with the participant's own model |
+|---|---|---|
+| P13 | Thumb2, Ring2 | no change |
+| P17 | Palm1, Thumb1 | Thumb1 recovered, Palm1 not (static has 21 points) |
+| P3 | Pinky1 (Palm1 in 27% of frames) | no change; 16/22 markers calibrate |
+
+All points exist in the raw statics (P13 22/22 per frame), but Vicon's labels
+for the missing markers are not usable: P13's Ring2 sits 58.8 / 30.8 mm from
+Ring1 / Ring3 (expected ~47 / ~38) and P17's "Palm1" is 49.7 / 39.2 mm from
+Palm2 / Palm3 (expected ~33 / ~52; SOMA says it is Thumb1).
+
+A still, flat stretch of the participant's Trial 1 Hands only does hold every
+hand marker. `scripts/soma/pick_window.py` picks it (stillest + flattest 200
+frames, every hand marker present in >= 95% of frames) and checks Vicon's labels
+in it against a SOMA model, counting only points SOMA labelled (in every window
+tried Vicon never conflicts; SOMA only abstains). `run_fullset.py
+--pseudo-static P5=1900:2100,...` then calibrates and fits from that window
+(`--relabel-model` and `--offset-only` pass through for the other routes).
+Windows chosen: P5 1900:2100, P6 47975:48175, P7 25:225, P8 0:200 (0.03-0.05
+mm/frame, 4.5-9.4 deg finger bend; the static-fit gate gives 7.6-7.7 mm there
+vs 4.3-5.3 for real statics). On this route P3 calibrates 18/18 hand markers
+(41600:41800, no suspects, gate 7.2 mm), P17 18/18 (46175:46375, gate 7.7 mm),
+and P13 17/22 with Palm1 suspect at 20 mm (38725:38925, gate 4.5 mm), the case
+`--offset-only Palm1` is for.
+
+`scripts/soma/trial_report.py` prints, per trial, frames with any finger joint
+above 120 deg (bone-to-bone, the repo's earlier definition, and the axis-angle
+magnitude in `angles.csv`), finger/overall fit residual, and which flag signals
+fire.

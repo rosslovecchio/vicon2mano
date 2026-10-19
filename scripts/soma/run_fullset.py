@@ -55,7 +55,7 @@ sys.path.insert(0, str(REPO))
 
 from vicon2mano.core.dataset import (  # noqa: E402
     DATA_ROOT, MANO_ONLY_STATIC, REF_CSV, find_manual_csv, find_session_file,
-    load_trial_sessions, participant_sort_key, slug)
+    find_trial_csv, load_trial_sessions, participant_sort_key, slug)
 
 PY = sys.executable
 BASE = "P10"                       # the participant the base library/model come from
@@ -91,6 +91,23 @@ def resolve_static(p: str, sessions: dict[str, str], pdir: Path,
     if len(cands) > 1:
         return None, f"ambiguous: {[c.name for c in cands]}"
     return None, "none found"
+
+
+def parse_kv(s: str) -> dict[str, str]:
+    """'P5=1900:2100,P6=47975:48175' -> {'P5': '1900:2100', ...}."""
+    return dict(kv.split("=", 1) for kv in (s or "").split(",") if "=" in kv)
+
+
+def make_pseudo_static(raw_csv: Path, window: str, out: Path) -> int:
+    """Write frames a:b of a movement trial (Vicon's labels, all columns) as the
+    stand-in static the surface fit reads. Returns the number of frames."""
+    from vicon2mano.core.loader import load_csv
+    from vicon2mano.strategies.soma.realdata import write_wide_csv
+    a, b = (int(v) for v in window.split(":"))
+    X, names = load_csv(str(raw_csv))[:2]
+    names = [n.split(":")[-1] for n in names]
+    write_wide_csv(out, X[a:b], names)
+    return b - a
 
 
 def resolve_trials(p: str, sessions: dict[str, str], pdir: Path):
@@ -275,6 +292,14 @@ def do_participant(R: Run, p: str, sessions: dict[str, str]):
     pdir = DATA_ROOT / p
     pout = R.out / p
     static, how = resolve_static(p, sessions, pdir, a.static_map)
+    pseudo = a.pseudo_static.get(p)
+    if pseudo:
+        # no usable static: a still, flat stretch of a mapped trial stands in (Vicon's labels)
+        sp, *_ = find_trial_csv(p, a.pseudo_session)
+        if sp is None:
+            R.flag(p, "pseudo-static", f"manual_frames.csv maps no file to {p}/{a.pseudo_session}")
+            return
+        static, how = sp, f"pseudo-static {a.pseudo_session}[{pseudo}] (Vicon labels)"
     trials = [t for t in resolve_trials(p, sessions, pdir)
               if not a.trials or t[0] in a.trials or t[1] in a.trials]
     missing = [t[0] for t in trials if t[2] is None]
@@ -287,7 +312,7 @@ def do_participant(R: Run, p: str, sessions: dict[str, str]):
     R.note(p, "", "static", "using", detail=f"{static.name} [{how}]")
 
     mano = a.mano_dir
-    lib_dir, mdl_dir = REPO / "results/soma/libraries", REPO / "results/soma/models"
+    lib_dir, mdl_dir = Path(a.artifact_dir) / "libraries", Path(a.artifact_dir) / "models"
     base_lib = Path(a.base_library)
     base_model = Path(a.base_model)
     is_base = p == BASE
@@ -297,11 +322,17 @@ def do_participant(R: Run, p: str, sessions: dict[str, str]):
 
     # ---- static: relabel with the base model (not for the base participant)
     static_use = static
-    if "static" in stages and not is_base:
+    rmodel = Path(a.relabel_model.get(p, base_model))
+    if pseudo:
+        static_use = pout / "static/pseudo_static.csv"
+        if not static_use.exists() or a.force:
+            n = make_pseudo_static(static, pseudo, static_use)
+            R.note(p, "static", "window", "ok", detail=f"{n} frames {pseudo} of {static.name}")
+    elif "static" in stages and not is_base:
         sl, sa = pout / "static/soma_labelled.csv", pout / "static/labels.npz"
         ok, _ = step(R, p, "static", "relabel",
                      [(part(sl), sl), (part(sa), sa)],
-                     [PY, "scripts/soma/eval_trial.py", "--model", base_model, "--raw", static,
+                     [PY, "scripts/soma/eval_trial.py", "--model", rmodel, "--raw", static,
                       "--truth", "", "--csv-out", part(sl), "--out", part(sa)],
                      pout / "static/relabel.log")
         if not ok:
@@ -313,10 +344,14 @@ def do_participant(R: Run, p: str, sessions: dict[str, str]):
     # ---- calibrate: shape + per-marker offsets from the static
     cal = {}
     if "calibrate" in stages and not is_base:
+        src = (["--session", a.pseudo_session, "--window", pseudo] if pseudo
+               else ["--static", static_use])
+        oo = a.offset_only.get(p)
         ok, text = step(R, p, "", "calibrate", [(part(lib), lib)],
-                        [PY, "scripts/soma/calibrate_static.py", "--participant", p, "--static", static_use,
-                         "--base-library", base_lib, "--mano-dir", mano, "--out", part(lib),
-                         "--html", pout / "static/calibration.html"],
+                        [PY, "scripts/soma/calibrate_static.py", "--participant", p] + src
+                        + ["--base-library", base_lib, "--mano-dir", mano, "--out", part(lib),
+                           "--html", pout / "static/calibration.html"]
+                        + (["--offset-only", oo.replace("+", ",")] if oo else []),
                         pout / "static/calibrate.log")
         if not ok:
             return
@@ -439,11 +474,13 @@ def dry_run(args, ps, sessions_all):
         pdir = DATA_ROOT / p
         sess = sessions_all[p]
         st, how = resolve_static(p, sess, pdir, args.static_map)
+        if p in args.pseudo_static:
+            st, how = pdir / "(window)", f"pseudo-static {args.pseudo_session}[{args.pseudo_static[p]}]"
         tr = [t for t in resolve_trials(p, sess, pdir) if not args.trials or t[0] in args.trials or t[1] in args.trials]
         found = [t for t in tr if t[2] is not None]
         total += len(found)
-        lib = REPO / "results/soma/libraries" / f"library_{p}.npz"
-        mdl = REPO / "results/soma/models" / f"labeler_{p}.pt"
+        lib = Path(args.artifact_dir) / "libraries" / f"library_{p}.npz"
+        mdl = Path(args.artifact_dir) / "models" / f"labeler_{p}.pt"
         base = "base" if p == BASE else ""
         have = ("lib " + ("Y" if lib.exists() or base else "n") + ", model " + ("Y" if mdl.exists() or base else "n"))
         fin = sum((Path(args.out_root) / p / t[1] / "angles.csv").exists() for t in found)
@@ -467,6 +504,9 @@ def main():
     ap.add_argument("--mano-dir", default=str(DATA_ROOT / "mano_v1_2" / "models"
                                               if (DATA_ROOT / "mano_v1_2" / "models").exists()
                                               else REPO / "../clean_kinematics/mano_v1_2/models"))
+    ap.add_argument("--artifact-dir", default=str(REPO / "results/soma"),
+                    help="where <dir>/libraries/library_<P>.npz and <dir>/models/labeler_<P>.pt live "
+                         "(use a scratch dir for experiments so the real ones are not overwritten)")
     ap.add_argument("--base-library", default=str(REPO / "results/soma/libraries/library_P10_Trial2.npz"))
     ap.add_argument("--base-model", default=str(REPO / "results/soma/models/labeler_P10.pt"))
     ap.add_argument("--fit-config", default=str(REPO / "configs/surface_fit/P10.json"),
@@ -476,6 +516,15 @@ def main():
     ap.add_argument("--overlap", type=int, default=150, help="fit chunk overlap (frames)")
     ap.add_argument("--max-frames", type=int, default=0, help="fit only the first N frames (smoke test)")
     ap.add_argument("--static-map", default="", help="P5=path,P6=path ... explicit statics for participants without one")
+    ap.add_argument("--pseudo-static", default="",
+                    help="P5=1900:2100,... participants with no static: frames a:b of --pseudo-session stand in "
+                         "(pick them with scripts/soma/pick_window.py)")
+    ap.add_argument("--pseudo-session", default="Trial 1 Hands only")
+    ap.add_argument("--relabel-model", default="",
+                    help="P3=results/soma/models/labeler_P3.pt,... relabel that participant's static with "
+                         "their own model instead of the base one (a second round)")
+    ap.add_argument("--offset-only", default="",
+                    help="P3=Palm1,P1=Palm1+Palm2 ... markers not fitted in calibration, offset recorded only")
     ap.add_argument("--max-beta", type=float, default=3.0, help="flag a static whose fitted |beta| exceeds this")
     ap.add_argument("--max-absent", type=int, default=2, help="flag a static missing more hand markers than this")
     ap.add_argument("--max-static-fit-mm", type=float, default=8.0,
@@ -486,7 +535,10 @@ def main():
     args = ap.parse_args()
     args.stages = [s for s in args.stages.split(",") if s]
     args.trials = {t.strip() for t in args.trials.split(",") if t.strip()}
-    args.static_map = dict(kv.split("=", 1) for kv in args.static_map.split(",") if "=" in kv)
+    args.static_map = parse_kv(args.static_map)
+    args.pseudo_static = parse_kv(args.pseudo_static)
+    args.relabel_model = parse_kv(args.relabel_model)
+    args.offset_only = parse_kv(args.offset_only)
     args.fit_config = Path(args.fit_config)
 
     sessions_all = load_trial_sessions(REF_CSV)
