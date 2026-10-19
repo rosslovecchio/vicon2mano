@@ -64,6 +64,10 @@ def main():
     ap.add_argument("--monitor-raw", default=str(Path(DATA_ROOT) / "P10/Trial2_handsonly.csv"))
     ap.add_argument("--monitor-truth", default=str(Path(DATA_ROOT) / "P10/Trial2_handsonly_manuallylabelled_filled.csv"))
     ap.add_argument("--monitor-name", default="REAL", help="log label for the monitor accuracy")
+    ap.add_argument("--monitor-participant", default=None)
+    ap.add_argument("--monitor-session", default=None,
+                    help="manual_frames.csv session to monitor on (with --monitor-participant); its raw file "
+                         "and <stem>_manuallylabelled export replace --monitor-raw/--monitor-truth")
     ap.add_argument("--out", default=str(REPO / "results/soma/models/labeler_P10.pt"))
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--drop-labels", default="",
@@ -87,6 +91,13 @@ def main():
     # held-out synthetic set (different generator seed)
     vgen = SynthGenerator(lib, mano, SynthConfig(), device=dev, seed=args.seed + 999)
     sv = vgen.sample(4000)
+    if args.monitor_session:
+        from vicon2mano.core.dataset import find_manual_csv, find_trial_csv
+        tp, *_ = find_trial_csv(args.monitor_participant, args.monitor_session)
+        mc = find_manual_csv(tp) if tp else None
+        if tp is None or mc is None:
+            raise SystemExit(f"no raw/corrected pair for {args.monitor_participant}/{args.monitor_session}")
+        args.monitor_raw, args.monitor_truth = str(tp), str(mc)
     # real monitoring set: raw frames, identities from the labelled export
     man, nm = load_csv(args.monitor_truth)[:2]
     raw, nr = load_csv(args.monitor_raw)[:2]

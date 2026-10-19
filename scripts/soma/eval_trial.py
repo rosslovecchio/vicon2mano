@@ -24,7 +24,7 @@ import torch
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from vicon2mano.core.dataset import DATA_ROOT
+from vicon2mano.core.dataset import DATA_ROOT, find_trial_csv
 from vicon2mano.core.loader import load_csv
 from vicon2mano.strategies.soma.infer import label_trial, load_model
 from vicon2mano.strategies.soma.realdata import raw_identities, relabelled_markers, write_wide_csv
@@ -33,14 +33,36 @@ from vicon2mano.strategies.soma.realdata import raw_identities, relabelled_marke
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=str(REPO / "results/soma/models/labeler_P10.pt"))
-    ap.add_argument("--raw", default=str(Path(DATA_ROOT) / "P10/Trial2_handsonly.csv"))
-    ap.add_argument("--truth", default=str(Path(DATA_ROOT) / "P10/Trial2_handsonly_manuallylabelled_filled.csv"),
-                    help="labelled export to compare with; '' for none")
+    ap.add_argument("--participant", default=None)
+    ap.add_argument("--session", default=None,
+                    help="manual_frames.csv session of --participant, e.g. 'Trial 1 Hands only'; "
+                         "resolves the raw file (preferred over --raw)")
+    ap.add_argument("--raw", default=None,
+                    help="raw CSV path, only for a file manual_frames.csv does not map (default: P10 Trial2 "
+                         "Hands only)")
+    ap.add_argument("--truth", default=None,
+                    help="labelled export to compare with; '' for none. Default: P10 Trial2's verified "
+                         "relabel when scoring that trial, otherwise none")
     ap.add_argument("--truth-name", default="manual",
                     help="how to call the truth; anything but 'manual' reports agreement, not correctness")
     ap.add_argument("--out", default=None, help="npz of per-frame and voted labels per raw slot")
     ap.add_argument("--csv-out", default=None, help="relabelled trial as a wide CSV (voted labels)")
     args = ap.parse_args()
+
+    if args.session:
+        if args.raw or not args.participant:
+            raise SystemExit("--session needs --participant and replaces --raw")
+        trial_path, *_ = find_trial_csv(args.participant, args.session)
+        if trial_path is None:
+            raise SystemExit(f"manual_frames.csv maps no file to {args.participant}/{args.session}")
+        args.raw = str(trial_path)
+        print(f"{args.participant}/{args.session} -> {trial_path.name} (manual_frames.csv)")
+    elif args.raw is None:
+        args.raw = str(Path(DATA_ROOT) / "P10/Trial2_handsonly.csv")
+        if args.truth is None:
+            args.truth = str(Path(DATA_ROOT) / "P10/Trial2_handsonly_manuallylabelled_filled.csv")
+    if args.truth is None:
+        args.truth = ""
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     net, labels, N = load_model(args.model, dev)
@@ -48,6 +70,10 @@ def main():
 
     raw, nr = load_csv(args.raw)[:2]
     nr = [n.split(":")[-1] for n in nr]
+    # only the markers this model knows: a reduced-set model (P1/P2's 19) must
+    # not see Forearm3/4 or Palm3 even where a file has them (P10 does)
+    keep = [i for i, n in enumerate(nr) if n in labels]
+    raw, nr = raw[:, keep], [nr[i] for i in keep]
     T, C = raw.shape[:2]
     if args.truth:
         man, nm = load_csv(args.truth)[:2]

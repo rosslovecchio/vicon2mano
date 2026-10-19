@@ -16,7 +16,7 @@ own page rather than one ever-growing log.
 - Extra runtime deps not in pyproject: `plotly`, `matplotlib`
 
 ```bash
-.viconvenv/Scripts/python.exe -m pytest tests/ -q     # 282 tests (6 skipped)
+.viconvenv/Scripts/python.exe -m pytest tests/ -q     # 306 tests (6 skipped)
 ```
 
 ## Layout
@@ -158,6 +158,10 @@ markers instead of 4, and no `Palm3` at all. Consequences:
 - A fallback anchor triple (e.g. `Palm1`/`Palm2` plus a finger base) would
   be needed before any anchor-based assessment can say anything useful
   about P1/P2 specifically.
+- **The remaining markers are also placed differently**, not just fewer:
+  Forearm1-Forearm2 52-56 mm (P10 25), Palm2 ~20 mm more distal, Thumb1
+  further from Thumb2. strategySOMA handles this with a 19-marker model
+  calibrated to each participant (`docs/strategies/soma.md`).
 
 **The Palm1-2-3 "anchor triangle" used throughout (`core.validation`,
 `core.quality`, strategyGMM) is not actually rigid** — this is the same
