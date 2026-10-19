@@ -9,6 +9,11 @@ Columns
                 0 = straight; the definition scripts/shared/export_finger_angles.py
                 and the earlier "frames with any finger joint > 120 deg" figures use)
   >120 |aa|     same threshold on the axis-angle magnitude in angles.csv
+  >120 flex     (with --flexion-axis) frames where any of the 12 finger joints index1..ring3
+                (no thumb) has a flexion COMPONENT above 120 deg: the projection of the joint's
+                rotation on its measured flexion axis, joint_axis_basis(...)[:, :, 0]. This is the
+                measure behind the earlier docs' "176 frames"; it is not the same as either
+                column above, and those figures came from a 400/400/600-iteration fit.
   fingers mm    mean marker-to-surface distance of the finger markers (fit.log)
   overall mm    same over all fitted markers (fit.log)
   label/fit/angle  share of frames in which each flag signal fired (flags.csv)
@@ -74,6 +79,8 @@ def main():
     ap.add_argument("--out-root", default=str(REPO / "results/soma/fullset"))
     ap.add_argument("--mano-dir", default=None)
     ap.add_argument("--threshold", type=float, default=120.0)
+    ap.add_argument("--flexion-axis", action="store_true",
+                    help="also count frames with a flexion component above the threshold (index1..ring3)")
     args = ap.parse_args()
 
     import pandas as pd
@@ -84,8 +91,14 @@ def main():
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     model = MANOFitter(FitConfig(mano_model_path=mano, hand_side="right", use_pca=False))._model.to(dev)
 
-    print(f"{'trial':26s} {'frames':>7s} {'>120 b2b':>9s} {'>120 |aa|':>10s} {'fingers mm':>10s} "
-          f"{'overall mm':>10s} {'label':>6s} {'fit':>6s} {'angle':>6s}")
+    Bmat = None
+    if args.flexion_axis:
+        sys.path.insert(0, str(REPO / "scripts" / "mano"))
+        import fit_surface_markers as fsm
+        Bmat = fsm.joint_axis_basis(model, dev, 45)
+    print(f"{'trial':26s} {'frames':>7s} {'>120 b2b':>9s} {'>120 |aa|':>10s} "
+          + (f"{'>120 flex':>10s} " if Bmat is not None else "")
+          + f"{'fingers mm':>10s} {'overall mm':>10s} {'label':>6s} {'fit':>6s} {'angle':>6s}")
     for p in [x.strip() for x in args.participants.split(",") if x.strip()]:
         for tdir in sorted((Path(args.out_root) / p).iterdir()):
             ang = tdir / "angles.csv"
@@ -98,8 +111,13 @@ def main():
             mag = a[[c for c in a.columns if c.endswith("_deg")]].to_numpy()
             fing, overall = fit_log_residuals(tdir / "fit.log")
             pct = lambda m: 100 * m.mean()
+            flex = ""
+            if Bmat is not None:
+                hpj = fit["hand_pose"][fr].reshape(len(fr), 15, 3)
+                comp = np.degrees(np.einsum("tjk,jk->tj", hpj, Bmat[:, :, 0]))[:, :12]
+                flex = f"{(comp.max(1) > args.threshold).sum():10d} "
             print(f"{p + ' ' + tdir.name:26s} {len(a):7d} {(b2b.max(1) > args.threshold).sum():9d} "
-                  f"{(mag.max(1) > args.threshold).sum():10d} {fing:10.2f} {overall:10.2f} "
+                  f"{(mag.max(1) > args.threshold).sum():10d} {flex}{fing:10.2f} {overall:10.2f} "
                   f"{pct(a['label_signal']):5.1f}% {pct(a['fit_signal']):5.1f}% {pct(a['angle_signal']):5.1f}%")
 
 

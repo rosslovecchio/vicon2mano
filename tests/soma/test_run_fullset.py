@@ -190,3 +190,14 @@ def test_pseudo_static_window_is_written_with_all_columns(tmp_path):
     assert [n.split(":")[-1] for n in names] == ["A", "B", "C"] and Y.shape[0] == 5
     np.testing.assert_allclose(Y[0], X[2])
     assert np.isnan(Y[2, 1]).all()                      # NaN gap preserved (row 4 -> index 2)
+
+
+def test_provenance_snapshot_records_commit_and_hashes(tmp_path):
+    import provenance
+    snap = provenance.snapshot("driver")
+    assert snap["source"] == "driver" and snap["git_head"]
+    assert "scripts/mano/fit_surface_markers.py" in snap["files"]
+    f = snap["files"]["scripts/mano/fit_surface_markers.py"]
+    assert len(f["sha256"]) == 16 and f["git_blob"]
+    provenance.write(tmp_path / "x" / "p.json", snap)
+    assert json.loads((tmp_path / "x" / "p.json").read_text())["git_head"] == snap["git_head"]

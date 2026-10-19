@@ -431,6 +431,10 @@ def do_participant(R: Run, p: str, sessions: dict[str, str]):
             if not ok:
                 continue
         if "fit" in stages:
+            if a.force or not (fit_npz.exists() and pred_npz.exists()):
+                # which code this fit starts with: the script can change on disk during a long run
+                import provenance
+                provenance.write(tdir / "fit_provenance.json", provenance.snapshot("driver"))
             extra = ["--mv-frames", a.max_frames] if a.max_frames else []
             ok, _ = step(R, p, sg, "fit", [(part(fit_npz), fit_npz), (part(pred_npz), pred_npz)],
                          [PY, "scripts/mano/fit_surface_markers.py", "--mano-dir", mano,
