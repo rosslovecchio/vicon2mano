@@ -3,7 +3,7 @@
 identical settings (P10 config, --cuda-graph --mv-chunk 3000 --mv-overlap 150):
 
   pin         P10's attachments as shipped (Palm1 pinned to vertex 200)
-  nopin       the same minus Palm1 (configs/surface_fit/P1P2_attach.json), so the static
+  nopin       the same minus Palm1 (derived from the config's attach file), so the static
               stage finds Palm1's attachment itself
   manual_pin  fitted to the manual-label export instead of SOMA's labels, pinned, as a
               stand-in reference until the real manual-label fit is available
@@ -18,6 +18,7 @@ with scripts/mano/score_fit_vs_reference.py.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -40,11 +41,19 @@ def main():
     ap.add_argument("--mano-dir", default=str(DATA_ROOT / "mano_v1_2" / "models"))
     ap.add_argument("--fit-config", default=str(REPO / "configs/surface_fit/P10.json"))
     ap.add_argument("--only", default="", help="comma list of arms to run")
+    ap.add_argument("--code-dir", default=str(REPO),
+                    help="checkout to run the fit script from (a frozen worktree, so edits to the live tree "
+                         "cannot change a run in flight)")
     args = ap.parse_args()
 
+    import json
+    attach = json.loads((REPO / json.loads(Path(args.fit_config).read_text())["attach_file"]).read_text())
+    nopin_file = Path(args.out) / "nopin" / "attach_minus_Palm1.json"       # derived, so it cannot drift
+    nopin_file.parent.mkdir(parents=True, exist_ok=True)
+    nopin_file.write_text(json.dumps({k: v for k, v in attach.items() if k != "Palm1"}))
     arms = {
         "pin": (args.labels, []),
-        "nopin": (args.labels, ["--attach", str(REPO / "configs/surface_fit/P1P2_attach.json")]),
+        "nopin": (args.labels, ["--attach", str(nopin_file)]),
         "manual_pin": (args.manual, []),
         # the fit the earlier docs' "176 frames above 120 deg" came from: 400/400/600 iterations
         "iters400": (args.labels, ["--iters-thumb", "400", "--iters-finger", "400", "--iters-mv", "600"]),
@@ -55,14 +64,15 @@ def main():
         movement, override = arms[name]
         d = Path(args.out) / name
         d.mkdir(parents=True, exist_ok=True)
-        provenance.write(d / "fit_provenance.json", provenance.snapshot("driver"))
+        provenance.write(d / "fit_provenance.json", provenance.snapshot("driver", repo=Path(args.code_dir)))
         cmd = [sys.executable, "scripts/mano/fit_surface_markers.py", "--mano-dir", args.mano_dir,
                "--static", args.static, "--movement", movement, "--out", str(d / "static_fit.html")]
         cmd += rf.fit_args_from_config(Path(args.fit_config)) + override
         cmd += ["--cuda-graph", "--mv-chunk", "3000", "--mv-overlap", "150",
                 "--npz-out", str(d / "fit.npz"), "--pred-out", str(d / "pred.npz")]
         log = open(d / "fit.log", "w", encoding="utf-8")
-        procs.append((name, subprocess.Popen(cmd, cwd=REPO, stdout=log, stderr=subprocess.STDOUT)))
+        procs.append((name, subprocess.Popen(cmd, cwd=args.code_dir, stdout=log, stderr=subprocess.STDOUT,
+                                             env=dict(os.environ, PYTHONUNBUFFERED="1"))))
         print(f"started {name}", flush=True)
     bad = [n for n, p in procs if p.wait() != 0]
     print("done" + (f"; FAILED: {bad}" if bad else ""))

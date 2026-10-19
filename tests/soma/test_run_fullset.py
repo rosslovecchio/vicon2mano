@@ -201,3 +201,16 @@ def test_provenance_snapshot_records_commit_and_hashes(tmp_path):
     assert len(f["sha256"]) == 16 and f["git_blob"]
     provenance.write(tmp_path / "x" / "p.json", snap)
     assert json.loads((tmp_path / "x" / "p.json").read_text())["git_head"] == snap["git_head"]
+
+
+def test_watchdog_kills_a_silent_stage(tmp_path):
+    R = rf.Run(Namespace(out_root=str(tmp_path), stall_min=0.03))            # 1.8 s of silence
+    rc, _, secs = R.sh([sys.executable, "-c", "import time; time.sleep(60)"], tmp_path / "a.log")
+    assert rc == rf.STALLED and secs < 30
+
+
+def test_watchdog_leaves_a_stage_that_keeps_writing(tmp_path):
+    R = rf.Run(Namespace(out_root=str(tmp_path), stall_min=0.03))
+    code = "import time\nfor i in range(8):\n    print(i, flush=True); time.sleep(0.5)"
+    rc, text, _ = R.sh([sys.executable, "-c", code], tmp_path / "b.log")
+    assert rc == 0 and "7" in text

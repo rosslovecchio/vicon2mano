@@ -32,24 +32,26 @@ REPO = Path(__file__).resolve().parents[2]
 CODE = ["scripts/mano/fit_surface_markers.py", "vicon2mano/core/fitter.py", "scripts/soma/run_fullset.py"]
 
 
-def _git(*args) -> str:
-    return subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True).stdout.strip()
+def _git(*args, repo: Path = REPO, strip: bool = True) -> str:
+    out = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True).stdout
+    return out.strip() if strip else out
 
 
-def snapshot(source: str = "driver", started_at: float | None = None) -> dict:
-    """The code state right now. Hashes are of the files on disk (what a new process imports)."""
+def snapshot(source: str = "driver", started_at: float | None = None, repo: Path = REPO) -> dict:
+    """The code state of ``repo`` right now. Hashes are of the files on disk (what a new process imports)."""
     files = {}
     for rel in CODE:
-        p = REPO / rel
+        p = repo / rel
         if p.exists():
             data = p.read_bytes()
             files[rel] = dict(sha256=hashlib.sha256(data).hexdigest()[:16],
-                              git_blob=_git("hash-object", rel)[:10], mtime=time.strftime(
+                              git_blob=_git("hash-object", rel, repo=repo)[:10], mtime=time.strftime(
                                   "%Y-%m-%d %H:%M:%S", time.localtime(p.stat().st_mtime)))
-    dirty = [ln[3:] for ln in _git("status", "--porcelain", "--untracked-files=no").splitlines()]
-    return dict(source=source,
+    dirty = [ln[3:] for ln in _git("status", "--porcelain", "--untracked-files=no", repo=repo, strip=False).splitlines()]
+    return dict(source=source, repo=str(repo),
                 started_at=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started_at or time.time())),
-                git_head=_git("rev-parse", "--short", "HEAD"), git_branch=_git("rev-parse", "--abbrev-ref", "HEAD"),
+                git_head=_git("rev-parse", "--short", "HEAD", repo=repo),
+                git_branch=_git("rev-parse", "--abbrev-ref", "HEAD", repo=repo),
                 tracked_files_with_uncommitted_changes=dirty, files=files)
 
 

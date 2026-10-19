@@ -231,13 +231,31 @@ class Run:
         self.note(p, "", "FLAG", reason, detail=detail)
 
     def sh(self, cmd, log: Path) -> tuple[int, str, float]:
+        """Run ``cmd`` writing its output to ``log``; STALLED if the log stops growing for --stall-min."""
         log.parent.mkdir(parents=True, exist_ok=True)
         t0 = time.time()
         env = dict(os.environ, PYTHONUNBUFFERED="1")
+        stall_s = getattr(self.a, "stall_min", 0) * 60
         with open(log, "w", encoding="utf-8", errors="replace") as f:
-            rc = subprocess.run([str(c) for c in cmd], stdout=f, stderr=subprocess.STDOUT,
-                                cwd=REPO, env=env).returncode
+            proc = subprocess.Popen([str(c) for c in cmd], stdout=f, stderr=subprocess.STDOUT, cwd=REPO, env=env)
+            size, grew = -1, time.time()
+            while True:
+                try:
+                    rc = proc.wait(timeout=min(30, stall_s) if stall_s else None)
+                    break
+                except subprocess.TimeoutExpired:
+                    now = log.stat().st_size
+                    if now != size:
+                        size, grew = now, time.time()
+                    elif time.time() - grew > stall_s:      # alive but silent: a hung CUDA call spins at 100% CPU
+                        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)                             if os.name == "nt" else proc.kill()
+                        proc.wait()
+                        rc = STALLED
+                        break
         return rc, log.read_text(encoding="utf-8", errors="replace"), time.time() - t0
+
+
+STALLED = -9
 
 
 def part(path: Path) -> Path:
@@ -257,6 +275,9 @@ def step(R: Run, p, trial, stage, outputs, cmd, log, parse=None):
         R.note(p, trial, stage, "done before")
         return True, ""
     rc, text, secs = R.sh(cmd, log)
+    if rc == STALLED:
+        R.note(p, trial, stage, "STALLED", secs, f"no output for {R.a.stall_min} min; killed, retrying once")
+        rc, text, secs = R.sh(cmd, log)
     if rc != 0:
         R.failed += 1
         R.note(p, trial, stage, "FAILED", secs, f"see {log}")
@@ -534,6 +555,8 @@ def main():
     ap.add_argument("--max-static-fit-mm", type=float, default=8.0,
                     help="flag a static whose stage-2 surface fit is worse than this "
                          "(known-good statics: P10 5.25 mm, P12 4.65 mm)")
+    ap.add_argument("--stall-min", type=float, default=60.0,
+                    help="kill and retry once a stage whose log has not grown for this many minutes (0 = off)")
     ap.add_argument("--force", action="store_true", help="redo stages even if their outputs exist")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
