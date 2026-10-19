@@ -101,3 +101,15 @@ def test_run_adam_graph_flag_is_harmless_without_cuda():
     opt = torch.optim.Adam([x], lr=0.1)
     fsm.run_adam(opt, lambda: ((x - target) ** 2).sum(), 100, graph=True)
     assert float(((x - target) ** 2).sum()) < 1e-2
+
+
+def test_angles_from_markers_needs_only_palm2():
+    """P1/P2 never have Palm1/Palm3; the seed must still read the fingers."""
+    names = ["Palm2", "Index1", "Index2", "Index3"]
+    # wrist at origin, finger bent 90 deg at the PIP
+    mk = np.array([[[0, 0, 0], [0, 50, 0], [0, 80, 0], [0, 80, 30]]], float)
+    Bmat = np.zeros((15, 3, 3), np.float32)
+    Bmat[:, 0, 0] = 1.0
+    hp = fsm.angles_from_markers(mk, names, Bmat)
+    assert abs(hp[0, 3] - np.pi / 2) < 1e-4          # Index PIP flexion
+    assert fsm.angles_from_markers(mk, names[1:], Bmat).any() == False  # no Palm2 -> flat

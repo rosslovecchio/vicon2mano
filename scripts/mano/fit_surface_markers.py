@@ -494,10 +494,11 @@ def angles_from_markers(mk, names, Bmat, gap_fill=True):
     T = mk.shape[0]
     hp = np.zeros((T, 45), np.float32)
     idx = {n: i for i, n in enumerate(names)}
-    need = ("Palm1", "Palm2", "Palm3")
-    if not all(n in idx for n in need):
+    # Only Palm2 is used below. Requiring Palm1 and Palm3 as well returned a
+    # flat hand for P1/P2, whose Palm3 is never present.
+    if "Palm2" not in idx:
         return hp
-    p1, p2, p3 = (mk[:, idx[n]] for n in need)
+    p2 = mk[:, idx["Palm2"]]
     distal = np.zeros((T, 3), np.float32)
     for fname, jbase in (("Index", 0), ("Middle", 3), ("Pinky", 6), ("Ring", 9)):
         m1, m2, m3 = (f"{fname}1", f"{fname}2", f"{fname}3")
