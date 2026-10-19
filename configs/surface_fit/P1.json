@@ -15,11 +15,16 @@
     "- stretch_file: P10's flexion-dependent skin slide. Slopes are approximate for another hand.",
     "",
     "STATIC-STAGE RESULT (--staged, 400/400 iters, 5 ICP rounds): stage 1 joint-centre MEAN |d| 7.50 mm;",
-    "stage 2 surface-point-to-marker MEAN |d| 4.25 mm. Largest per-marker: Thumb2 9.3, Pinky1 7.6, Ring1 6.3 (others <=5.7)."
+    "stage 2 surface-point-to-marker MEAN |d| 4.25 mm. Largest per-marker: Thumb2 9.3, Pinky1 7.6, Ring1 6.3 (others <=5.7).",
+    "",
+    "THUMB (P1 only): the automatic search put Thumb2 9.3 mm from its attached point, behind the segment.",
+    "P1_attach.json = P1P2_attach.json + hand-picked Thumb1 90, Thumb2 89, Thumb3 731, and thumb_slide lets",
+    "Thumb2/Thumb3 slide along their segment (fitted in the static, then frozen). Static stage 2: MEAN |d| 4.03 mm,",
+    "Thumb3 1.4 mm from its vertex, Thumb2 12.5 mm (not fixed; slide +4.2 mm). A thumb length scale was tried and was worse."
   ],
   "side": "right",
   "static_csv": "results/soma/labels/P1/static/soma_labelled.csv",
-  "attach_file": "configs/surface_fit/P1P2_attach.json",
+  "attach_file": "configs/surface_fit/P1_attach.json",
   "params": {
     "standoff": 3.0,
     "icp_rounds": 5,
@@ -38,7 +43,8 @@
     "mv_chunk": 6000,
     "free_flexion": true,
     "stretch_file": "configs/surface_fit/P10_stretch.json",
-    "stretch_gate": 45.0
+    "stretch_gate": 45.0,
+    "thumb_slide": true
   },
   "movement_csv": "results/soma/labels/P1/Trial1_handsonly/soma_labelled.csv"
 }

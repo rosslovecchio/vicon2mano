@@ -113,3 +113,11 @@ def test_angles_from_markers_needs_only_palm2():
     hp = fsm.angles_from_markers(mk, names, Bmat)
     assert abs(hp[0, 3] - np.pi / 2) < 1e-4          # Index PIP flexion
     assert fsm.angles_from_markers(mk, names[1:], Bmat).any() == False  # no Palm2 -> flat
+
+
+def test_thumb_slide_moves_only_thumb_markers_along_their_segment():
+    J = torch.zeros(1, 21, 3)
+    J[0, 2] = torch.tensor([0.0, 0.0, 0.0]); J[0, 3] = torch.tensor([0.0, 0.1, 0.0])
+    off = fsm.thumb_slide(J, ["Index2", "Thumb3"], torch.tensor([5.0, 5.0]))
+    assert torch.allclose(off[0, 0], torch.zeros(3))                       # not a thumb marker
+    assert torch.allclose(off[0, 1], torch.tensor([0.0, 0.005, 0.0]), atol=1e-7)   # 5 mm along 2->3

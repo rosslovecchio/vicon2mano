@@ -638,6 +638,21 @@ def calibrate_segment_offsets(J21, M, names, repo_of):
     return torch.stack(offs), spread
 
 
+def thumb_slide(J21, names, slide):
+    """(T, P, 3) metres: each thumb marker's constant slide along its segment."""
+    import torch
+    off = torch.zeros((J21.shape[0], len(names), 3), device=J21.device, dtype=J21.dtype)
+    for k, nm in enumerate(names):
+        if nm in _THUMB_SEG:
+            a, b = _THUMB_SEG[nm]
+            u = J21[:, b] - J21[:, a]
+            off[:, k] = slide[k] * 1e-3 * u / torch.sqrt((u ** 2).sum(-1, keepdim=True) + 1e-18)
+    return off
+
+
+_THUMB_SEG = {"Thumb2": (1, 2), "Thumb3": (2, 3)}      # the segment each marker is taped to
+
+
 def onehot_attachment(F, vid):
     """Express "attach to vertex ``vid``" as a (face, barycentric) pair.
 
@@ -842,6 +857,8 @@ def main() -> None:
     ap.add_argument("--exclude", default="",
                      help="marker names to drop (comma separated)")
     ap.add_argument("--n-frames", type=int, default=30)
+    ap.add_argument("--complete-frames", action="store_true",
+                    help="sample the --n-frames only from frames where every fitted marker is present")
     ap.add_argument("--iters-joint", type=int, default=600)
     ap.add_argument("--iters-surface", type=int, default=600)
     ap.add_argument("--icp-rounds", type=int, default=3)
@@ -860,6 +877,8 @@ def main() -> None:
                      help="how the dorsal side of the thumb segments is defined for "
                           "attachment. cross = as for the fingers (default, all earlier "
                           "results); proj = palm dorsal projected off the thumb axis.")
+    ap.add_argument("--thumb-slide", action="store_true",
+                     help="let Thumb2/Thumb3 slide along their segment (fitted in the static)")
     ap.add_argument("--offset-mode", action="store_true",
                      help="ABLATION: model each marker as a rigid offset from "
                           "its joint in that joint's segment frame (the "
@@ -1053,7 +1072,11 @@ def main() -> None:
     print(f"{len(pairs)} markers: {names}")
     print(f"  surface-only (no stage-1 joint target): {extra}")
 
-    sf = np.linspace(0, st.shape[0] - 1, min(args.n_frames, st.shape[0])).astype(int)
+    pool = np.arange(st.shape[0])
+    if args.complete_frames:                  # a marker seen in few frames would otherwise be nan here
+        full = np.where(np.isfinite(st[:, [mi for _, mi in pairs]]).all((1, 2)))[0]
+        pool = full if len(full) else pool
+    sf = pool[np.linspace(0, len(pool) - 1, min(args.n_frames, len(pool))).astype(int)]
     S = len(sf)
     M = torch.tensor(st[sf][:, [mi for _, mi in pairs]] * 1e-3,
                      dtype=torch.float32, device=dev)          # (S, P, 3) metres
@@ -1165,6 +1188,7 @@ def main() -> None:
              for j, _ in pairs]
     for (j, _), nm, al in zip(pairs, names, allow):
         print(f"  {nm:8s} may attach to {len(al):4d} faces")
+    slide = torch.zeros(len(names), device=dev, requires_grad=args.thumb_slide)
     for rnd in range(args.icp_rounds):
         with torch.no_grad():
             Vm = np.nanmean(fwd().vertices.cpu().numpy(), axis=0)
@@ -1206,7 +1230,8 @@ def main() -> None:
         opt = torch.optim.Adam([{"params": [betas], "lr": 5e-3},
                                 {"params": [hp], "lr": 2e-2},
                                 {"params": [orient], "lr": 5e-3},
-                                {"params": [tr], "lr": 3e-3}])
+                                {"params": [tr], "lr": 3e-3},
+                                {"params": [slide], "lr": 0.5}])
         for it in range(args.iters_surface):
             opt.zero_grad()
             # Occluded markers are NaN. Masking removes them from the loss
@@ -1215,19 +1240,22 @@ def main() -> None:
             # gradient and kills every parameter on the next step. Substituting
             # 0 is exactly equivalent under the mask and keeps the graph finite.
             M_s = torch.nan_to_num(M, nan=0.0)
-            Vt = fwd().vertices[:, fidx]                                # (S,P,3,3)
+            out = fwd()
+            Vt = out.vertices[:, fidx]                                  # (S,P,3,3)
             P = (Vt * bw).sum(2)                                        # surface point
             nrm = torch.cross(Vt[:, :, 1] - Vt[:, :, 0],
                               Vt[:, :, 2] - Vt[:, :, 0], dim=-1)
             nrm = nrm / nrm.norm(dim=-1, keepdim=True).clamp_min(1e-9)
             tgt_pt = P + args.standoff * 1e-3 * nrm                     # just outside
+            if args.thumb_slide:
+                tgt_pt = tgt_pt + thumb_slide(mano_output_to_joints21(out), names, slide)
             d = (tgt_pt - M_s)[mmask]
             # one-sided term: a marker can never be *inside* the skin, so
             # penalise the inward component extra rather than symmetrically
             inward = torch.relu(-((M_s - P) * nrm).sum(-1))[mmask]
             loss = ((d ** 2).sum(-1).mean()
                     + args.w_inside * (inward ** 2).mean()
-                    + args.w_shape * (betas ** 2).sum()
+                    + args.w_shape * (betas ** 2).sum() + 0.1 * ((slide * 1e-3) ** 2).sum()
                     # Shrink toward MANO's mean pose. Without this a full
                     # 45-DOF fit reproduces the markers with an anatomically
                     # impossible claw: the PCA basis was acting as the pose
@@ -1261,7 +1289,16 @@ def main() -> None:
     for nm, a, b, f in zip(names, Pk, mk0, fid):
         seg = _bone_name[int(np.bincount(dom[F[f]]).argmax())]
         print(f"  {nm:10s} {np.linalg.norm(a - b):7.2f} mm   on {seg}")
+    slide_f = slide.detach()                 # frozen like betas for the movement fit
+    if args.thumb_slide:
+        print("thumb slide (mm along segment): "
+              + ", ".join(f"{n} {v:+.1f}" for n, v in zip(names, slide.tolist()) if n in _THUMB_SEG))
     print(f"\ncalibrated betas = {betas.detach().cpu().numpy().round(3)}")
+    if Bmat is not None:                     # thumb joint angles of the static pose (deg)
+        hpj = hp.detach().cpu().numpy().mean(0).reshape(15, 3)
+        for ji in (12, 13, 14):
+            fl, ab, tw = np.degrees([hpj[ji] @ Bmat[ji, :, k] for k in (0, 1, 2)])
+            print(f"static angle {_FINGER_JOINTS[ji]}: flex {fl:.1f} abd {ab:.1f} twist {tw:.1f} deg")
 
     fig = go.Figure(data=[
         go.Mesh3d(x=V1[:, 0], y=V1[:, 1], z=V1[:, 2],
@@ -1606,6 +1643,8 @@ def main() -> None:
                     Jc = mano_output_to_joints21(om)
                     P = P + stretch_offsets(Jc, hp_m, Bt, names, slopes, ref_deg,
                                             args.stretch_gate)
+                if args.thumb_slide:
+                    P = P + thumb_slide(mano_output_to_joints21(om), names, slide_f)
                 dd_ = P + args.standoff * 1e-3 * nrm - Mm_s
                 main_stats["dd"] = dd_
                 inw = torch.relu(-((Mm_s - P) * nrm).sum(-1))
@@ -1669,7 +1708,7 @@ def main() -> None:
                       + torch.einsum("tpij,pj->tpi", R, off_vec)).cpu().numpy() * 1000
         else:
             Pm = (Vm_all[:, F[fid]] * bary[None, :, :, None]).sum(2)
-        if slopes and Bmat is not None:
+        if (slopes or args.thumb_slide) and Bmat is not None:
             with torch.no_grad():
                 _J = torch.tensor(np.concatenate([
                     mano_output_to_joints21(model(
@@ -1680,9 +1719,12 @@ def main() -> None:
                         return_verts=True)).cpu().numpy()
                     for sl0 in [slice(ci * chunk, min((ci + 1) * chunk, len(mf)))
                                 for ci in range(n_chunks)]]), device=dev)
-                Pm = Pm + stretch_offsets(
-                    _J, torch.tensor(HP, device=dev), Bt, names, slopes, ref_deg,
-                    args.stretch_gate).cpu().numpy() * 1000
+                if slopes:
+                    Pm = Pm + stretch_offsets(
+                        _J, torch.tensor(HP, device=dev), Bt, names, slopes, ref_deg,
+                        args.stretch_gate).cpu().numpy() * 1000
+                if args.thumb_slide:
+                    Pm = Pm + thumb_slide(_J, names, slide_f).cpu().numpy() * 1000
         if args.pred_out:
             Path(args.pred_out).parent.mkdir(parents=True, exist_ok=True)
             np.savez(args.pred_out, pred_mm=Pm.astype(np.float32), frames=mf,
