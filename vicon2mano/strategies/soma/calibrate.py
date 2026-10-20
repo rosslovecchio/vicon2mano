@@ -89,8 +89,10 @@ def _axis_angle(R: np.ndarray) -> np.ndarray:
 def fit_static(model, lib: MarkerLibrary, cloud_mm: np.ndarray, *, device: str = "cpu",
                iters_root: int = 300, iters: int = 1500, w_beta: float = 2.0,
                w_pose: float = 20.0, suspect_mm: float = 15.0, rounds: int = 2,
-               offset_only: tuple[str, ...] = ()) -> dict:
+               offset_only: tuple[str, ...] = (), pose_penalty=None) -> dict:
     """Fit MANO shape and pose to one static cloud (mm). See module docstring.
+
+    ``pose_penalty``: optional ``pose (45,) -> scalar`` added to the loss (mm^2), e.g. anatomical limits.
 
     ``w_pose`` (mm^2 per rad^2) holds the static near a flat hand. At 1.0 the
     fit kinked the fingertips to land attachment points on markers: on P12's
@@ -162,6 +164,8 @@ def fit_static(model, lib: MarkerLibrary, cloud_mm: np.ndarray, *, device: str =
                 loss = ((Pm - X) ** 2).sum(-1)[msk].mean()
                 if len(params) > 2:
                     loss = loss + w_beta * (betas ** 2).sum() + w_pose * (pose ** 2).sum()
+                    if pose_penalty is not None:
+                        loss = loss + pose_penalty(pose)
                 loss.backward()
                 opt.step()
         with torch.no_grad():

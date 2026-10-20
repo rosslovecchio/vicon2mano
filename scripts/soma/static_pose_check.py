@@ -51,7 +51,24 @@ def sources(p: str) -> dict[str, tuple[Path, dict]]:
     return out
 
 
-def check(csv: Path, opts: dict, w_pose: float, base_library: Path, mano_dir: str, twist_tol: float = 5.0) -> dict:
+def limit_penalty(B, lo, hi, w: float, dev: str, boost_joints=(6, 12), boost: float = 5.0):
+    """pose -> w * sum_j weight_j * (distance outside the joint limits, rad)^2, in the measured axes.
+
+    Finger twist has limits (0, 0), so it is pulled to zero. ``boost_joints`` (pinky1, thumb1) weigh ``boost``x.
+    """
+    import torch
+    Bt, lo_t, hi_t = (torch.tensor(np.asarray(a), dtype=torch.float32, device=dev) for a in (B, lo, hi))
+    jw = torch.ones(15, 1, device=dev)
+    jw[list(boost_joints)] = boost
+
+    def penalty(pose):
+        c = torch.einsum("jk,jkc->jc", pose.view(15, 3), Bt)
+        return w * (jw * (torch.relu(c - hi_t) + torch.relu(lo_t - c)) ** 2).sum()
+    return penalty
+
+
+def check(csv: Path, opts: dict, w_pose: float, base_library: Path, mano_dir: str, twist_tol: float = 5.0,
+          limit_w: float = 0.0) -> dict:
     import torch
     import fit_surface_markers as fsm
     from vicon2mano.core.fitter import FitConfig, MANOFitter
@@ -66,10 +83,13 @@ def check(csv: Path, opts: dict, w_pose: float, base_library: Path, mano_dir: st
     X, names = load_csv(str(csv))[:2]
     names = [n.split(":")[-1] for n in names]
     cloud, info = static_cloud(X[:, [names.index(n) for n in lib.labels]], 200)
-    fit = fit_static(model, lib, cloud, device=dev, w_pose=w_pose, offset_only=tuple(opts.get("offset", ())))
     B = fsm.joint_axis_basis(model, dev, 45)                                    # (15, 3, 3): rows joint, cols component
+    lo_r, hi_r = fsm.basis_limit_bounds(False, False)
+    pen = limit_penalty(B, lo_r, hi_r, limit_w, dev) if limit_w else None
+    fit = fit_static(model, lib, cloud, device=dev, w_pose=w_pose, offset_only=tuple(opts.get("offset", ())),
+                     pose_penalty=pen)
     comp = np.degrees(np.einsum("jk,jkc->jc", fit["hand_pose"].reshape(15, 3), B))   # (15, 3) flexion, abduction, twist
-    lo, hi = (np.degrees(a) for a in fsm.basis_limit_bounds(False, False))
+    lo, hi = np.degrees(lo_r), np.degrees(hi_r)
     bad = []                                    # (joint, component, value, limit, overshoot), all in degrees
     for j in range(15):
         for c in range(3):
@@ -79,7 +99,8 @@ def check(csv: Path, opts: dict, w_pose: float, base_library: Path, mano_dir: st
             if over > 1e-6:
                 bad.append((NAMES[j], ("flexion", "abduction", "twist")[c], round(float(comp[j, c]), 1),
                             round(float(lo[j, c] if comp[j, c] < lo[j, c] else hi[j, c]), 1), round(float(over), 1)))
-    return dict(w_pose=w_pose, csv=str(csv), window=[info["start"], info["start"] + info["n"] - 1],
+    return dict(w_pose=w_pose, limit_w=limit_w, labels=list(lib.labels), err_mm=[None if not np.isfinite(e) else float(e) for e in fit["err_mm"]],
+                csv=str(csv), window=[info["start"], info["start"] + info["n"] - 1],
                 motion_mm=info["motion_mm"], comp=comp.round(1).tolist(), outside=bad,
                 suspects=list(fit["suspects"]), max_abs_beta=float(np.abs(fit["betas"]).max()))
 
@@ -98,6 +119,36 @@ def table():
              if r["outside"] else "none"))
 
 
+GROUPS = {"palm": ("Palm1", "Palm2", "Palm3"), "thumb": ("Thumb1", "Thumb2", "Thumb3"), "index": ("Index1", "Index2", "Index3"),
+          "middle": ("Middle1", "Middle2", "Middle3"), "ring": ("Ring1", "Ring2", "Ring3"), "pinky": ("Pinky1", "Pinky2", "Pinky3")}
+
+
+def compare(d: Path):
+    """Fit error with vs without the limit penalty, by finger: does constraining the pose cost the pinky/thumb markers
+    more than the rest (a layout difference the pose was absorbing) or nothing (it was only the pose)?"""
+    runs: dict = {}
+    for f in d.glob("*.json"):
+        r = json.loads(f.read_text())
+        runs.setdefault(f.stem.split("_w")[0], {})[r["limit_w"]] = r
+    weights = sorted({w for v in runs.values() for w in v})
+    gm = lambda r, g: np.nanmean([np.nan if e is None else e for l, e in zip(r["labels"], r["err_mm"]) if l in GROUPS[g]])
+    print("fit error (mm) by finger, " + "  ".join(GROUPS) + "  -- per limit weight")
+    delta = {w: {g: [] for g in GROUPS} for w in weights[1:]}
+    for tag in sorted(runs, key=lambda t: int("".join(c for c in t.split("_")[0] if c.isdigit()))):
+        r = runs[tag]
+        line = f"{tag:6s}"
+        for w in weights:
+            if w in r:
+                line += f" | L={w:<6g}" + " ".join(f"{gm(r[w], g):5.1f}" for g in GROUPS)
+                for g in GROUPS if w else ():
+                    delta[w][g].append(gm(r[w], g) - gm(r[0.0], g))
+        last = r[weights[-1]]
+        print(line + f" | twist {max(abs(c[2]) for c in last['comp'][:12]):4.1f} deg, {len(last['outside'])} outside")
+    print("\nmedian change in fit error (mm) over participants [min..max]:")
+    for w in weights[1:]:
+        print(f"  limit weight {w:g}: " + "  ".join(f"{g} {np.nanmedian(v):+.1f} [{np.nanmin(v):+.1f}..{np.nanmax(v):+.1f}]" for g, v in delta[w].items()))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--participants", default="")
@@ -105,18 +156,25 @@ def main():
     ap.add_argument("--base-library", default=str(REPO / "results/soma/libraries/library_P10_Trial2.npz"))
     ap.add_argument("--mano-dir", default=None)
     ap.add_argument("--table", action="store_true")
+    ap.add_argument("--limit-weights", default="0", help="e.g. 0,100,10000: add the anatomical-limit penalty (0 = none)")
+    ap.add_argument("--out-dir", default=str(OUT))
+    ap.add_argument("--compare", action="store_true", help="tabulate --out-dir (runs made with several --limit-weights)")
     a = ap.parse_args()
     if a.table:
         return table()
+    if a.compare:
+        return compare(Path(a.out_dir))
     from vicon2mano.core.dataset import DATA_ROOT
     mano = a.mano_dir or str(DATA_ROOT / "mano_v1_2" / "models")
-    OUT.mkdir(parents=True, exist_ok=True)
+    out = Path(a.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
     for p in [x for x in a.participants.split(",") if x]:
         for tag, (csv, opts) in sources(p).items():
             for w in (float(v) for v in a.w_pose.split(",")):
-                res = check(csv, opts, w, Path(a.base_library), mano)
-                (OUT / f"{tag}_w{w:g}.json").write_text(json.dumps(res))
-                print(f"{tag} w_pose={w:g}: {len(res['outside'])} components outside limits", flush=True)
+                for lw in (float(v) for v in a.limit_weights.split(",")):
+                    res = check(csv, opts, w, Path(a.base_library), mano, limit_w=lw)
+                    (out / f"{tag}_w{w:g}{'_L%g' % lw if lw else ''}.json").write_text(json.dumps(res))
+                    print(f"{tag} w_pose={w:g} limit_w={lw:g}: {len(res['outside'])} components outside limits", flush=True)
 
 
 if __name__ == "__main__":
