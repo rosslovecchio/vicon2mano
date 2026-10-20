@@ -56,6 +56,28 @@ def base_markers(model, lib: MarkerLibrary, dev: str, n: int = 2000) -> np.ndarr
     return P + np.einsum("nmij,nmj->nmi", R, lib.residual[k])
 
 
+def write_static_html(model, lib: MarkerLibrary, cloud: np.ndarray, out: dict, path, title: str) -> None:
+    """Plotly page of a static fit: the fitted mesh, the static markers, and a line from each marker to its model point."""
+    import plotly.graph_objects as go
+    V, F = out["vertices_mm"], np.asarray(model.faces)
+    P, R = face_frames(V, F, lib.face_idx, lib.bary)
+    pred = P + np.einsum("mij,mj->mi", R, np.nan_to_num(np.nanmedian(lib.residual, 0)))
+    ok = np.isfinite(cloud).all(-1)
+    fig = go.Figure([
+        go.Mesh3d(x=V[:, 0], y=V[:, 1], z=V[:, 2], i=F[:, 0], j=F[:, 1], k=F[:, 2],
+                  color="#e8a0a0", opacity=0.6, name="fitted MANO"),
+        go.Scatter3d(x=cloud[ok, 0], y=cloud[ok, 1], z=cloud[ok, 2], mode="markers+text",
+                     text=[n for n, o in zip(lib.labels, ok) if o], marker=dict(size=5, color="#1b3a5c"),
+                     name="static markers"),
+        go.Scatter3d(x=np.ravel([[a[0], b[0], None] for a, b, o in zip(cloud, pred, ok) if o]),
+                     y=np.ravel([[a[1], b[1], None] for a, b, o in zip(cloud, pred, ok) if o]),
+                     z=np.ravel([[a[2], b[2], None] for a, b, o in zip(cloud, pred, ok) if o]),
+                     mode="lines", line=dict(color="#16a34a", width=4), name="marker -> model")])
+    fig.update_layout(scene=dict(aspectmode="data"), width=1000, height=800, title=title)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    fig.write_html(str(path), include_plotlyjs=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--participant", required=True)
@@ -159,25 +181,8 @@ def main():
     print(f"calibrated {int(np.isfinite(out['r_s']).all(-1).sum())}/{len(lib.labels)} markers; saved {args.out}")
 
     if args.html:
-        import plotly.graph_objects as go
-        V, F = out["vertices_mm"], np.asarray(model.faces)
-        P, R = face_frames(V, F, lib.face_idx, lib.bary)
-        pred = P + np.einsum("mij,mj->mi", R, np.nan_to_num(np.nanmedian(lib.residual, 0)))
-        ok = np.isfinite(cloud).all(-1)
-        fig = go.Figure([
-            go.Mesh3d(x=V[:, 0], y=V[:, 1], z=V[:, 2], i=F[:, 0], j=F[:, 1], k=F[:, 2],
-                      color="#e8a0a0", opacity=0.6, name="fitted MANO"),
-            go.Scatter3d(x=cloud[ok, 0], y=cloud[ok, 1], z=cloud[ok, 2], mode="markers+text",
-                         text=[n for n, o in zip(lib.labels, ok) if o], marker=dict(size=5, color="#1b3a5c"),
-                         name="static markers"),
-            go.Scatter3d(x=np.ravel([[a[0], b[0], None] for a, b, o in zip(cloud, pred, ok) if o]),
-                         y=np.ravel([[a[1], b[1], None] for a, b, o in zip(cloud, pred, ok) if o]),
-                         z=np.ravel([[a[2], b[2], None] for a, b, o in zip(cloud, pred, ok) if o]),
-                         mode="lines", line=dict(color="#16a34a", width=4), name="marker -> model")])
-        fig.update_layout(scene=dict(aspectmode="data"), width=1000, height=800,
-                          title=f"{args.participant} static fit; suspects: {out['suspects'] or 'none'}")
-        Path(args.html).parent.mkdir(parents=True, exist_ok=True)
-        fig.write_html(args.html, include_plotlyjs=True)
+        write_static_html(model, lib, cloud, out, args.html,
+                          f"{args.participant} static fit; suspects: {out['suspects'] or 'none'}")
         print(f"saved {args.html}")
 
 

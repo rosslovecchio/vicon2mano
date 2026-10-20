@@ -68,7 +68,7 @@ def limit_penalty(B, lo, hi, w: float, dev: str, boost_joints=(6, 12), boost: fl
 
 
 def check(csv: Path, opts: dict, w_pose: float, base_library: Path, mano_dir: str, twist_tol: float = 5.0,
-          limit_w: float = 0.0) -> dict:
+          limit_w: float = 0.0, html: Path | None = None, tag: str = "") -> dict:
     import torch
     import fit_surface_markers as fsm
     from vicon2mano.core.fitter import FitConfig, MANOFitter
@@ -88,6 +88,12 @@ def check(csv: Path, opts: dict, w_pose: float, base_library: Path, mano_dir: st
     pen = limit_penalty(B, lo_r, hi_r, limit_w, dev) if limit_w else None
     fit = fit_static(model, lib, cloud, device=dev, w_pose=w_pose, offset_only=tuple(opts.get("offset", ())),
                      pose_penalty=pen)
+    if html is not None:
+        from calibrate_static import write_static_html
+        err = np.array([e for l, e in zip(lib.labels, fit["err_mm"]) if not l.startswith("Forearm") and np.isfinite(e)])
+        what = f"anatomical limits enforced (finger twist = 0, weight {limit_w:g})" if limit_w else "no limit penalty"
+        write_static_html(model, lib, cloud, fit, html, f"{tag} static fit, {what}; w_pose {w_pose:g}; mean hand-marker error "
+                          f"{err.mean():.1f} mm; suspects: {fit['suspects'] or 'none'}")
     comp = np.degrees(np.einsum("jk,jkc->jc", fit["hand_pose"].reshape(15, 3), B))   # (15, 3) flexion, abduction, twist
     lo, hi = np.degrees(lo_r), np.degrees(hi_r)
     bad = []                                    # (joint, component, value, limit, overshoot), all in degrees
@@ -158,6 +164,7 @@ def main():
     ap.add_argument("--table", action="store_true")
     ap.add_argument("--limit-weights", default="0", help="e.g. 0,100,10000: add the anatomical-limit penalty (0 = none)")
     ap.add_argument("--out-dir", default=str(OUT))
+    ap.add_argument("--html-dir", default=None, help="also write the fitted mesh + markers of each run here")
     ap.add_argument("--compare", action="store_true", help="tabulate --out-dir (runs made with several --limit-weights)")
     a = ap.parse_args()
     if a.table:
@@ -172,8 +179,10 @@ def main():
         for tag, (csv, opts) in sources(p).items():
             for w in (float(v) for v in a.w_pose.split(",")):
                 for lw in (float(v) for v in a.limit_weights.split(",")):
-                    res = check(csv, opts, w, Path(a.base_library), mano, limit_w=lw)
-                    (out / f"{tag}_w{w:g}{'_L%g' % lw if lw else ''}.json").write_text(json.dumps(res))
+                    name = f"{tag}_w{w:g}{'_L%g' % lw if lw else ''}"
+                    html = Path(a.html_dir) / f"{name}.html" if a.html_dir else None
+                    res = check(csv, opts, w, Path(a.base_library), mano, limit_w=lw, html=html, tag=tag)
+                    (out / f"{name}.json").write_text(json.dumps(res))
                     print(f"{tag} w_pose={w:g} limit_w={lw:g}: {len(res['outside'])} components outside limits", flush=True)
 
 
