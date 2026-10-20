@@ -33,7 +33,11 @@ CODE = ["scripts/mano/fit_surface_markers.py", "vicon2mano/core/fitter.py", "scr
 
 
 def _git(*args, repo: Path = REPO, strip: bool = True) -> str:
-    out = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True).stdout
+    """git's stdout, or '' if git cannot run (not on PATH): a missing record must never stop a fit."""
+    try:
+        out = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True).stdout
+    except OSError:
+        return ""
     return out.strip() if strip else out
 
 

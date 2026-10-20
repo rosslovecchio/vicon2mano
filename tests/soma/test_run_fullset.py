@@ -214,3 +214,12 @@ def test_watchdog_leaves_a_stage_that_keeps_writing(tmp_path):
     code = "import time\nfor i in range(8):\n    print(i, flush=True); time.sleep(0.5)"
     rc, text, _ = R.sh([sys.executable, "-c", code], tmp_path / "b.log")
     assert rc == 0 and "7" in text
+
+
+def test_provenance_survives_git_missing(monkeypatch):
+    import provenance
+    def no_git(*a, **k):
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+    monkeypatch.setattr(provenance.subprocess, "run", no_git)
+    snap = provenance.snapshot("driver")
+    assert snap["git_head"] == "" and "scripts/mano/fit_surface_markers.py" in snap["files"]

@@ -580,7 +580,9 @@ def main():
             do_participant(R, p, sessions_all[p])
         except Exception as e:                      # one participant must not stop the rest
             R.failed += 1
-            R.note(p, "", "ERROR", type(e).__name__, detail=str(e)[:300])
+            import traceback
+            R.note(p, "", "ERROR", type(e).__name__, detail=traceback.format_exc()[-600:].replace("
+", " | "))
     import csv
     with open(R.out / f"flagged{'' if args.shard == '0/1' else '_' + args.shard.replace('/', 'of')}.csv",
               "w", newline="", encoding="utf-8") as f:
