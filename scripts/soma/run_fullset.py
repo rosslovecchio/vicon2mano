@@ -581,8 +581,7 @@ def main():
         except Exception as e:                      # one participant must not stop the rest
             R.failed += 1
             import traceback
-            R.note(p, "", "ERROR", type(e).__name__, detail=traceback.format_exc()[-600:].replace("
-", " | "))
+            R.note(p, "", "ERROR", type(e).__name__, detail=" | ".join(traceback.format_exc()[-600:].splitlines()))
     import csv
     with open(R.out / f"flagged{'' if args.shard == '0/1' else '_' + args.shard.replace('/', 'of')}.csv",
               "w", newline="", encoding="utf-8") as f:
