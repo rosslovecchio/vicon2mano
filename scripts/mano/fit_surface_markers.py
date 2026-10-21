@@ -691,7 +691,26 @@ def write_vertex_picker(V, F, mk, names, path):
     print(f"saved vertex picker: {path}")
 
 
-def dorsal_direction(J, palm_marker, wrist_marker=None):
+class ScaledModel:
+    """MANO with one global scale about the wrist (smplx has none); log-scale 0 = unscaled."""
+
+    def __init__(self, model, device):
+        import torch
+        self.model = model
+        self.log_scale = torch.zeros(1, device=device, requires_grad=True)
+
+    def __getattr__(self, k):
+        return getattr(self.model, k)
+
+    def __call__(self, **kw):
+        out = self.model(**kw)
+        s, w = self.log_scale.exp(), out.joints[:, :1]
+        out.vertices = w + s * (out.vertices - w)
+        out.joints = w + s * (out.joints - w)
+        return out
+
+
+def dorsal_direction(J, palm_marker, offset=None):
     """Unit vector pointing out the BACK of the hand (palm-level).
 
     Every marker in this protocol is taped to the dorsum. Without this, the
@@ -700,14 +719,16 @@ def dorsal_direction(J, palm_marker, wrist_marker=None):
     face, and a palmar face satisfies that whenever the mesh finger has
     drifted above the marker.
 
-    The sign is resolved against a marker known to be dorsal (Palm2), rather
-    than assumed from handedness -- a left/right mix-up would otherwise flip
-    the whole constraint silently.
+    The sign is resolved against the markers, not assumed from handedness (a
+    left/right mix-up would flip the constraint silently). ``offset`` is the
+    mean (marker - its seeded joint) over the finger markers, all dorsal. The
+    fallback, Palm2 against the wrist joint, is unreliable: stage 1 pulls that
+    joint onto Palm2, leaving a near-zero vector whose sign is noise.
     """
     n = np.cross(J[5] - J[0], J[17] - J[0])      # wrist->index MCP x wrist->pinky MCP
     n = n / np.linalg.norm(n)
-    ref = (wrist_marker if wrist_marker is not None else J[0])
-    return n if n @ (palm_marker - ref) > 0 else -n
+    ref = offset if offset is not None else palm_marker - J[0]
+    return n if n @ ref > 0 else -n
 
 
 # repo joint slot -> (proximal, distal) joint slots of the segment its skin
@@ -824,6 +845,7 @@ def closest_point_on_faces(V, F, pts, allow=None, dorsal=None, min_dot=0.0):
             if d < bd:
                 best, bd, bb = f, d, np.array([1 - u - v, u, v])
         if not np.isfinite(bd):
+            print(f"  WARNING: no dorsal face for marker {pi}; attached to the nearest face")
             best, bb = fb, fbb
         fid.append(best)
         bary.append(bb)
@@ -857,6 +879,11 @@ def main() -> None:
     ap.add_argument("--exclude", default="",
                      help="marker names to drop (comma separated)")
     ap.add_argument("--n-frames", type=int, default=30)
+    ap.add_argument("--fit-scale", action="store_true",
+                    help="also fit one global hand scale (about the wrist) in the static stages; the movement fit keeps it")
+    ap.add_argument("--palm-first", action="store_true",
+                    help="each stage-2 round places the hand on Palm1-3 and the finger MCP markers first "
+                         "(orientation, position, shape, scale), then fits the finger pose with that placement held")
     ap.add_argument("--complete-frames", action="store_true",
                     help="sample the --n-frames only from frames where every fitted marker is present")
     ap.add_argument("--iters-joint", type=int, default=600)
@@ -1032,6 +1059,9 @@ def main() -> None:
     jl_lo = jl_hi = None
     fitter = MANOFitter(cfg)
     model, dev = fitter._model, fitter.device
+    if args.fit_scale:
+        model = ScaledModel(model, dev)
+    scale_grp = [{"params": [model.log_scale], "lr": 1e-2}] if args.fit_scale else []
     F = np.asarray(model.faces, dtype=np.int64)
 
     jidx = {n: i for i, n in enumerate(MANO_JOINT_NAMES)}
@@ -1122,7 +1152,7 @@ def main() -> None:
     opt = torch.optim.Adam([{"params": [betas], "lr": 1e-2},
                             {"params": [hp], "lr": 5e-2},
                             {"params": [orient], "lr": 1e-2},
-                            {"params": [tr], "lr": 3e-3}])
+                            {"params": [tr], "lr": 3e-3}] + scale_grp)
     print(f"\nstage 1 -- joint-centre fit ({args.iters_joint} iters)")
     for it in range(args.iters_joint):
         opt.zero_grad()
@@ -1189,6 +1219,8 @@ def main() -> None:
     for (j, _), nm, al in zip(pairs, names, allow):
         print(f"  {nm:8s} may attach to {len(al):4d} faces")
     slide = torch.zeros(len(names), device=dev, requires_grad=args.thumb_slide)
+    palm_cols = torch.tensor([n.startswith("Palm") or n in ("Index1", "Middle1", "Ring1", "Pinky1")
+                              for n in names], device=dev)
     for rnd in range(args.icp_rounds):
         with torch.no_grad():
             Vm = np.nanmean(fwd().vertices.cpu().numpy(), axis=0)
@@ -1196,7 +1228,10 @@ def main() -> None:
         with torch.no_grad():
             Jm = mano_output_to_joints21(fwd()).cpu().numpy().mean(0)
         if "Palm2" in names:
-            pd_ = dorsal_direction(Jm, mkm[names.index("Palm2")])
+            off = np.nanmean([mkm[k] - Jm[j] for k, (j, _) in enumerate(pairs) if j >= 5], axis=0)
+            pd_ = dorsal_direction(Jm, mkm[names.index("Palm2")], off)
+            if rnd == 0 and pd_ @ dorsal_direction(Jm, mkm[names.index("Palm2")]) < 0:
+                print("  NOTE: dorsal sign from the finger markers differs from the old Palm2 rule")
             dors = segment_dorsals(Jm, pd_, [j for j, _ in pairs], args.thumb_dorsal)
         else:
             dors = None
@@ -1227,48 +1262,54 @@ def main() -> None:
         bw = torch.tensor(bary, device=dev).unsqueeze(0).unsqueeze(-1)  # (1,P,3,1)
         print(f"\nstage 2 round {rnd+1} -- attached faces {fid.tolist()}")
 
-        opt = torch.optim.Adam([{"params": [betas], "lr": 5e-3},
-                                {"params": [hp], "lr": 2e-2},
-                                {"params": [orient], "lr": 5e-3},
-                                {"params": [tr], "lr": 3e-3},
-                                {"params": [slide], "lr": 0.5}])
-        for it in range(args.iters_surface):
-            opt.zero_grad()
-            # Occluded markers are NaN. Masking removes them from the loss
-            # VALUE, but not from the backward pass: the inward term multiplies
-            # by (M - P), so a masked entry contributes 0 * NaN = NaN to nrm's
-            # gradient and kills every parameter on the next step. Substituting
-            # 0 is exactly equivalent under the mask and keeps the graph finite.
-            M_s = torch.nan_to_num(M, nan=0.0)
-            out = fwd()
-            Vt = out.vertices[:, fidx]                                  # (S,P,3,3)
-            P = (Vt * bw).sum(2)                                        # surface point
-            nrm = torch.cross(Vt[:, :, 1] - Vt[:, :, 0],
-                              Vt[:, :, 2] - Vt[:, :, 0], dim=-1)
-            nrm = nrm / nrm.norm(dim=-1, keepdim=True).clamp_min(1e-9)
-            tgt_pt = P + args.standoff * 1e-3 * nrm                     # just outside
-            if args.thumb_slide:
-                tgt_pt = tgt_pt + thumb_slide(mano_output_to_joints21(out), names, slide)
-            d = (tgt_pt - M_s)[mmask]
-            # one-sided term: a marker can never be *inside* the skin, so
-            # penalise the inward component extra rather than symmetrically
-            inward = torch.relu(-((M_s - P) * nrm).sum(-1))[mmask]
-            loss = ((d ** 2).sum(-1).mean()
-                    + args.w_inside * (inward ** 2).mean()
-                    + args.w_shape * (betas ** 2).sum() + 0.1 * ((slide * 1e-3) ** 2).sum()
-                    # Shrink toward MANO's mean pose. Without this a full
-                    # 45-DOF fit reproduces the markers with an anatomically
-                    # impossible claw: the PCA basis was acting as the pose
-                    # prior, so widening it requires putting one back.
-                    + args.w_pose * (hp ** 2).sum(-1).mean())
-            if args.biomech > 0 and jl_lo is not None:
-                loss = loss + args.biomech * basis_limit_penalty(hp, Bt, jl_lo, jl_hi, args.twist_weight)
-            loss.backward()
-            opt.step()
-            if (it + 1) % 300 == 0:
-                print(f"  iter {it+1:4d}  surface-point-to-marker "
-                      f"{d.norm(dim=-1).mean().item()*1000:6.2f} mm  "
-                      f"(inward {inward.mean().item()*1000:5.2f} mm)")
+        # --palm-first: place the hand on the palm markers alone, then fit the
+        # fingers with that placement held, so finger error cannot drag the
+        # palm off its own markers.
+        root = [{"params": [orient], "lr": 5e-3}, {"params": [tr], "lr": 3e-3}] + scale_grp
+        shape = [{"params": [betas], "lr": 5e-3}]
+        rest = [{"params": [hp], "lr": 2e-2}, {"params": [slide], "lr": 0.5}]
+        phases = ([("palm", palm_cols, root + shape), ("fingers", None, shape + rest)]
+                  if args.palm_first else [("", None, shape + rest + root)])
+        for tag, cols, groups in phases:
+            opt = torch.optim.Adam(groups)
+            use = mmask if cols is None else mmask & cols
+            for it in range(args.iters_surface):
+                opt.zero_grad()
+                # Occluded markers are NaN. Masking removes them from the loss
+                # VALUE, but not from the backward pass: the inward term multiplies
+                # by (M - P), so a masked entry contributes 0 * NaN = NaN to nrm's
+                # gradient and kills every parameter on the next step. Substituting
+                # 0 is exactly equivalent under the mask and keeps the graph finite.
+                M_s = torch.nan_to_num(M, nan=0.0)
+                out = fwd()
+                Vt = out.vertices[:, fidx]                                  # (S,P,3,3)
+                P = (Vt * bw).sum(2)                                        # surface point
+                nrm = torch.cross(Vt[:, :, 1] - Vt[:, :, 0],
+                                  Vt[:, :, 2] - Vt[:, :, 0], dim=-1)
+                nrm = nrm / nrm.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+                tgt_pt = P + args.standoff * 1e-3 * nrm                     # just outside
+                if args.thumb_slide:
+                    tgt_pt = tgt_pt + thumb_slide(mano_output_to_joints21(out), names, slide)
+                d = (tgt_pt - M_s)[use]
+                # one-sided term: a marker can never be *inside* the skin, so
+                # penalise the inward component extra rather than symmetrically
+                inward = torch.relu(-((M_s - P) * nrm).sum(-1))[use]
+                loss = ((d ** 2).sum(-1).mean()
+                        + args.w_inside * (inward ** 2).mean()
+                        + args.w_shape * (betas ** 2).sum() + 0.1 * ((slide * 1e-3) ** 2).sum()
+                        # Shrink toward MANO's mean pose. Without this a full
+                        # 45-DOF fit reproduces the markers with an anatomically
+                        # impossible claw: the PCA basis was acting as the pose
+                        # prior, so widening it requires putting one back.
+                        + args.w_pose * (hp ** 2).sum(-1).mean())
+                if args.biomech > 0 and jl_lo is not None:
+                    loss = loss + args.biomech * basis_limit_penalty(hp, Bt, jl_lo, jl_hi, args.twist_weight)
+                loss.backward()
+                opt.step()
+                if (it + 1) % 300 == 0:
+                    print(f"  {tag:7s} iter {it+1:4d}  surface-point-to-marker "
+                          f"{d.norm(dim=-1).mean().item()*1000:6.2f} mm  "
+                          f"(inward {inward.mean().item()*1000:5.2f} mm)")
 
     with torch.no_grad():
         out = fwd(verts=True)
@@ -1294,6 +1335,8 @@ def main() -> None:
         print("thumb slide (mm along segment): "
               + ", ".join(f"{n} {v:+.1f}" for n, v in zip(names, slide.tolist()) if n in _THUMB_SEG))
     print(f"\ncalibrated betas = {betas.detach().cpu().numpy().round(3)}")
+    if args.fit_scale:
+        print(f"fitted global scale = {model.log_scale.exp().item():.3f}")
     if Bmat is not None:                     # thumb joint angles of the static pose (deg)
         hpj = hp.detach().cpu().numpy().mean(0).reshape(15, 3)
         for ji in (12, 13, 14):
@@ -1401,6 +1444,8 @@ def main() -> None:
             mf = mf[:args.mv_frames]
         cols = [bm.index(n) for n in names]
         betas_f = betas.detach()
+        if args.fit_scale:
+            model.log_scale.requires_grad_(False)       # the movement fit keeps the static's scale
         chunk = args.mv_chunk if args.mv_chunk > 0 else len(mf)
         n_chunks = int(np.ceil(len(mf) / chunk))
         print(f"\n=== movement: {args.movement} ===")
@@ -1780,6 +1825,7 @@ def main() -> None:
             Path(args.npz_out).parent.mkdir(parents=True, exist_ok=True)
             np.savez(args.npz_out, global_orient=full_go, hand_pose=full_hp,
                      transl=full_tr, betas=betas_f.cpu().numpy().astype(np.float32),
+                     scale=np.float32(model.log_scale.exp().item() if args.fit_scale else 1.0),
                      frames_fitted=mf.astype(np.int64))
             print(f"saved {args.npz_out}")
 

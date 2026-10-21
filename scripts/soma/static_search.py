@@ -17,6 +17,8 @@ score = 10 * (markers absent from the view + not dorsal + inside) + mean |distan
 
     python scripts/soma/static_search.py --participants P3,P4 --n-configs 30     # resumable
     python scripts/soma/static_search.py --report --onedrive <dir>
+    python scripts/soma/static_search.py --refine --participants P3,P4         # best setting +/- scale, palm-first
+    python scripts/soma/static_search.py --refine --report --onedrive <dir>
 """
 
 from __future__ import annotations
@@ -39,6 +41,9 @@ OUT = REPO / "results/soma/static_search"
 CODE = REPO.parent / "vicon2mano_frozen"                    # frozen checkout the fit script runs from
 sys.path.insert(0, str(CODE / "scripts" / "mano"))            # its helpers too, not the live tree's
 STANDOFF = 3.0
+# refine arms: the best search setting plus these fit flags
+ARMS = {"v_best": {}, "v_scale": {"fit_scale": True}, "v_palm": {"palm_first": True},
+        "v_scale_palm": {"fit_scale": True, "palm_first": True}}
 # static-stage settings searched (first value of each = the production setting)
 GRID = {
     "min_dorsal_dot": [0.0, 0.3, 0.5],
@@ -86,8 +91,9 @@ def fit_cmd(p: str, static: Path, c: dict, rdir: Path) -> list[str]:
     for k in ("min_dorsal_dot", "w_inside", "icp_rounds", "thumb_dorsal", "min_own_weight", "biomech", "twist_weight",
               "w_pose", "n_frames", "iters_surface"):
         args += ["--" + k.replace("_", "-"), str(c[k])]
-    if c["complete_frames"]:
-        args.append("--complete-frames")
+    for k in ("complete_frames", "fit_scale", "palm_first"):
+        if c.get(k):
+            args.append("--" + k.replace("_", "-"))
     from vicon2mano.core.dataset import DATA_ROOT
     return [sys.executable, "-W", "ignore", "scripts/mano/fit_surface_markers.py",
             "--mano-dir", str(DATA_ROOT / "mano_v1_2" / "models"), "--static", str(static),
@@ -164,7 +170,7 @@ class Judge:
         return self.chir * n / np.linalg.norm(n)
 
     def pose_of(self, V_mm):
-        """MANO pose that reproduces the shown mesh (betas, orient, transl, pose fitted to its vertices)."""
+        """MANO pose that reproduces the shown mesh (betas, global scale, orient, transl, pose fitted to its vertices)."""
         torch = self.torch
         V = torch.tensor(V_mm / 1000.0, dtype=torch.float32, device=self.dev)
         z = lambda k: torch.zeros(1, k, device=self.dev, requires_grad=True)
@@ -178,12 +184,12 @@ class Judge:
         from scipy.spatial.transform import Rotation
         orient = torch.tensor(Rotation.from_matrix(Rm).as_rotvec()[None], dtype=torch.float32, device=self.dev,
                               requires_grad=True)
-        betas, hp, tr = z(10), z(45), torch.tensor((b.mean(0) - Rm @ a.mean(0))[None], dtype=torch.float32,
+        betas, hp, ls, tr = z(10), z(45), z(1), torch.tensor((b.mean(0) - Rm @ a.mean(0))[None], dtype=torch.float32,
                                                    device=self.dev, requires_grad=True)
-        opt = torch.optim.Adam([{"params": [orient, tr], "lr": 5e-3}, {"params": [betas, hp], "lr": 2e-2}])
+        opt = torch.optim.Adam([{"params": [orient, tr, ls], "lr": 5e-3}, {"params": [betas, hp], "lr": 2e-2}])
         for _ in range(1500):
             opt.zero_grad()
-            v = self.model(betas=betas, hand_pose=hp, global_orient=orient, transl=tr).vertices[0]
+            v = ls.exp() * self.model(betas=betas, hand_pose=hp, global_orient=orient, transl=tr).vertices[0]
             loss = ((v - V) ** 2).sum(-1).mean()
             loss.backward()
             opt.step()
@@ -238,40 +244,95 @@ class Judge:
                     score=round(10 * (n_absent + n_not_dorsal + n_inside) + skin + 0.2 * natural, 3))
 
 
+def fit_one(J, p, static, ci, c, rdir):
+    """Fit and judge one setting into ``rdir`` (resumable: an existing result is only re-scored if stale)."""
+    res = rdir / "diag.json"
+    if res.exists():
+        old = json.loads(res.read_text())
+        stale = "judge_error" in old or ("score" in old and not np.isfinite(old["score"]))
+        if stale and (rdir / "static.html").exists():                       # re-score, no refit
+            try:
+                old = {k: v for k, v in old.items() if k != "judge_error"} | J.judge(rdir / "static.html")
+            except Exception as e:
+                old["judge_error"] = f"{type(e).__name__}: {e}"
+            res.write_text(json.dumps(old, indent=1))
+        return
+    rdir.mkdir(parents=True, exist_ok=True)
+    with open(rdir / "fit.log", "w", encoding="utf-8", errors="replace") as f:
+        try:
+            rc = subprocess.run(fit_cmd(p, static, c, rdir), cwd=CODE, stdout=f, stderr=subprocess.STDOUT,
+                                timeout=1800).returncode
+        except subprocess.TimeoutExpired:
+            rc = "timeout"
+    head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=CODE, capture_output=True, text=True).stdout.strip()
+    out = dict(participant=p, config_id=ci, config=c, static=str(static), returncode=rc, code_commit=head)
+    if rc == 0 and (rdir / "static.html").exists():
+        try:
+            out |= J.judge(rdir / "static.html")
+        except Exception as e:                          # a view we cannot read is a result, not a crash
+            out["judge_error"] = f"{type(e).__name__}: {e}"
+    res.write_text(json.dumps(out, indent=1))
+    print(f"{p} {rdir.name} rc={rc} score={out.get('score')} not-dorsal={out.get('n_not_dorsal')} "
+          f"inside={out.get('n_inside')} skin={out.get('skin_mm')} natural={out.get('natural_deg')}", flush=True)
+
+
 def run(participants, n, seed):
     import static_pose_check as spc
     J = Judge()
     for p in participants:
         static = spc.sources(p)[p][0]
         for ci, c in enumerate(configs(n, seed, p)):
-            rdir = OUT / p / f"c{ci:02d}"
-            res = rdir / "diag.json"
-            if res.exists():
-                old = json.loads(res.read_text())
-                stale = "judge_error" in old or ("score" in old and not np.isfinite(old["score"]))
-                if stale and (rdir / "static.html").exists():                       # re-score, no refit
-                    try:
-                        old = {k: v for k, v in old.items() if k != "judge_error"} | J.judge(rdir / "static.html")
-                    except Exception as e:
-                        old["judge_error"] = f"{type(e).__name__}: {e}"
-                    res.write_text(json.dumps(old, indent=1))
-                continue
-            rdir.mkdir(parents=True, exist_ok=True)
-            with open(rdir / "fit.log", "w", encoding="utf-8", errors="replace") as f:
-                try:
-                    rc = subprocess.run(fit_cmd(p, static, c, rdir), cwd=CODE, stdout=f, stderr=subprocess.STDOUT,
-                                        timeout=1800).returncode
-                except subprocess.TimeoutExpired:
-                    rc = "timeout"
-            out = dict(participant=p, config_id=ci, config=c, static=str(static), returncode=rc)
-            if rc == 0 and (rdir / "static.html").exists():
-                try:
-                    out |= J.judge(rdir / "static.html")
-                except Exception as e:                          # a view we cannot read is a result, not a crash
-                    out["judge_error"] = f"{type(e).__name__}: {e}"
-            res.write_text(json.dumps(out, indent=1))
-            print(f"{p} c{ci:02d} rc={rc} score={out.get('score')} not-dorsal={out.get('n_not_dorsal')} "
-                  f"inside={out.get('n_inside')} skin={out.get('skin_mm')} natural={out.get('natural_deg')}", flush=True)
+            fit_one(J, p, static, ci, c, OUT / p / f"c{ci:02d}")
+
+
+def best_run(p):
+    """The participant's best-scoring search run (finite score), or None."""
+    rows = [json.loads(f.read_text()) for f in (OUT / p).glob("c*/diag.json")]
+    rows = [r for r in rows if "score" in r and np.isfinite(r["score"])]
+    return min(rows, key=lambda r: r["score"]) if rows else None
+
+
+def refine(participants):
+    """Each participant's best search setting again, in every arm of ARMS."""
+    import static_pose_check as spc
+    J = Judge()
+    for p in participants:
+        best = best_run(p)
+        if best is None:
+            print(f"{p}: no usable search run, skipped", flush=True)
+            continue
+        static = spc.sources(p)[p][0]
+        for arm, extra in ARMS.items():
+            fit_one(J, p, static, best["config_id"], best["config"] | extra, OUT / p / arm)
+
+
+def refine_report(onedrive: Path | None):
+    import re
+    import shutil
+    key = lambda p: int("".join(ch for ch in p if ch.isdigit()))
+    lines = ["# Best static setting, with a global scale and palm-first", "",
+             "Each participant's best search setting (cNN), refit with the current fit script in every arm. Cells: "
+             "score (not-dorsal / inside / skin mm / natural deg); scale = fitted global hand scale in v_scale_palm.", "",
+             "| P | setting | search best (old code) | " + " | ".join(ARMS) + " | scale |",
+             "|---|---|---|" + "---|" * len(ARMS) + "---|"]
+    cell = lambda r: (f"{r['score']} ({r['n_not_dorsal']} / {r['n_inside']} / {r['skin_mm']} / {r['natural_deg']})"
+                      if r and "score" in r else f"failed (rc={r.get('returncode')})" if r else "-")
+    for p in sorted((d.name for d in OUT.iterdir() if (d / "v_best").exists()), key=key):
+        best = best_run(p)
+        arms = {a: json.loads((OUT / p / a / "diag.json").read_text()) for a in ARMS if (OUT / p / a / "diag.json").exists()}
+        log = OUT / p / "v_scale_palm" / "fit.log"
+        m = re.findall(r"fitted global scale = ([0-9.]+)", log.read_text(errors="replace")) if log.exists() else []
+        lines.append(f"| {p} | c{best['config_id']:02d} | {cell(best)} | " + " | ".join(cell(arms.get(a)) for a in ARMS)
+                     + f" | {m[-1] if m else '-'} |")
+        for a, r in arms.items():
+            if onedrive and (OUT / p / a / "static.html").exists():
+                (onedrive / p).mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(OUT / p / a / "static.html", onedrive / p / f"{p}_static_{a[2:]}.html")
+                (onedrive / p / f"{p}_{a[2:]}_diagnostics.json").write_text(json.dumps(r, indent=1))
+    text = "\n".join(lines) + "\n"
+    print(text)
+    for d in ([OUT] + ([onedrive] if onedrive else [])):
+        (d / "README_scale_palm.md").write_text(text, encoding="utf-8")
 
 
 def report(onedrive: Path | None):
@@ -331,10 +392,14 @@ def main():
     ap.add_argument("--n-configs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--refine", action="store_true", help="refit each participant's best setting in every arm of ARMS")
     ap.add_argument("--onedrive", default=None, help="with --report: copy production/best views and tables here")
     a = ap.parse_args()
     if a.report:
-        return report(Path(a.onedrive) if a.onedrive else None)
+        od = Path(a.onedrive) if a.onedrive else None
+        return refine_report(od) if a.refine else report(od)
+    if a.refine:
+        return refine([p for p in a.participants.split(",") if p])
     run([p for p in a.participants.split(",") if p], a.n_configs, a.seed)
 
 
