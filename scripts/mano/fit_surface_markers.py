@@ -881,9 +881,9 @@ def main() -> None:
     ap.add_argument("--n-frames", type=int, default=30)
     ap.add_argument("--fit-scale", action="store_true",
                     help="also fit one global hand scale (about the wrist) in the static stages; the movement fit keeps it")
-    ap.add_argument("--palm-first", action="store_true",
-                    help="each stage-2 round places the hand on Palm1-3 and the finger MCP markers first "
-                         "(orientation, position, shape, scale), then fits the finger pose with that placement held")
+    ap.add_argument("--palm-first", type=float, default=0.0, metavar="W",
+                    help="each stage-2 round first places the hand rigidly on Palm1-3 and the finger MCP markers, "
+                         "then fits everything with those markers weighted W (0 = off)")
     ap.add_argument("--complete-frames", action="store_true",
                     help="sample the --n-frames only from frames where every fitted marker is present")
     ap.add_argument("--iters-joint", type=int, default=600)
@@ -1262,17 +1262,21 @@ def main() -> None:
         bw = torch.tensor(bary, device=dev).unsqueeze(0).unsqueeze(-1)  # (1,P,3,1)
         print(f"\nstage 2 round {rnd+1} -- attached faces {fid.tolist()}")
 
-        # --palm-first: place the hand on the palm markers alone, then fit the
-        # fingers with that placement held, so finger error cannot drag the
-        # palm off its own markers.
-        root = [{"params": [orient], "lr": 5e-3}, {"params": [tr], "lr": 3e-3}] + scale_grp
-        shape = [{"params": [betas], "lr": 5e-3}]
-        rest = [{"params": [hp], "lr": 2e-2}, {"params": [slide], "lr": 0.5}]
-        phases = ([("palm", palm_cols, root + shape), ("fingers", None, shape + rest)]
-                  if args.palm_first else [("", None, shape + rest + root)])
+        # --palm-first W: place the hand rigidly on the palm markers alone, then
+        # fit everything with the palm markers weighted W, so finger error
+        # cannot drag the palm off its own markers. Shape and scale stay out of
+        # the palm phase: its near-coplanar markers do not constrain hand size
+        # (scale collapsed to 0.49 on P4), and holding the root through the
+        # finger phase left the fingers 13-29 mm off their markers.
+        root = [{"params": [orient], "lr": 5e-3}, {"params": [tr], "lr": 3e-3}]
+        every = root + scale_grp + [{"params": [betas], "lr": 5e-3}, {"params": [hp], "lr": 2e-2},
+                                    {"params": [slide], "lr": 0.5}]
+        phases = [("palm", palm_cols, root), ("fingers", None, every)] if args.palm_first else [("", None, every)]
+        wts = torch.where(palm_cols, max(args.palm_first, 1.0), 1.0).expand(S, -1)
         for tag, cols, groups in phases:
             opt = torch.optim.Adam(groups)
             use = mmask if cols is None else mmask & cols
+            wt = wts[use]
             for it in range(args.iters_surface):
                 opt.zero_grad()
                 # Occluded markers are NaN. Masking removes them from the loss
@@ -1294,7 +1298,7 @@ def main() -> None:
                 # one-sided term: a marker can never be *inside* the skin, so
                 # penalise the inward component extra rather than symmetrically
                 inward = torch.relu(-((M_s - P) * nrm).sum(-1))[use]
-                loss = ((d ** 2).sum(-1).mean()
+                loss = ((wt * (d ** 2).sum(-1)).sum() / wt.sum()
                         + args.w_inside * (inward ** 2).mean()
                         + args.w_shape * (betas ** 2).sum() + 0.1 * ((slide * 1e-3) ** 2).sum()
                         # Shrink toward MANO's mean pose. Without this a full

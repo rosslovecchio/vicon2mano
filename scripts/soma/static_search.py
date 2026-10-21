@@ -42,8 +42,9 @@ CODE = REPO.parent / "vicon2mano_frozen"                    # frozen checkout th
 sys.path.insert(0, str(CODE / "scripts" / "mano"))            # its helpers too, not the live tree's
 STANDOFF = 3.0
 # refine arms: the best search setting plus these fit flags
-ARMS = {"v_best": {}, "v_scale": {"fit_scale": True}, "v_palm": {"palm_first": True},
-        "v_scale_palm": {"fit_scale": True, "palm_first": True}}
+PALM_W = 10.0                                                 # --palm-first weight of the palm markers
+ARMS = {"v_best": {}, "v_scale": {"fit_scale": True}, "v_palm": {"palm_first": PALM_W},
+        "v_scale_palm": {"fit_scale": True, "palm_first": PALM_W}}
 # static-stage settings searched (first value of each = the production setting)
 GRID = {
     "min_dorsal_dot": [0.0, 0.3, 0.5],
@@ -91,9 +92,11 @@ def fit_cmd(p: str, static: Path, c: dict, rdir: Path) -> list[str]:
     for k in ("min_dorsal_dot", "w_inside", "icp_rounds", "thumb_dorsal", "min_own_weight", "biomech", "twist_weight",
               "w_pose", "n_frames", "iters_surface"):
         args += ["--" + k.replace("_", "-"), str(c[k])]
-    for k in ("complete_frames", "fit_scale", "palm_first"):
+    for k in ("complete_frames", "fit_scale"):
         if c.get(k):
             args.append("--" + k.replace("_", "-"))
+    if c.get("palm_first"):
+        args += ["--palm-first", str(c["palm_first"])]
     from vicon2mano.core.dataset import DATA_ROOT
     return [sys.executable, "-W", "ignore", "scripts/mano/fit_surface_markers.py",
             "--mano-dir", str(DATA_ROOT / "mano_v1_2" / "models"), "--static", str(static),
