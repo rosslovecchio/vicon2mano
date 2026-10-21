@@ -12,7 +12,7 @@ static view shows:
   natural    joint angles of that mesh (pose recovered from its vertices) against the repo's limits;
              finger twist counts above 5 deg
 
-score = 10 * (markers not dorsal) + 10 * (markers inside) + mean |distance - 3 mm| + 0.2 * (degrees outside limits)
+score = 10 * (markers absent from the view + not dorsal + inside) + mean |distance - 3 mm| + 0.2 * (degrees outside limits)
 (3 mm = the configured standoff). Lower is better. All raw numbers are kept, so the ranking can be redone.
 
     python scripts/soma/static_search.py --participants P3,P4 --n-configs 30     # resumable
@@ -191,11 +191,16 @@ class Judge:
 
     def judge(self, html: Path) -> dict:
         v = read_view(html)
-        cp, n = nearest_skin(v["V"], v["F"], v["M"])
+        seen = np.isfinite(v["M"]).all(1)                      # a marker with no position in the view is "absent"
+        cp, n = np.full_like(v["M"], np.nan), np.full_like(v["M"], np.nan)
+        cp[seen], n[seen] = nearest_skin(v["V"], v["F"], v["M"][seen])
         signed = np.einsum("ij,ij->i", v["M"] - cp, n)
         pd = self.palm_dorsal(v["J"])
         rows = []
         for k, name in enumerate(v["names"]):
+            if not seen[k]:
+                rows.append(dict(marker=name, dorsal=None, dorsal_dot=None, dorsal_dot_cross=None, distance_mm=None, absent=True))
+                continue
             key = name.lower()
             alt = None
             if key in self.fsm._JOINT_TO_REPO:
@@ -221,15 +226,16 @@ class Judge:
                 if o > 0:
                     over.append([self.fsm._FINGER_JOINTS[j], ("flexion", "abduction", "twist")[c],
                                  round(float(comp[j, c]), 1), round(float(o), 1)])
-        d = np.array([r["distance_mm"] for r in rows])
-        n_not_dorsal = sum(not r["dorsal"] for r in rows)
+        d = np.array([r["distance_mm"] for r in rows if r["distance_mm"] is not None])
+        n_absent = sum(r.get("absent", False) for r in rows)
+        n_not_dorsal = sum(r["dorsal"] is False for r in rows)
         n_inside = int((d < 0).sum())
         skin = float(np.abs(d - STANDOFF).mean())
         natural = float(sum(o[3] for o in over))
-        return dict(markers=rows, n_not_dorsal=n_not_dorsal, n_inside=n_inside, skin_mm=round(skin, 2),
+        return dict(markers=rows, n_absent=n_absent, n_not_dorsal=n_not_dorsal, n_inside=n_inside, skin_mm=round(skin, 2),
                     outside_limits=over, natural_deg=round(natural, 1), pose_comp=comp.round(1).tolist(),
                     pose_recovery_rms_mm=round(rms, 3),
-                    score=round(10 * n_not_dorsal + 10 * n_inside + skin + 0.2 * natural, 3))
+                    score=round(10 * (n_absent + n_not_dorsal + n_inside) + skin + 0.2 * natural, 3))
 
 
 def run(participants, n, seed):
@@ -242,7 +248,8 @@ def run(participants, n, seed):
             res = rdir / "diag.json"
             if res.exists():
                 old = json.loads(res.read_text())
-                if "judge_error" in old and (rdir / "static.html").exists():       # re-score, no refit
+                stale = "judge_error" in old or ("score" in old and not np.isfinite(old["score"]))
+                if stale and (rdir / "static.html").exists():                       # re-score, no refit
                     try:
                         old = {k: v for k, v in old.items() if k != "judge_error"} | J.judge(rdir / "static.html")
                     except Exception as e:
@@ -271,10 +278,10 @@ def report(onedrive: Path | None):
     import csv
     import shutil
     rows = [json.loads(f.read_text()) for f in sorted(OUT.glob("*/c*/diag.json"))]
-    ok = [r for r in rows if "score" in r]
+    ok = [r for r in rows if "score" in r and np.isfinite(r["score"])]
     key = lambda p: int("".join(ch for ch in p if ch.isdigit()))
     lines = ["# Static-fit search (overnight) - best settings per participant", "",
-             "Priorities: dorsal, then close to skin, then natural pose. score = 10*not-dorsal + 10*inside + "
+             "Priorities: dorsal, then close to skin, then natural pose. score = 10*(absent + not-dorsal + inside) + "
              "mean|distance-3mm| + 0.2*degrees outside the joint limits (lower is better).", "",
              "| P | runs | production: not-dorsal / inside / skin mm / natural deg | best: not-dorsal / inside / skin mm / natural deg | best settings (changed from production) |",
              "|---|---|---|---|---|"]
