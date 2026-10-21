@@ -330,8 +330,8 @@ def refine_report(onedrive: Path | None):
         for a, r in arms.items():
             if onedrive and (OUT / p / a / "static.html").exists():
                 (onedrive / p).mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(OUT / p / a / "static.html", onedrive / p / f"{p}_static_{a[2:]}.html")
-                (onedrive / p / f"{p}_{a[2:]}_diagnostics.json").write_text(json.dumps(r, indent=1))
+                shutil.copyfile(OUT / p / a / "static.html", onedrive / p / f"{p}_refine_{a[2:]}.html")
+                (onedrive / p / f"{p}_refine_{a[2:]}_diagnostics.json").write_text(json.dumps(r, indent=1))
     text = "\n".join(lines) + "\n"
     print(text)
     for d in ([OUT] + ([onedrive] if onedrive else [])):

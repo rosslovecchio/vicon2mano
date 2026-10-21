@@ -1152,7 +1152,9 @@ def main() -> None:
     opt = torch.optim.Adam([{"params": [betas], "lr": 1e-2},
                             {"params": [hp], "lr": 5e-2},
                             {"params": [orient], "lr": 1e-2},
-                            {"params": [tr], "lr": 3e-3}] + scale_grp)
+                            {"params": [tr], "lr": 3e-3}])
+    # No scale here: stage 1 puts joint centres ON dorsal markers (Palm2 as the
+    # wrist), which shortens the hand and drags the scale down before stage 2.
     print(f"\nstage 1 -- joint-centre fit ({args.iters_joint} iters)")
     for it in range(args.iters_joint):
         opt.zero_grad()
@@ -1228,7 +1230,8 @@ def main() -> None:
         with torch.no_grad():
             Jm = mano_output_to_joints21(fwd()).cpu().numpy().mean(0)
         if "Palm2" in names:
-            off = np.nanmean([mkm[k] - Jm[j] for k, (j, _) in enumerate(pairs) if j >= 5], axis=0)
+            fing = [mkm[k] - Jm[j] for k, (j, _) in enumerate(pairs) if j >= 5]
+            off = np.nanmean(fing, axis=0) if fing else None        # no finger markers: the Palm2 rule
             pd_ = dorsal_direction(Jm, mkm[names.index("Palm2")], off)
             if rnd == 0 and pd_ @ dorsal_direction(Jm, mkm[names.index("Palm2")]) < 0:
                 print("  NOTE: dorsal sign from the finger markers differs from the old Palm2 rule")
