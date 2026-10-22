@@ -1223,14 +1223,14 @@ def main() -> None:
     model, dev = fitter._model, fitter.device
     if args.fit_thickness and not args.fit_scale:
         raise SystemExit("--fit-thickness needs --fit-scale")
-    seg = SegmentModel(model, dev, args.seg_limit) if args.fit_segments else None
-    model = seg or model
+    segm = SegmentModel(model, dev, args.seg_limit) if args.fit_segments else None
+    model = segm or model
     if args.fit_scale:
         model = ScaledModel(model, dev, args.fit_thickness, args.thickness_limit)
     scale_grp = [{"params": [model.log_scale], "lr": 1e-2}] if args.fit_scale else []
     if args.fit_thickness:
         scale_grp.append({"params": [model.log_thick], "lr": 1e-2})
-    seg_grp = [{"params": [seg.log_len], "lr": 5e-3}] if seg else []
+    seg_grp = [{"params": [segm.log_len], "lr": 5e-3}] if segm else []
     F = np.asarray(model.faces, dtype=np.int64)
 
     jidx = {n: i for i, n in enumerate(MANO_JOINT_NAMES)}
@@ -1336,8 +1336,8 @@ def main() -> None:
                 model.log_scale.fill_(float(np.log(z["scale"])))
             if args.fit_thickness and "thickness" in z:
                 model.log_thick.fill_(float(np.log(z["thickness"])))
-            if seg and "seglen" in z:
-                seg.log_len.copy_(torch.tensor(np.log(z["seglen"]), device=dev))
+            if segm and "seglen" in z:
+                segm.log_len.copy_(torch.tensor(np.log(z["seglen"]), device=dev))
         n_joint = 0
         print(f"\nstage 1 skipped: starting from {args.init_static}")
     print(f"\nstage 1 -- joint-centre fit ({n_joint} iters)")
@@ -1511,7 +1511,7 @@ def main() -> None:
                 loss = ((wt * (d ** 2).sum(-1)).sum() / wt.sum()
                         + args.w_inside * (inward ** 2).mean()
                         + args.w_shape * (betas ** 2).sum() + 0.1 * ((slide * 1e-3) ** 2).sum()
-                        + (args.w_seglen * (seg.log_len ** 2).sum() if seg else 0.0)
+                        + (args.w_seglen * (segm.log_len ** 2).sum() if segm else 0.0)
                         + (args.w_width * width_loss(out.vertices) if width_loss else 0.0)
                         + (args.w_web * web_loss_fn(out.vertices) if web_loss_fn else 0.0)
                         # Shrink toward MANO's mean pose. Without this a full
@@ -1565,12 +1565,12 @@ def main() -> None:
                  transl=tr.detach().cpu().numpy(), hand_pose=hp.detach().cpu().numpy(),
                  scale=np.float32(model.log_scale.exp().item() if args.fit_scale else 1.0),
                  thickness=np.float32(model.log_thick.clamp(-model.log_lim, model.log_lim).exp().item() if args.fit_thickness else 1.0),
-                 seglen=(seg.log_len.clamp(-seg.log_lim, seg.log_lim).exp().detach().cpu().numpy() if seg else np.ones(15)).astype(np.float32),
+                 seglen=(segm.log_len.clamp(-segm.log_lim, segm.log_lim).exp().detach().cpu().numpy() if segm else np.ones(15)).astype(np.float32),
                  names=np.array(names))
     if args.fit_scale:
         print(f"fitted global scale = {model.log_scale.exp().item():.3f}")
-    if seg:
-        L = seg.log_len.clamp(-seg.log_lim, seg.log_lim).exp().detach().cpu().numpy()
+    if segm:
+        L = segm.log_len.clamp(-segm.log_lim, segm.log_lim).exp().detach().cpu().numpy()
         print("fitted segment lengths (x MANO): " + ", ".join(
             f"{f} {L[k[0] - 1]:.2f}/{L[k[1] - 1]:.2f}/{L[k[2] - 1]:.2f}"
             for f, (k, _) in zip(("Index", "Middle", "Pinky", "Ring", "Thumb"), _FINGER_CHAINS)) + "  (proximal/middle/distal)")
@@ -2067,7 +2067,7 @@ def main() -> None:
                      transl=full_tr, betas=betas_f.cpu().numpy().astype(np.float32),
                      scale=np.float32(model.log_scale.exp().item() if args.fit_scale else 1.0),
                      thickness=np.float32(model.log_thick.clamp(-model.log_lim, model.log_lim).exp().item() if args.fit_thickness else 1.0),
-                     seglen=(seg.log_len.clamp(-seg.log_lim, seg.log_lim).exp().detach().cpu().numpy() if seg else np.ones(15)).astype(np.float32),
+                     seglen=(segm.log_len.clamp(-segm.log_lim, segm.log_lim).exp().detach().cpu().numpy() if segm else np.ones(15)).astype(np.float32),
                      frames_fitted=mf.astype(np.int64))
             print(f"saved {args.npz_out}")
 
