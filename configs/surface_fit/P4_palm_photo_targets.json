@@ -58,7 +58,7 @@
   },
   {
    "name": "Middle-Ring",
-   "vertex": 384,
+   "vertex": 247,
    "px": [
     694.0,
     778.0
@@ -66,7 +66,7 @@
   },
   {
    "name": "Ring-Pinky",
-   "vertex": 608,
+   "vertex": 199,
    "px": [
     781.0,
     860.0

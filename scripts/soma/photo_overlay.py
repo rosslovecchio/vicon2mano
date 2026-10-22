@@ -35,9 +35,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 RIGID = ["Palm1", "Palm2", "Palm3", "Thumb1", "Index1", "Middle1", "Ring1", "Pinky1"]
 HAND = RIGID + [f"{f}{k}" for f in ("Thumb", "Index", "Middle", "Ring", "Pinky") for k in (2, 3)]
 PHOTOS = "soma_transfer/photos"
-# the crotch between adjacent fingers on the MANO mesh: the most distal vertex in a 6 mm band midway between the two
-# finger axes of the flat template (fingers: index 320, middle 443, ring 554, pinky 671 tips; bones 1, 4, 10, 7)
-WEB_VERTICES = {"Index-Middle": 262, "Middle-Ring": 384, "Ring-Pinky": 608}
+# the crotch between adjacent fingers on the MANO mesh (hand-picked vertices; MANO's topology is shared by everyone)
+WEB_VERTICES = json.loads((REPO / "configs/surface_fit/web_vertices.json").read_text())
 
 
 def focal_px(im: Image.Image) -> float:
@@ -265,7 +264,7 @@ def main():
     ap.add_argument("--dots", default=None, help="JSON {marker: [x, y]} (pixels) instead of the automatic labelling")
     ap.add_argument("--out", default=None)
     ap.add_argument("--web-vertices", default=None, metavar="JSON",
-                    help="{web name: vertex} for the finger webs, e.g. Index-Middle: 262 (default: the template-derived WEB_VERTICES)")
+                    help="{web name: vertex} for the finger webs, e.g. Index-Middle: 262 (default: configs/surface_fit/web_vertices.json)")
     ap.add_argument("--hits-out", default=None, metavar="PINS.json",
                     help="cast a ray through each rigid marker's dot onto the mesh; write {marker: nearest vertex} here")
     ap.add_argument("--compare", default=None, metavar="PINS.json", help="with --hits-out: hand-picked {marker: vertex} to compare with")
