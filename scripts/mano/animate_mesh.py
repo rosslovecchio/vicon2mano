@@ -300,20 +300,24 @@ def resolve_model_path(mano_dir: str, side: str) -> Path:
     return model_path
 
 
-def forward_vertices(model, global_orient, hand_pose, transl, betas, scale=1.0) -> np.ndarray:
-    """No-grad forward pass -> (n, 778, 3) mesh vertices in metres; ``scale`` about the wrist, as fit_surface_markers --fit-scale."""
+def forward_vertices(model, global_orient, hand_pose, transl, betas, scale=1.0, thickness=1.0) -> np.ndarray:
+    """No-grad forward pass -> (n, 778, 3) mesh vertices in metres, with the fit's global ``scale`` and palm
+    ``thickness`` (fit_surface_markers --fit-scale / --fit-thickness)."""
     import torch
+    from fit_surface_markers import ScaledModel
     n = global_orient.shape[0]
+    m = ScaledModel(model, "cpu", thickness=thickness != 1.0)
+    m.log_scale.data.fill_(float(np.log(scale)))
+    m.log_thick.data.fill_(float(np.log(thickness)))
     with torch.no_grad():
-        out = model(
+        out = m(
             global_orient=torch.tensor(global_orient, dtype=torch.float32),
             hand_pose=torch.tensor(hand_pose, dtype=torch.float32),
             transl=torch.tensor(transl, dtype=torch.float32),
             betas=torch.tensor(betas, dtype=torch.float32).unsqueeze(0).expand(n, -1),
             return_verts=True,
         )
-    w = out.joints[:, :1]
-    return (w + scale * (out.vertices - w)).numpy()
+    return out.vertices.numpy()
 
 
 def main() -> None:
@@ -379,6 +383,7 @@ def main() -> None:
         fit["transl"][frame_idx],
         fit["betas"],
         float(fit["scale"]) if "scale" in fit else 1.0,
+        float(fit["thickness"]) if "thickness" in fit else 1.0,
     )
     verts_mm = verts_m * 1000.0  # metres -> mm, to match raw marker scale
     sampled_markers = markers_mm[frame_idx]  # (n, N, 3) mm

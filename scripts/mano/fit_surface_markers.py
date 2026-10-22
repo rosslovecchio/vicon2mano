@@ -766,21 +766,36 @@ def write_vertex_picker(V, F, mk, names, path):
 
 
 class ScaledModel:
-    """MANO with one global scale about the wrist (smplx has none); log-scale 0 = unscaled."""
+    """MANO with one global scale about the wrist (smplx has none); log-scale 0 = unscaled.
 
-    def __init__(self, model, device):
+    ``thickness``: also a palm thickness (log-thickness 0 = MANO's): the palm's height above the plane through the
+    wrist, along its normal, is scaled, each vertex by its palm-bone skinning weight so the fingers stay as they
+    are. MANO's shape space cannot make a hand wider without making it thicker; one top-down photo fixes the width
+    (--palm-widths) and the markers' standoff above the skin fixes this.
+    """
+
+    def __init__(self, model, device, thickness=False):
         import torch
         self.model = model
         self.log_scale = torch.zeros(1, device=device, requires_grad=True)
+        self.log_thick = torch.zeros(1, device=device, requires_grad=thickness)
+        self.palm_w = model.lbs_weights[:, 0].detach() if thickness else None
 
     def __getattr__(self, k):
         return getattr(self.model, k)
 
     def __call__(self, **kw):
+        import torch
         out = self.model(**kw)
         s, w = self.log_scale.exp(), out.joints[:, :1]
         out.vertices = w + s * (out.vertices - w)
         out.joints = w + s * (out.joints - w)
+        if self.palm_w is not None:
+            J = out.joints                                        # MANO order: wrist 0, index MCP 1, pinky MCP 7
+            n = torch.cross(J[:, 1] - J[:, 0], J[:, 7] - J[:, 0], dim=-1)
+            n = n / n.norm(dim=-1, keepdim=True)
+            h = ((out.vertices - w) * n[:, None]).sum(-1, keepdim=True)
+            out.vertices = out.vertices + (self.log_thick.exp() - 1) * self.palm_w[None, :, None] * h * n[:, None]
         return out
 
 
@@ -965,6 +980,8 @@ def main() -> None:
                     help="start stage 2 from the pose/shape/scale of an earlier --save-static (skips stage 1; same --n-frames)")
     ap.add_argument("--save-static", default=None, metavar="NPZ",
                     help="write the static stage's betas, scale, orientation, position and pose (the frozen palm for a later fit)")
+    ap.add_argument("--fit-thickness", action="store_true",
+                    help="with --fit-scale: also a palm thickness, separate from the width (see ScaledModel)")
     ap.add_argument("--palm-first", type=float, default=0.0, metavar="W",
                     help="each stage-2 round first places the hand rigidly on Palm1-3 and the finger MCP markers, "
                          "then fits everything with those markers weighted W (0 = off)")
@@ -1143,9 +1160,13 @@ def main() -> None:
     jl_lo = jl_hi = None
     fitter = MANOFitter(cfg)
     model, dev = fitter._model, fitter.device
+    if args.fit_thickness and not args.fit_scale:
+        raise SystemExit("--fit-thickness needs --fit-scale")
     if args.fit_scale:
-        model = ScaledModel(model, dev)
+        model = ScaledModel(model, dev, args.fit_thickness)
     scale_grp = [{"params": [model.log_scale], "lr": 1e-2}] if args.fit_scale else []
+    if args.fit_thickness:
+        scale_grp.append({"params": [model.log_thick], "lr": 1e-2})
     F = np.asarray(model.faces, dtype=np.int64)
 
     jidx = {n: i for i, n in enumerate(MANO_JOINT_NAMES)}
@@ -1249,6 +1270,8 @@ def main() -> None:
                 prm.copy_(torch.tensor(z[k], device=dev))
             if args.fit_scale:
                 model.log_scale.fill_(float(np.log(z["scale"])))
+            if args.fit_thickness and "thickness" in z:
+                model.log_thick.fill_(float(np.log(z["thickness"])))
         n_joint = 0
         print(f"\nstage 1 skipped: starting from {args.init_static}")
     print(f"\nstage 1 -- joint-centre fit ({n_joint} iters)")
@@ -1472,9 +1495,12 @@ def main() -> None:
         Path(args.save_static).parent.mkdir(parents=True, exist_ok=True)
         np.savez(args.save_static, betas=betas.detach().cpu().numpy(), global_orient=orient.detach().cpu().numpy(),
                  transl=tr.detach().cpu().numpy(), hand_pose=hp.detach().cpu().numpy(),
-                 scale=np.float32(model.log_scale.exp().item() if args.fit_scale else 1.0), names=np.array(names))
+                 scale=np.float32(model.log_scale.exp().item() if args.fit_scale else 1.0),
+                 thickness=np.float32(model.log_thick.exp().item() if args.fit_thickness else 1.0), names=np.array(names))
     if args.fit_scale:
         print(f"fitted global scale = {model.log_scale.exp().item():.3f}")
+    if args.fit_thickness:
+        print(f"fitted palm thickness = {model.log_thick.exp().item():.3f}")
     if Bmat is not None:                     # thumb joint angles of the static pose (deg)
         hpj = hp.detach().cpu().numpy().mean(0).reshape(15, 3)
         for ji in (12, 13, 14):
@@ -1584,6 +1610,7 @@ def main() -> None:
         betas_f = betas.detach()
         if args.fit_scale:
             model.log_scale.requires_grad_(False)       # the movement fit keeps the static's scale
+            model.log_thick.requires_grad_(False)
         chunk = args.mv_chunk if args.mv_chunk > 0 else len(mf)
         n_chunks = int(np.ceil(len(mf) / chunk))
         print(f"\n=== movement: {args.movement} ===")
@@ -1964,6 +1991,7 @@ def main() -> None:
             np.savez(args.npz_out, global_orient=full_go, hand_pose=full_hp,
                      transl=full_tr, betas=betas_f.cpu().numpy().astype(np.float32),
                      scale=np.float32(model.log_scale.exp().item() if args.fit_scale else 1.0),
+                     thickness=np.float32(model.log_thick.exp().item() if args.fit_thickness else 1.0),
                      frames_fitted=mf.astype(np.int64))
             print(f"saved {args.npz_out}")
 

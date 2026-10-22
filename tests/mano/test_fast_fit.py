@@ -121,3 +121,32 @@ def test_thumb_slide_moves_only_thumb_markers_along_their_segment():
     off = fsm.thumb_slide(J, ["Index2", "Thumb3"], torch.tensor([5.0, 5.0]))
     assert torch.allclose(off[0, 0], torch.zeros(3))                       # not a thumb marker
     assert torch.allclose(off[0, 1], torch.tensor([0.0, 0.005, 0.0]), atol=1e-7)   # 5 mm along 2->3
+
+
+def _stub_model(weights):
+    """A MANO stand-in: flat palm in the z=0 plane, one vertex 10 mm above the wrist plane, one fingertip vertex."""
+    class Out:
+        pass
+
+    class Stub:
+        lbs_weights = torch.tensor(weights, dtype=torch.float32)
+
+        def __call__(self, **kw):
+            o = Out()
+            J = torch.zeros(1, 16, 3)
+            J[0, 1] = torch.tensor([1.0, 0.0, 0.0])                # index MCP
+            J[0, 7] = torch.tensor([0.0, 1.0, 0.0])                # pinky MCP -> palm normal +z
+            o.joints = J
+            o.vertices = torch.tensor([[[0.2, 0.2, 0.01], [0.5, 0.5, 0.01]]])
+            return o
+    return Stub()
+
+
+def test_palm_thickness_scales_only_palm_weighted_vertices_along_the_normal():
+    model = fsm.ScaledModel(_stub_model([[1.0] + [0.0] * 15, [0.0] * 16]), "cpu", thickness=True)
+    base = model(a=1).vertices.clone()
+    assert torch.allclose(base, torch.tensor([[[0.2, 0.2, 0.01], [0.5, 0.5, 0.01]]]))           # thickness 1 = unchanged
+    model.log_thick.data.fill_(float(np.log(2.0)))
+    out = model(a=1).vertices
+    assert torch.allclose(out[0, 0], torch.tensor([0.2, 0.2, 0.02]), atol=1e-6)               # palm vertex: height doubled
+    assert torch.allclose(out[0, 1], base[0, 1])                                              # finger vertex (palm weight 0): untouched
