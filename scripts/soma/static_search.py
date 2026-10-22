@@ -388,7 +388,7 @@ def palm_manual(participants, pins_file, radius, arm="palm_manual", widths=None,
 PALM_MARKERS = ["Palm1", "Palm2", "Palm3", "Thumb1", "Index1", "Middle1", "Ring1", "Pinky1"]
 
 
-def fingers(participants, palm_arm, radius=6.0, arm="fingers"):
+def fingers(participants, palm_arm, radius=6.0, arm="fingers", finger_pins=None):
     """Step 2 of palm-first: the markers of every finger on the frozen palm of ``palm_arm`` (its shape, scale,
     orientation, position and its palm attachments held): finger pose and a length per finger segment are fitted.
     The photo is not used here: the fingers' pose differs between photo and static."""
@@ -401,7 +401,7 @@ def fingers(participants, palm_arm, radius=6.0, arm="fingers"):
             continue
         c = best["config"] | {"fit_scale": True, "fit_segments": True, "freeze_global": True, "save_static": True,
                               "init_static": str(start), "palm1_pin": False, "attach_radius": radius,
-                              "pins": attached_vertices(p, palm_arm, PALM_MARKERS)}
+                              "pins": attached_vertices(p, palm_arm, PALM_MARKERS) | (json.loads(Path(finger_pins).read_text()) if finger_pins else {})}
         fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c, OUT / p / arm)
 
 
@@ -536,6 +536,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--fingers", action="store_true", help="step 2: finger pose + segment lengths on the frozen palm of --palm-arm")
+    ap.add_argument("--finger-pins", default=None, help="with --fingers: hand-picked {marker: vertex} for the finger markers")
     ap.add_argument("--palm-arm", default="palm_manual_webs_photo_v2", help="with --fingers: the accepted palm fit's arm")
     ap.add_argument("--palm-manual", default=None, metavar="PINS.json",
                     help="palm-only from scratch with hand-picked vertices {marker: vertex}, each free to move within --radius")
@@ -544,7 +545,7 @@ def main():
     ap.add_argument("--w-web", type=float, default=1.0, help="with --palm-widths: weight of the finger-web term (0 = off)")
     ap.add_argument("--fit-thickness", action="store_true", help="with --palm-manual: also fit a palm thickness")
     ap.add_argument("--init-arm", default=None, help="with --palm-manual: start from this arm's static_params.npz (skips stage 1)")
-    ap.add_argument("--radius", type=float, default=0.0, help="with --palm-manual: mm a pin may move to a better vertex")
+    ap.add_argument("--radius", type=float, default=None, help="with --palm-manual: mm a pin may move to a better vertex")
     ap.add_argument("--arm", default=None, help="with --report: tabulate/publish this palm arm (e.g. palm_manual)")
     ap.add_argument("--scratch", action="store_true", help="with --palm/--palm-free: base the pins on a fresh palm-only fit, not the all-marker fit")
     ap.add_argument("--palm-free", action="store_true", help="palm-only refit from the pinned palm fit with the derived pins dropped")
@@ -556,7 +557,7 @@ def main():
         od = Path(a.onedrive) if a.onedrive else None
         return palm_report(od, a.arm or ("palm_free" if a.palm_free else "palm_pinned") + ("_scratch" if a.scratch else "")) if a.palm or a.palm_free or a.arm else refine_report(od) if a.refine else report(od)
     if a.fingers:
-        return fingers([p for p in a.participants.split(",") if p], a.palm_arm, a.radius or 6.0, a.arm or "fingers")
+        return fingers([p for p in a.participants.split(",") if p], a.palm_arm, a.radius if a.radius is not None else 6.0, a.arm or "fingers", a.finger_pins)
     if a.palm_manual:
         return palm_manual([p for p in a.participants.split(",") if p], a.palm_manual, a.radius, a.arm or "palm_manual", a.palm_widths, a.w_width, a.w_web, a.fit_thickness, a.init_arm)
     if a.palm_free:
