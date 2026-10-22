@@ -711,6 +711,35 @@ def palm_row_loss(spec, mk, names, F, dev):
     return loss, report
 
 
+def web_loss(spec, dev):
+    """Loss on where the mesh's finger-web vertices land in the photo (photo_overlay.py's camera and detected webs).
+
+    Each web vertex is projected through the photo's camera and its distance to the detected web, converted to mm at
+    the web's depth, is penalised. Returns (loss(V (S,V,3) metres) -> scalar metres^2, report(V) -> [(name, mm)]).
+    """
+    import torch
+    from scipy.spatial.transform import Rotation
+    cam = spec["camera"]
+    t = lambda v: torch.tensor(np.asarray(v, float), dtype=torch.float32, device=dev)
+    R, tr, mean, f = t(Rotation.from_rotvec(cam["rotvec"]).as_matrix()), t(cam["t"]), t(cam["mean"]), cam["focal_px"]
+    c0 = t([cam["size"][0] / 2, cam["size"][1] / 2])
+    webs = spec["webs"]
+    ids = torch.tensor([w["vertex"] for w in webs], device=dev)
+    target = t([w["px"] for w in webs])
+
+    def err_mm(V):
+        X = (V[:, ids] * 1000 - mean) @ R.T + tr                       # (S, W, 3) camera frame, mm
+        return (f * X[..., :2] / X[..., 2:3] + c0 - target) * X[..., 2:3] / f
+
+    def loss(V):
+        return ((err_mm(V) * 1e-3) ** 2).sum(-1).mean()
+
+    def report(V):
+        with torch.no_grad():
+            return [(w["name"], float(e)) for w, e in zip(webs, err_mm(V).norm(dim=-1).mean(0))]
+    return loss, report
+
+
 def write_vertex_picker(V, F, mk, names, path):
     """Mesh + every vertex id, hoverable, so attachments can be read off."""
     fig = go.Figure(data=[
@@ -931,6 +960,7 @@ def main() -> None:
     ap.add_argument("--palm-widths", default=None, metavar="JSON",
                     help="photo_overlay.py's *_palm_widths.json: the mesh's skin edges across the palm are pulled toward the photo's")
     ap.add_argument("--w-width", type=float, default=1.0, help="weight of the --palm-widths term (metres^2, like the marker term)")
+    ap.add_argument("--w-web", type=float, default=1.0, help="weight of the finger-web term in --palm-widths's JSON (0 = off)")
     ap.add_argument("--init-static", default=None, metavar="NPZ",
                     help="start stage 2 from the pose/shape/scale of an earlier --save-static (skips stage 1; same --n-frames)")
     ap.add_argument("--save-static", default=None, metavar="NPZ",
@@ -1287,10 +1317,13 @@ def main() -> None:
     for (j, _), nm, al in zip(pairs, names, allow):
         print(f"  {nm:8s} may attach to {len(al):4d} faces")
     slide = torch.zeros(len(names), device=dev, requires_grad=args.thumb_slide)
-    width_loss = width_report = None
+    width_loss = width_report = web_loss_fn = web_report = None
     if args.palm_widths:
         import json as _json
-        width_loss, width_report = palm_row_loss(_json.loads(Path(args.palm_widths).read_text()), mk_all, names, F, dev)
+        spec = _json.loads(Path(args.palm_widths).read_text())
+        width_loss, width_report = palm_row_loss(spec, mk_all, names, F, dev)
+        if spec.get("webs") and args.w_web > 0:
+            web_loss_fn, web_report = web_loss(spec, dev)
     palm_cols = torch.tensor([n.startswith("Palm") or n in ("Index1", "Middle1", "Ring1", "Pinky1")
                               for n in names], device=dev)
     for rnd in range(args.icp_rounds):
@@ -1389,6 +1422,7 @@ def main() -> None:
                         + args.w_inside * (inward ** 2).mean()
                         + args.w_shape * (betas ** 2).sum() + 0.1 * ((slide * 1e-3) ** 2).sum()
                         + (args.w_width * width_loss(out.vertices) if width_loss else 0.0)
+                        + (args.w_web * web_loss_fn(out.vertices) if web_loss_fn else 0.0)
                         # Shrink toward MANO's mean pose. Without this a full
                         # 45-DOF fit reproduces the markers with an anatomically
                         # impossible claw: the PCA basis was acting as the pose
@@ -1408,6 +1442,9 @@ def main() -> None:
     V1 = out.vertices[k0].cpu().numpy() * 1000
     J1 = mano_output_to_joints21(out)[k0].cpu().numpy() * 1000
     d1 = surface_report(V1, F, mk0, names, "stage 2 (surface fit)")
+    if web_report:
+        print("  finger webs, mesh vs photo (mm at the hand): "
+              + ", ".join(f"{n} {e:.1f}" for n, e in web_report(out.vertices)))
     if width_report:
         for through, lo, hi, plo, phi in width_report(out.vertices):
             print(f"  palm row through {'+'.join(through)}: mesh edges {lo:6.1f} .. {hi:6.1f} mm   photo {plo:6.1f} .. {phi:6.1f} mm"

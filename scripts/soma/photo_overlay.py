@@ -35,6 +35,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 RIGID = ["Palm1", "Palm2", "Palm3", "Thumb1", "Index1", "Middle1", "Ring1", "Pinky1"]
 HAND = RIGID + [f"{f}{k}" for f in ("Thumb", "Index", "Middle", "Ring", "Pinky") for k in (2, 3)]
 PHOTOS = "soma_transfer/photos"
+# the crotch between adjacent fingers on the MANO mesh: the most distal vertex in a 6 mm band midway between the two
+# finger axes of the flat template (fingers: index 320, middle 443, ring 554, pinky 671 tips; bones 1, 4, 10, 7)
+WEB_VERTICES = {"Index-Middle": 262, "Middle-Ring": 384, "Ring-Pinky": 608}
 
 
 def focal_px(im: Image.Image) -> float:
@@ -161,6 +164,40 @@ def skin_mask(im: Image.Image) -> np.ndarray:
     return ndimage.binary_fill_holes(ndimage.binary_closing(ndimage.binary_opening(m, iterations=2), iterations=10))
 
 
+def find_webs(im: Image.Image, px: dict, names) -> dict:
+    """Pixel position of each finger web: walking from the gap between two fingertip markers toward the gap between
+    their MCP markers, the first skin pixel. Skin mask without the closing that would fill the narrow gaps."""
+    a = np.asarray(im.convert("RGB")).astype(float)
+    m = ((a[..., 1] - a[..., 2]) < 32) & (a[..., 0] > a[..., 1]) & (a.max(2) > 90)
+    m = ndimage.binary_opening(m, iterations=2)
+    gaplike = ((a[..., 1] - a[..., 2]) >= 32) | (a.max(2) <= 90)  # wood or tape
+    lab, n = ndimage.label(~m)                                     # fill the marker patches (small, not wood/tape), keep the gaps
+    m = m | np.isin(lab, [i for i in range(1, n + 1) if (lab == i).sum() < 3000 and gaplike[lab == i].mean() < 0.5])
+    out = {}
+    for name in names:
+        f1, f2 = name.split("-")
+        need = [f1 + "3", f2 + "3", f1 + "1", f2 + "1"]
+        if not all(k in px for k in need):
+            continue
+        A0, A1, B0, B1 = px[f1 + "1"], px[f1 + "3"], px[f2 + "1"], px[f2 + "3"]
+        mid, dirn = (A0 + B0) / 2, (A1 - A0) / np.linalg.norm(A1 - A0) + (B1 - B0) / np.linalg.norm(B1 - B0)
+        dirn /= np.linalg.norm(dirn)
+        pts = np.array([A0, A1, B0, B1])
+        x0, y0 = (pts.min(0) - 60).clip(0).astype(int)
+        x1, y1 = (pts.max(0) + 60).astype(int)
+        yy, xx = np.mgrid[y0:min(y1, m.shape[0]), x0:min(x1, m.shape[1])]
+        P = np.stack([xx, yy], -1).astype(float)
+        cross = lambda o, e, q: ((e - o)[0] * (q[..., 1] - o[1]) - (e - o)[1] * (q[..., 0] - o[0])) / np.linalg.norm(e - o)
+        between = cross(A0, A1, P) * cross(B0, B1, P) < 0                       # right of one finger axis, left of the other
+        gap = between & ~m[yy, xx] & (((P - mid) @ dirn) > 0)
+        lab, n = ndimage.label(gap)                                # specks (hair, shadow) are not a gap; a gap pinched
+        keep = np.isin(lab, [i for i in range(1, n + 1) if (lab == i).sum() >= 40])   # where the fingers touch still counts
+        if not keep.any():
+            continue
+        out[name] = P[keep][np.argmin(((P[keep] - mid) @ dirn))]  # the gap's deepest pixel: nearest the wrist
+    return out
+
+
 def palm_rows(mask, px, f, cam, mean, P3) -> dict:
     """Where the hand's edges are along two lines across the palm (through Index1-Pinky1's midpoint, and through
     Palm2, both parallel to Index1->Pinky1): signed mm from the line's anchor, positive toward Pinky1. Targets for
@@ -217,6 +254,8 @@ def main():
     ap.add_argument("--photo", default=None)
     ap.add_argument("--dots", default=None, help="JSON {marker: [x, y]} (pixels) instead of the automatic labelling")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--web-vertices", default=None, metavar="JSON",
+                    help="{web name: vertex} for the finger webs, e.g. Index-Middle: 262 (default: the template-derived WEB_VERTICES)")
     ap.add_argument("--hits-out", default=None, metavar="PINS.json",
                     help="cast a ray through each rigid marker's dot onto the mesh; write {marker: nearest vertex} here")
     ap.add_argument("--compare", default=None, metavar="PINS.json", help="with --hits-out: hand-picked {marker: vertex} to compare with")
@@ -255,6 +294,12 @@ def main():
     draw(im, project, cam, mean, view, P3, px, err, rms).save(out)
     widths = palm_rows(skin_mask(im), px, f, cam, mean, P3) if all(k in px for k in ("Index1", "Pinky1", "Palm2")) else None
     if widths:
+        wv = json.loads(Path(a.web_vertices).read_text()) if a.web_vertices else WEB_VERTICES
+        webs = find_webs(im, px, [k for k in wv if "-" in k and k.split("-")[0] != "Thumb"])
+        widths["camera"] = dict(rotvec=[float(v) for v in cam[:3]], t=[float(v) for v in cam[3:6]], mean=[float(v) for v in mean],
+                                focal_px=float(f), size=list(im.size))
+        widths["webs"] = [dict(name=k, vertex=wv[k], px=[float(v[0]), float(v[1])]) for k, v in webs.items()]
+        print("webs found:", {k: [round(float(x)) for x in v] for k, v in webs.items()})
         out.with_name(f"{p}_palm_widths.json").write_text(json.dumps(widths, indent=1))
         print("palm rows (mm from the anchor, + toward Pinky1):", [(r["through"], round(r["lo_mm"], 1), round(r["hi_mm"], 1)) for r in widths["rows"]])
     out.with_suffix(".json").write_text(json.dumps(dict(
