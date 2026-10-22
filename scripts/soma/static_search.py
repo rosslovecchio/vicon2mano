@@ -107,6 +107,8 @@ def fit_cmd(p: str, static: Path, c: dict, rdir: Path) -> list[str]:
         args += ["--palm-first", str(c["palm_first"])]
     if c.get("exclude"):
         args += ["--exclude", ",".join(c["exclude"])]
+    if c.get("palm_widths"):
+        args += ["--palm-widths", str(c["palm_widths"]), "--w-width", str(c.get("w_width", 1.0))]
     if c.get("attach_radius"):
         args += ["--attach-radius", str(c["attach_radius"])]
     if c.get("init_static"):
@@ -365,7 +367,7 @@ def palm(participants, scratch=False):
                 OUT / p / ("palm_pinned_scratch" if scratch else "palm_pinned"))
 
 
-def palm_manual(participants, pins_file, radius, arm="palm_manual"):
+def palm_manual(participants, pins_file, radius, arm="palm_manual", widths=None, w_width=1.0):
     """Palm-only from scratch with hand-picked vertices (``pins_file``: {marker: vertex}, valid for every
     participant: MANO's topology is shared) that may each move to a better dorsal vertex within ``radius`` mm."""
     import static_pose_check as spc
@@ -377,7 +379,8 @@ def palm_manual(participants, pins_file, radius, arm="palm_manual"):
             print(f"{p}: no usable search run, skipped", flush=True)
             continue
         c = best["config"] | {"fit_scale": True, "exclude": PALM_EXCLUDE, "save_static": True, "pins": pins,
-                              "palm1_pin": False, "attach_radius": radius}
+                              "palm1_pin": False, "attach_radius": radius,
+                              **({"palm_widths": str(Path(widths).resolve()), "w_width": w_width} if widths else {})}
         fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c, OUT / p / arm)
 
 
@@ -513,6 +516,8 @@ def main():
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--palm-manual", default=None, metavar="PINS.json",
                     help="palm-only from scratch with hand-picked vertices {marker: vertex}, each free to move within --radius")
+    ap.add_argument("--palm-widths", default=None, help="with --palm-manual: photo_overlay.py's *_palm_widths.json")
+    ap.add_argument("--w-width", type=float, default=1.0, help="with --palm-widths: weight of the width term")
     ap.add_argument("--radius", type=float, default=0.0, help="with --palm-manual: mm a pin may move to a better vertex")
     ap.add_argument("--arm", default=None, help="with --report: tabulate/publish this palm arm (e.g. palm_manual)")
     ap.add_argument("--scratch", action="store_true", help="with --palm/--palm-free: base the pins on a fresh palm-only fit, not the all-marker fit")
@@ -525,7 +530,7 @@ def main():
         od = Path(a.onedrive) if a.onedrive else None
         return palm_report(od, a.arm or ("palm_free" if a.palm_free else "palm_pinned") + ("_scratch" if a.scratch else "")) if a.palm or a.palm_free or a.arm else refine_report(od) if a.refine else report(od)
     if a.palm_manual:
-        return palm_manual([p for p in a.participants.split(",") if p], a.palm_manual, a.radius, a.arm or "palm_manual")
+        return palm_manual([p for p in a.participants.split(",") if p], a.palm_manual, a.radius, a.arm or "palm_manual", a.palm_widths, a.w_width)
     if a.palm_free:
         return palm_free([p for p in a.participants.split(",") if p], a.scratch)
     if a.palm:

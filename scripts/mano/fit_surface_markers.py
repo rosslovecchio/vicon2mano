@@ -666,6 +666,51 @@ def onehot_attachment(F, vid):
     return f, b
 
 
+def palm_row_loss(spec, mk, names, F, dev):
+    """Loss on where the mesh's skin edges lie along rows across the palm (from a photo, photo_overlay.py).
+
+    Each row is a plane through the markers ``through`` perpendicular to the finger direction; the mesh is cut by
+    it (edge crossings, differentiable) and the leftmost/rightmost crossing within 20 mm of the photo's edges
+    (mm along Index1->Pinky1 from the anchor) must match the photo's. Returns f(vertices (S,V,3)) -> scalar, metres^2.
+    """
+    import torch
+    at = lambda k: np.nanmean(mk[:, names.index(k)], axis=0)
+    a, b = spec["along"]
+    u = at(b) - at(a)
+    u = u / np.linalg.norm(u)
+    n = np.cross(at(b) - at(a), at(spec["normal_from"][2]) - at(a))
+    fdir = np.cross(n / np.linalg.norm(n), u)
+    E = np.unique(np.sort(np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]]), axis=1), axis=0)
+    t = lambda v: torch.tensor(np.asarray(v), dtype=torch.float32, device=dev)
+    u_t, f_t, E0, E1 = t(u), t(fdir), torch.tensor(E[:, 0], device=dev), torch.tensor(E[:, 1], device=dev)
+    rows = [(t(np.mean([at(k) for k in r["through"]], axis=0)), r["lo_mm"] * 1e-3, r["hi_mm"] * 1e-3) for r in spec["rows"]]
+
+    def edges(V, p0, lo, hi):
+        """Per frame: leftmost / rightmost crossing near the photo's edges (m along u from the anchor), and whether any."""
+        rel = V - p0
+        h, w = rel @ f_t, rel @ u_t
+        ai, aj = h[:, E0], h[:, E1]
+        x = w[:, E0] + ai / (ai - aj + 1e-12) * (w[:, E1] - w[:, E0])
+        ok = (ai * aj < 0) & (x > lo - 0.02) & (x < hi + 0.02)
+        return (torch.where(ok, x, torch.full_like(x, 1e9)).min(1).values,
+                torch.where(ok, x, torch.full_like(x, -1e9)).max(1).values, ok.any(1))
+
+    def loss(V):
+        total = 0.0
+        for p0, lo, hi in rows:
+            left, right, good = edges(V, p0, lo, hi)
+            total = total + torch.where(good, (right - hi) ** 2 + (left - lo) ** 2, torch.zeros_like(right)).mean()
+        return total
+
+    def report(V):
+        """[(through markers, mesh lo, hi, photo lo, hi)] in mm, frame-averaged."""
+        with torch.no_grad():
+            return [(r["through"], *(1e3 * float(x.mean()) for x in edges(V, p0, lo, hi)[:2]), r["lo_mm"], r["hi_mm"])
+                    for r, (p0, lo, hi) in zip(spec["rows"], rows)]
+
+    return loss, report
+
+
 def write_vertex_picker(V, F, mk, names, path):
     """Mesh + every vertex id, hoverable, so attachments can be read off."""
     fig = go.Figure(data=[
@@ -883,6 +928,9 @@ def main() -> None:
                     help="also fit one global hand scale (about the wrist) in the static stages; the movement fit keeps it")
     ap.add_argument("--attach-radius", type=float, default=0.0, metavar="MM",
                     help="a --attach vertex may move to the better-fitting dorsal vertex within MM of the pin (0 = fixed)")
+    ap.add_argument("--palm-widths", default=None, metavar="JSON",
+                    help="photo_overlay.py's *_palm_widths.json: the mesh's skin edges across the palm are pulled toward the photo's")
+    ap.add_argument("--w-width", type=float, default=1.0, help="weight of the --palm-widths term (metres^2, like the marker term)")
     ap.add_argument("--init-static", default=None, metavar="NPZ",
                     help="start stage 2 from the pose/shape/scale of an earlier --save-static (skips stage 1; same --n-frames)")
     ap.add_argument("--save-static", default=None, metavar="NPZ",
@@ -1239,6 +1287,10 @@ def main() -> None:
     for (j, _), nm, al in zip(pairs, names, allow):
         print(f"  {nm:8s} may attach to {len(al):4d} faces")
     slide = torch.zeros(len(names), device=dev, requires_grad=args.thumb_slide)
+    width_loss = width_report = None
+    if args.palm_widths:
+        import json as _json
+        width_loss, width_report = palm_row_loss(_json.loads(Path(args.palm_widths).read_text()), mk_all, names, F, dev)
     palm_cols = torch.tensor([n.startswith("Palm") or n in ("Index1", "Middle1", "Ring1", "Pinky1")
                               for n in names], device=dev)
     for rnd in range(args.icp_rounds):
@@ -1336,6 +1388,7 @@ def main() -> None:
                 loss = ((wt * (d ** 2).sum(-1)).sum() / wt.sum()
                         + args.w_inside * (inward ** 2).mean()
                         + args.w_shape * (betas ** 2).sum() + 0.1 * ((slide * 1e-3) ** 2).sum()
+                        + (args.w_width * width_loss(out.vertices) if width_loss else 0.0)
                         # Shrink toward MANO's mean pose. Without this a full
                         # 45-DOF fit reproduces the markers with an anatomically
                         # impossible claw: the PCA basis was acting as the pose
@@ -1355,6 +1408,10 @@ def main() -> None:
     V1 = out.vertices[k0].cpu().numpy() * 1000
     J1 = mano_output_to_joints21(out)[k0].cpu().numpy() * 1000
     d1 = surface_report(V1, F, mk0, names, "stage 2 (surface fit)")
+    if width_report:
+        for through, lo, hi, plo, phi in width_report(out.vertices):
+            print(f"  palm row through {'+'.join(through)}: mesh edges {lo:6.1f} .. {hi:6.1f} mm   photo {plo:6.1f} .. {phi:6.1f} mm"
+                  f"   (width {hi - lo:5.1f} vs {phi - plo:5.1f})")
 
     # Per-marker check against the ATTACHED point specifically. The loop's
     # mean can hide a few markers that the fit never satisfied.

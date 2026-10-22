@@ -129,6 +129,38 @@ def fit_camera(P3, px, project):
     return best
 
 
+def skin_mask(im: Image.Image) -> np.ndarray:
+    """Pink skin (not the yellower wood or the dark tape) with the marker patches closed."""
+    a = np.asarray(im.convert("RGB")).astype(float)
+    m = ((a[..., 1] - a[..., 2]) < 32) & (a[..., 0] > a[..., 1]) & (a.max(2) > 90)
+    return ndimage.binary_fill_holes(ndimage.binary_closing(ndimage.binary_opening(m, iterations=2), iterations=10))
+
+
+def palm_rows(mask, px, f, cam, mean, P3) -> dict:
+    """Where the hand's edges are along two lines across the palm (through Index1-Pinky1's midpoint, and through
+    Palm2, both parallel to Index1->Pinky1): signed mm from the line's anchor, positive toward Pinky1. Targets for
+    fit_surface_markers --palm-widths. The photo is a flat projection, so this is the hand's width to a few mm."""
+    d = px["Pinky1"] - px["Index1"]
+    d = d / np.linalg.norm(d)
+    rows = []
+    for through, q0 in ((["Index1", "Pinky1"], (px["Index1"] + px["Pinky1"]) / 2), (["Palm2"], px["Palm2"])):
+        X = np.mean([P3[k] for k in through], 0) - mean
+        z = (X @ Rotation.from_rotvec(cam[:3]).as_matrix().T + cam[3:6])[2]
+        ts = np.arange(-450, 450)
+        pts = (q0[None] + ts[:, None] * d).round().astype(int)
+        ok = mask[pts[:, 1].clip(0, mask.shape[0] - 1), pts[:, 0].clip(0, mask.shape[1] - 1)]
+        i = 450
+        if not ok[i]:
+            continue
+        lo = hi = i
+        while lo > 0 and ok[lo - 1]:
+            lo -= 1
+        while hi < len(ok) - 1 and ok[hi + 1]:
+            hi += 1
+        rows.append(dict(through=through, lo_mm=float((ts[lo] - 0.5) * z / f), hi_mm=float((ts[hi] + 0.5) * z / f)))
+    return dict(normal_from=["Index1", "Pinky1", "Palm2"], along=["Index1", "Pinky1"], rows=rows)
+
+
 def draw(im, project, p, mean, view, P3, px, rigid, rigid_rms):
     ov = Image.new("RGBA", im.size)
     d = ImageDraw.Draw(ov)
@@ -193,6 +225,10 @@ def main():
     out = Path(a.out) if a.out else REPO / "results/soma/photo_overlay" / p / f"{p}_photo_overlay_{a.arm}.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     draw(im, project, cam, mean, view, P3, px, err, rms).save(out)
+    widths = palm_rows(skin_mask(im), px, f, cam, mean, P3) if all(k in px for k in ("Index1", "Pinky1", "Palm2")) else None
+    if widths:
+        out.with_name(f"{p}_palm_widths.json").write_text(json.dumps(widths, indent=1))
+        print("palm rows (mm from the anchor, + toward Pinky1):", [(r["through"], round(r["lo_mm"], 1), round(r["hi_mm"], 1)) for r in widths["rows"]])
     out.with_suffix(".json").write_text(json.dumps(dict(
         photo=str(photo), focal_px=f, rigid_rms_px=rms, camera=[float(v) for v in cam], mean=[float(v) for v in mean],
         dots={k: [float(v[0]), float(v[1])] for k, v in px.items()}, finger_error_px=far), indent=1))
