@@ -51,3 +51,18 @@ def test_camera_fit_recovers_a_known_pose():
 def test_focal_from_exif_defaults_to_24mm_equivalent():
     im = Image.new("RGB", (1330, 2364))                              # no EXIF
     assert abs(po.focal_px(im) - 24 / 43.27 * 1.25 * 2364) < 1e-6
+
+
+def test_ray_hits_a_plane_where_the_pixel_points():
+    from scipy.spatial.transform import Rotation
+    V = np.array([[-50, -50, 0], [50, -50, 0], [50, 50, 0], [-50, 50, 0]], float)      # a 10 cm square at z = 0
+    Fc = np.array([[0, 1, 2], [0, 2, 3]])
+    cam = np.r_[np.pi, 0, 0, 0, 0, 300.0]                         # 30 cm above it, looking straight down (x right, y up -> image y down)
+    project = po.make_camera(F, SIZE)
+    target = np.array([[12.0, -7.0, 0.0]])
+    px = project(cam, target)[0]
+    (dist, face, bary), = po.ray_hits(V, Fc, cam, np.zeros(3), F, SIZE, [px])
+    hit = (V[Fc[face]] * bary[:, None]).sum(0)
+    assert np.allclose(hit, target[0], atol=1e-6)
+    assert abs(dist - np.linalg.norm(target[0] - [0, 0, 300.0])) < 1e-6          # along the ray, from the camera centre
+    assert po.ray_hits(V, Fc, cam, np.zeros(3), F, SIZE, [project(cam, np.array([[400.0, 0, 0]]))[0]])[0] is None
