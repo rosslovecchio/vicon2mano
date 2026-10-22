@@ -129,6 +129,31 @@ def fit_camera(P3, px, project):
     return best
 
 
+def ray_hits(V, F, cam, mean, f, size, pixels) -> list[tuple[float, int, np.ndarray]]:
+    """First surface hit of the ray through each pixel: (distance mm along the ray, face, barycentric) or None.
+    Moller-Trumbore against every face; the camera sees the dorsal surface first."""
+    R = Rotation.from_rotvec(cam[:3]).as_matrix()
+    origin = mean - R.T @ cam[3:6]
+    v0 = V[F[:, 0]]
+    e1, e2 = V[F[:, 1]] - v0, V[F[:, 2]] - v0
+    out = []
+    for u, v in pixels:
+        d = R.T @ np.array([(u - size[0] / 2) / f, (v - size[1] / 2) / f, 1.0])
+        pv = np.cross(d, e2)
+        det = (e1 * pv).sum(1)
+        inv = 1.0 / np.where(np.abs(det) < 1e-12, np.nan, det)
+        tv = origin - v0
+        a = (tv * pv).sum(1) * inv
+        b = (d * np.cross(tv, e1)).sum(1) * inv
+        t = (e2 * np.cross(tv, e1)).sum(1) * inv
+        ok = (a >= 0) & (b >= 0) & (a + b <= 1) & (t > 0)
+        out.append(None if not ok.any() else (float(np.where(ok, t, np.inf).min() * np.linalg.norm(d)),
+                                              int(np.where(ok, t, np.inf).argmin()),
+                                              np.array([1 - a[np.where(ok, t, np.inf).argmin()] - b[np.where(ok, t, np.inf).argmin()],
+                                                        a[np.where(ok, t, np.inf).argmin()], b[np.where(ok, t, np.inf).argmin()]])))
+    return out
+
+
 def skin_mask(im: Image.Image) -> np.ndarray:
     """Pink skin (not the yellower wood or the dark tape) with the marker patches closed."""
     a = np.asarray(im.convert("RGB")).astype(float)
@@ -192,6 +217,9 @@ def main():
     ap.add_argument("--photo", default=None)
     ap.add_argument("--dots", default=None, help="JSON {marker: [x, y]} (pixels) instead of the automatic labelling")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--hits-out", default=None, metavar="PINS.json",
+                    help="cast a ray through each rigid marker's dot onto the mesh; write {marker: nearest vertex} here")
+    ap.add_argument("--compare", default=None, metavar="PINS.json", help="with --hits-out: hand-picked {marker: vertex} to compare with")
     a = ap.parse_args()
     p = a.participant
 
@@ -232,6 +260,25 @@ def main():
     out.with_suffix(".json").write_text(json.dumps(dict(
         photo=str(photo), focal_px=f, rigid_rms_px=rms, camera=[float(v) for v in cam], mean=[float(v) for v in mean],
         dots={k: [float(v[0]), float(v[1])] for k, v in px.items()}, finger_error_px=far), indent=1))
+    if a.hits_out:
+        mk = [k for k in HAND if k in px and k in RIGID]
+        hits = ray_hits(view["V"], view["F"], cam, mean, f, im.size, [px[k] for k in mk])
+        by_hand = json.loads(Path(a.compare).read_text()) if a.compare else {}
+        pins, rows = {}, []
+        for k, h in zip(mk, hits):
+            if h is None:
+                print(f"  {k}: the ray misses the mesh")
+                continue
+            _, fi, bary = h
+            pins[k] = int(view["F"][fi][int(bary.argmax())])
+            hit = (view["V"][view["F"][fi]] * bary[:, None]).sum(0)
+            row = f"  {k:8s} hit -> vertex {pins[k]:3d}  (marker {np.linalg.norm(P3[k] - hit):4.1f} mm from the hit)"
+            if k in by_hand:
+                row += f"   hand-picked {by_hand[k]:3d}: {np.linalg.norm(view['V'][by_hand[k]] - hit):4.1f} mm from the hit, {np.linalg.norm(view['V'][by_hand[k]] - view['V'][pins[k]]):4.1f} mm from the hit vertex"
+            rows.append(row)
+        print("ray hits on", a.arm, "(rigid markers):\n" + "\n".join(rows))
+        Path(a.hits_out).write_text(json.dumps(pins, indent=2))
+        print(f"saved pins {a.hits_out}")
     print(f"saved {out}")
 
 
