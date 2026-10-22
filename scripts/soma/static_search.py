@@ -92,6 +92,8 @@ def fit_cmd(p: str, static: Path, c: dict, rdir: Path) -> list[str]:
     present = rf.present_markers(static)
     drop = set(c.get("exclude", ())) | (set() if c["palm1_pin"] else {"Palm1"})
     attach, _ = rf.prune_attach(cfg, present - drop, rdir / "attach.json")
+    if c.get("pins") and attach is not None:
+        attach.write_text(json.dumps(json.loads(attach.read_text()) | c["pins"]), encoding="utf-8")
     if attach is not None:
         args += ["--attach", str(attach)]
     for k in ("min_dorsal_dot", "w_inside", "icp_rounds", "thumb_dorsal", "min_own_weight", "biomech", "twist_weight",
@@ -318,6 +320,27 @@ def refine(participants):
             fit_one(J, p, static, best["config_id"], best["config"] | extra, OUT / p / arm)
 
 
+PALM_PINNED = ["Palm2", "Palm3", "Index1", "Middle1", "Ring1", "Pinky1"]
+
+
+def attached_vertices(p: str, arm: str = "v_scale", names=PALM_PINNED) -> dict:
+    """Vertex each named marker was attached to in the all-marker fit ``arm``: of the last round's attached
+    face, the corner nearest the marker (the fit logs the face, not the barycentric point)."""
+    import ast
+    import re
+    d = OUT / p / arm
+    log = (d / "fit.log").read_text(encoding="utf-8", errors="replace")
+    fitted = ast.literal_eval(re.search(r"^\d+ markers: (\[.*\])", log, re.M).group(1))
+    fid = ast.literal_eval(re.findall(r"attached faces (\[.*\])", log)[-1])
+    v = read_view(d / "static.html")
+    out = {}
+    for n in names:
+        if n in fitted and n in v["names"]:
+            tri = v["F"][fid[fitted.index(n)]]
+            out[n] = int(tri[np.linalg.norm(v["V"][tri] - v["M"][v["names"].index(n)], axis=1).argmin()])
+    return out
+
+
 def palm(participants):
     """Step 1 of palm-first: each participant's best setting + --fit-scale on the palm markers alone."""
     import static_pose_check as spc
@@ -327,8 +350,9 @@ def palm(participants):
         if best is None:
             print(f"{p}: no usable search run, skipped", flush=True)
             continue
-        c = best["config"] | {"fit_scale": True, "exclude": PALM_EXCLUDE, "save_static": True}
-        fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c, OUT / p / "palm")
+        c = best["config"] | {"fit_scale": True, "exclude": PALM_EXCLUDE, "save_static": True,
+                              "pins": attached_vertices(p)}
+        fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c, OUT / p / "palm_pinned")
 
 
 def palm_report(onedrive: Path | None):
@@ -341,18 +365,18 @@ def palm_report(onedrive: Path | None):
              "Per palm marker: dorsal yes/NO, signed distance from the skin in mm (negative = inside). "
              "Full-fit scale = the same setting fitted on all markers (v_scale).", "",
              "| P | scale (palm only) | scale (full fit) | palm markers: dorsal / distance mm |", "|---|---|---|---|"]
-    for p in sorted((d.name for d in OUT.iterdir() if (d / "palm" / "diag.json").exists()), key=key):
-        r = json.loads((OUT / p / "palm" / "diag.json").read_text())
+    for p in sorted((d.name for d in OUT.iterdir() if (d / "palm_pinned" / "diag.json").exists()), key=key):
+        r = json.loads((OUT / p / "palm_pinned" / "diag.json").read_text())
         mk = ", ".join(f"{m['marker']} {'yes' if m['dorsal'] else 'NO'} / {m['distance_mm']}" for m in r.get("markers", []) if not m.get("absent"))             or f"failed (rc={r.get('returncode')})"
-        lines.append(f"| {p} | {scale(OUT / p / 'palm' / 'fit.log')} | {scale(OUT / p / 'v_scale' / 'fit.log')} | {mk} |")
-        if onedrive and (OUT / p / "palm" / "static.html").exists():
+        lines.append(f"| {p} | {scale(OUT / p / 'palm_pinned' / 'fit.log')} | {scale(OUT / p / 'v_scale' / 'fit.log')} | {mk} |")
+        if onedrive and (OUT / p / "palm_pinned" / "static.html").exists():
             (onedrive / p).mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(OUT / p / "palm" / "static.html", onedrive / p / f"{p}_palm.html")
-            (onedrive / p / f"{p}_palm_diagnostics.json").write_text(json.dumps(r, indent=1))
+            shutil.copyfile(OUT / p / "palm_pinned" / "static.html", onedrive / p / f"{p}_palm_pinned.html")
+            (onedrive / p / f"{p}_palm_pinned_diagnostics.json").write_text(json.dumps(r, indent=1))
     text = "\n".join(lines) + "\n"
     print(text)
     for d in ([OUT] + ([onedrive] if onedrive else [])):
-        (d / "README_palm.md").write_text(text, encoding="utf-8")
+        (d / "README_palm_pinned.md").write_text(text, encoding="utf-8")
 
 
 def refine_report(onedrive: Path | None):
