@@ -774,9 +774,10 @@ class ScaledModel:
     (--palm-widths) and the markers' standoff above the skin fixes this.
     """
 
-    def __init__(self, model, device, thickness=False):
+    def __init__(self, model, device, thickness=False, limit=0.25):
         import torch
         self.model = model
+        self.log_lim = float(np.log(1 + limit))                   # thickness stays within 1/(1+limit) .. 1+limit
         self.log_scale = torch.zeros(1, device=device, requires_grad=True)
         self.log_thick = torch.zeros(1, device=device, requires_grad=thickness)
         self.palm_w = model.lbs_weights[:, 0].detach() if thickness else None
@@ -795,7 +796,8 @@ class ScaledModel:
             n = torch.cross(J[:, 1] - J[:, 0], J[:, 7] - J[:, 0], dim=-1)
             n = n / n.norm(dim=-1, keepdim=True)
             h = ((out.vertices - w) * n[:, None]).sum(-1, keepdim=True)
-            out.vertices = out.vertices + (self.log_thick.exp() - 1) * self.palm_w[None, :, None] * h * n[:, None]
+            t = self.log_thick.clamp(-self.log_lim, self.log_lim).exp()
+            out.vertices = out.vertices + (t - 1) * self.palm_w[None, :, None] * h * n[:, None]
         return out
 
 
@@ -980,6 +982,8 @@ def main() -> None:
                     help="start stage 2 from the pose/shape/scale of an earlier --save-static (skips stage 1; same --n-frames)")
     ap.add_argument("--save-static", default=None, metavar="NPZ",
                     help="write the static stage's betas, scale, orientation, position and pose (the frozen palm for a later fit)")
+    ap.add_argument("--thickness-limit", type=float, default=0.25,
+                    help="--fit-thickness stays within 1/(1+L) .. 1+L (unbounded it flattens the palm to a third to put the markers outside the skin)")
     ap.add_argument("--fit-thickness", action="store_true",
                     help="with --fit-scale: also a palm thickness, separate from the width (see ScaledModel)")
     ap.add_argument("--palm-first", type=float, default=0.0, metavar="W",
@@ -1163,7 +1167,7 @@ def main() -> None:
     if args.fit_thickness and not args.fit_scale:
         raise SystemExit("--fit-thickness needs --fit-scale")
     if args.fit_scale:
-        model = ScaledModel(model, dev, args.fit_thickness)
+        model = ScaledModel(model, dev, args.fit_thickness, args.thickness_limit)
     scale_grp = [{"params": [model.log_scale], "lr": 1e-2}] if args.fit_scale else []
     if args.fit_thickness:
         scale_grp.append({"params": [model.log_thick], "lr": 1e-2})
@@ -1496,11 +1500,11 @@ def main() -> None:
         np.savez(args.save_static, betas=betas.detach().cpu().numpy(), global_orient=orient.detach().cpu().numpy(),
                  transl=tr.detach().cpu().numpy(), hand_pose=hp.detach().cpu().numpy(),
                  scale=np.float32(model.log_scale.exp().item() if args.fit_scale else 1.0),
-                 thickness=np.float32(model.log_thick.exp().item() if args.fit_thickness else 1.0), names=np.array(names))
+                 thickness=np.float32(model.log_thick.clamp(-model.log_lim, model.log_lim).exp().item() if args.fit_thickness else 1.0), names=np.array(names))
     if args.fit_scale:
         print(f"fitted global scale = {model.log_scale.exp().item():.3f}")
     if args.fit_thickness:
-        print(f"fitted palm thickness = {model.log_thick.exp().item():.3f}")
+        print(f"fitted palm thickness = {model.log_thick.clamp(-model.log_lim, model.log_lim).exp().item():.3f}  (limit {args.thickness_limit:.2f})")
     if Bmat is not None:                     # thumb joint angles of the static pose (deg)
         hpj = hp.detach().cpu().numpy().mean(0).reshape(15, 3)
         for ji in (12, 13, 14):
@@ -1991,7 +1995,7 @@ def main() -> None:
             np.savez(args.npz_out, global_orient=full_go, hand_pose=full_hp,
                      transl=full_tr, betas=betas_f.cpu().numpy().astype(np.float32),
                      scale=np.float32(model.log_scale.exp().item() if args.fit_scale else 1.0),
-                     thickness=np.float32(model.log_thick.exp().item() if args.fit_thickness else 1.0),
+                     thickness=np.float32(model.log_thick.clamp(-model.log_lim, model.log_lim).exp().item() if args.fit_thickness else 1.0),
                      frames_fitted=mf.astype(np.int64))
             print(f"saved {args.npz_out}")
 

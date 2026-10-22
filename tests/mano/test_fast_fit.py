@@ -143,10 +143,16 @@ def _stub_model(weights):
 
 
 def test_palm_thickness_scales_only_palm_weighted_vertices_along_the_normal():
-    model = fsm.ScaledModel(_stub_model([[1.0] + [0.0] * 15, [0.0] * 16]), "cpu", thickness=True)
+    model = fsm.ScaledModel(_stub_model([[1.0] + [0.0] * 15, [0.0] * 16]), "cpu", thickness=True, limit=1.0)
     base = model(a=1).vertices.clone()
     assert torch.allclose(base, torch.tensor([[[0.2, 0.2, 0.01], [0.5, 0.5, 0.01]]]))           # thickness 1 = unchanged
     model.log_thick.data.fill_(float(np.log(2.0)))
     out = model(a=1).vertices
     assert torch.allclose(out[0, 0], torch.tensor([0.2, 0.2, 0.02]), atol=1e-6)               # palm vertex: height doubled
     assert torch.allclose(out[0, 1], base[0, 1])                                              # finger vertex (palm weight 0): untouched
+
+
+def test_palm_thickness_is_bounded():
+    model = fsm.ScaledModel(_stub_model([[1.0] + [0.0] * 15, [0.0] * 16]), "cpu", thickness=True, limit=0.25)
+    model.log_thick.data.fill_(float(np.log(0.1)))                    # asks for a paper-thin palm
+    assert torch.allclose(model(a=1).vertices[0, 0, 2], torch.tensor(0.01 / 1.25 ), atol=1e-6)
