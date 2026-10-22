@@ -525,7 +525,7 @@ def main():
         od = Path(a.onedrive) if a.onedrive else None
         return palm_report(od, a.arm or ("palm_free" if a.palm_free else "palm_pinned") + ("_scratch" if a.scratch else "")) if a.palm or a.palm_free or a.arm else refine_report(od) if a.refine else report(od)
     if a.palm_manual:
-        return palm_manual([p for p in a.participants.split(",") if p], a.palm_manual, a.radius)
+        return palm_manual([p for p in a.participants.split(",") if p], a.palm_manual, a.radius, a.arm or "palm_manual")
     if a.palm_free:
         return palm_free([p for p in a.participants.split(",") if p], a.scratch)
     if a.palm:
