@@ -106,6 +106,8 @@ def fit_cmd(p: str, static: Path, c: dict, rdir: Path) -> list[str]:
         args += ["--palm-first", str(c["palm_first"])]
     if c.get("exclude"):
         args += ["--exclude", ",".join(c["exclude"])]
+    if c.get("init_static"):
+        args += ["--init-static", str(c["init_static"])]
     if c.get("save_static"):
         args += ["--save-static", str(rdir / "static_params.npz")]
     from vicon2mano.core.dataset import DATA_ROOT
@@ -355,7 +357,22 @@ def palm(participants):
         fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c, OUT / p / "palm_pinned")
 
 
-def palm_report(onedrive: Path | None):
+def palm_free(participants):
+    """Palm-only again from the pinned palm fit's pose, with the derived pins dropped: each palm marker
+    re-attaches to the nearest allowed face of that mesh (Palm1 included: nothing is pinned)."""
+    import static_pose_check as spc
+    J = Judge()
+    for p in participants:
+        best, start = best_run(p), OUT / p / "palm_pinned" / "static_params.npz"
+        if best is None or not start.exists():
+            print(f"{p}: no pinned palm fit to start from, skipped", flush=True)
+            continue
+        c = best["config"] | {"fit_scale": True, "exclude": PALM_EXCLUDE, "save_static": True, "init_static": str(start),
+                              "palm1_pin": False}
+        fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c, OUT / p / "palm_free")
+
+
+def palm_report(onedrive: Path | None, arm: str = "palm_pinned"):
     """Table + views of the palm-only fits, with the full fit's scale beside it."""
     import re
     import shutil
@@ -364,19 +381,24 @@ def palm_report(onedrive: Path | None):
     lines = ["# Palm-only fit (Palm1-3 + the four MCP markers), best search setting + --fit-scale", "",
              "Per palm marker: dorsal yes/NO, signed distance from the skin in mm (negative = inside). "
              "Full-fit scale = the same setting fitted on all markers (v_scale).", "",
-             "| P | scale (palm only) | scale (full fit) | palm markers: dorsal / distance mm |", "|---|---|---|---|"]
-    for p in sorted((d.name for d in OUT.iterdir() if (d / "palm_pinned" / "diag.json").exists()), key=key):
-        r = json.loads((OUT / p / "palm_pinned" / "diag.json").read_text())
+             "| P | scale (palm only) | scale (full fit) | palm markers: dorsal / distance mm |" + (" attachment moved from the pin, mm |" if arm == "palm_free" else ""),
+             "|---|---|---|---|" + ("---|" if arm == "palm_free" else "")]
+    for p in sorted((d.name for d in OUT.iterdir() if (d / arm / "diag.json").exists()), key=key):
+        r = json.loads((OUT / p / arm / "diag.json").read_text())
         mk = ", ".join(f"{m['marker']} {'yes' if m['dorsal'] else 'NO'} / {m['distance_mm']}" for m in r.get("markers", []) if not m.get("absent"))             or f"failed (rc={r.get('returncode')})"
-        lines.append(f"| {p} | {scale(OUT / p / 'palm_pinned' / 'fit.log')} | {scale(OUT / p / 'v_scale' / 'fit.log')} | {mk} |")
-        if onedrive and (OUT / p / "palm_pinned" / "static.html").exists():
+        moved = ""
+        if arm == "palm_free" and (OUT / p / arm / "static.html").exists():      # where each marker's attachment went, mm on the new mesh
+            new, old, V = attached_vertices(p, arm), attached_vertices(p, "palm_pinned"), read_view(OUT / p / arm / "static.html")["V"]
+            moved = ", ".join(f"{n} {np.linalg.norm(V[new[n]] - V[old[n]]):.1f}" for n in new if n in old)
+        lines.append(f"| {p} | {scale(OUT / p / arm / 'fit.log')} | {scale(OUT / p / 'v_scale' / 'fit.log')} | {mk} |" + (f" {moved} |" if moved else ""))
+        if onedrive and (OUT / p / arm / "static.html").exists():
             (onedrive / p).mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(OUT / p / "palm_pinned" / "static.html", onedrive / p / f"{p}_palm_pinned.html")
-            (onedrive / p / f"{p}_palm_pinned_diagnostics.json").write_text(json.dumps(r, indent=1))
+            shutil.copyfile(OUT / p / arm / "static.html", onedrive / p / f"{p}_{arm}.html")
+            (onedrive / p / f"{p}_{arm}_diagnostics.json").write_text(json.dumps(r, indent=1))
     text = "\n".join(lines) + "\n"
     print(text)
     for d in ([OUT] + ([onedrive] if onedrive else [])):
-        (d / "README_palm_pinned.md").write_text(text, encoding="utf-8")
+        (d / f"README_{arm}.md").write_text(text, encoding="utf-8")
 
 
 def refine_report(onedrive: Path | None):
@@ -465,13 +487,16 @@ def main():
     ap.add_argument("--n-configs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--palm-free", action="store_true", help="palm-only refit from the pinned palm fit with the derived pins dropped")
     ap.add_argument("--palm", action="store_true", help="palm-only fit (finger markers excluded), per participant")
     ap.add_argument("--refine", action="store_true", help="refit each participant's best setting in every arm of ARMS")
     ap.add_argument("--onedrive", default=None, help="with --report: copy production/best views and tables here")
     a = ap.parse_args()
     if a.report:
         od = Path(a.onedrive) if a.onedrive else None
-        return palm_report(od) if a.palm else refine_report(od) if a.refine else report(od)
+        return palm_report(od, "palm_free" if a.palm_free else "palm_pinned") if a.palm or a.palm_free else refine_report(od) if a.refine else report(od)
+    if a.palm_free:
+        return palm_free([p for p in a.participants.split(",") if p])
     if a.palm:
         return palm([p for p in a.participants.split(",") if p])
     if a.refine:

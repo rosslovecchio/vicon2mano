@@ -881,6 +881,8 @@ def main() -> None:
     ap.add_argument("--n-frames", type=int, default=30)
     ap.add_argument("--fit-scale", action="store_true",
                     help="also fit one global hand scale (about the wrist) in the static stages; the movement fit keeps it")
+    ap.add_argument("--init-static", default=None, metavar="NPZ",
+                    help="start stage 2 from the pose/shape/scale of an earlier --save-static (skips stage 1; same --n-frames)")
     ap.add_argument("--save-static", default=None, metavar="NPZ",
                     help="write the static stage's betas, scale, orientation, position and pose (the frozen palm for a later fit)")
     ap.add_argument("--palm-first", type=float, default=0.0, metavar="W",
@@ -1157,8 +1159,20 @@ def main() -> None:
                             {"params": [tr], "lr": 3e-3}])
     # No scale here: stage 1 puts joint centres ON dorsal markers (Palm2 as the
     # wrist), which shortens the hand and drags the scale down before stage 2.
-    print(f"\nstage 1 -- joint-centre fit ({args.iters_joint} iters)")
-    for it in range(args.iters_joint):
+    n_joint = args.iters_joint
+    if args.init_static:                     # start from an earlier static fit: no stage 1, same frames needed
+        z = np.load(args.init_static)
+        if z["hand_pose"].shape[0] != S:
+            raise SystemExit(f"--init-static has {z['hand_pose'].shape[0]} frames, this fit samples {S}")
+        with torch.no_grad():
+            for prm, k in ((betas, "betas"), (orient, "global_orient"), (tr, "transl"), (hp, "hand_pose")):
+                prm.copy_(torch.tensor(z[k], device=dev))
+            if args.fit_scale:
+                model.log_scale.fill_(float(np.log(z["scale"])))
+        n_joint = 0
+        print(f"\nstage 1 skipped: starting from {args.init_static}")
+    print(f"\nstage 1 -- joint-centre fit ({n_joint} iters)")
+    for it in range(n_joint):
         opt.zero_grad()
         pred = mano_output_to_joints21(fwd())
         loss = (((pred - tgt)[jmask] ** 2).sum(-1).mean()
