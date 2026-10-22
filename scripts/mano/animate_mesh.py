@@ -300,12 +300,15 @@ def resolve_model_path(mano_dir: str, side: str) -> Path:
     return model_path
 
 
-def forward_vertices(model, global_orient, hand_pose, transl, betas, scale=1.0, thickness=1.0) -> np.ndarray:
-    """No-grad forward pass -> (n, 778, 3) mesh vertices in metres, with the fit's global ``scale`` and palm
-    ``thickness`` (fit_surface_markers --fit-scale / --fit-thickness)."""
+def forward_vertices(model, global_orient, hand_pose, transl, betas, scale=1.0, thickness=1.0, seglen=None) -> np.ndarray:
+    """No-grad forward pass -> (n, 778, 3) mesh vertices in metres, with the fit's global ``scale``, palm ``thickness``
+    and per-segment finger lengths ``seglen`` (fit_surface_markers --fit-scale / --fit-thickness / --fit-segments)."""
     import torch
-    from fit_surface_markers import ScaledModel
+    from fit_surface_markers import ScaledModel, SegmentModel
     n = global_orient.shape[0]
+    if seglen is not None:
+        model = SegmentModel(model, "cpu", limit=10.0)
+        model.log_len.data.copy_(torch.tensor(np.log(seglen), dtype=torch.float32))
     m = ScaledModel(model, "cpu", thickness=thickness != 1.0)
     m.log_scale.data.fill_(float(np.log(scale)))
     m.log_thick.data.fill_(float(np.log(thickness)))
@@ -384,6 +387,7 @@ def main() -> None:
         fit["betas"],
         float(fit["scale"]) if "scale" in fit else 1.0,
         float(fit["thickness"]) if "thickness" in fit else 1.0,
+        fit["seglen"] if "seglen" in fit and not np.allclose(fit["seglen"], 1.0) else None,
     )
     verts_mm = verts_m * 1000.0  # metres -> mm, to match raw marker scale
     sampled_markers = markers_mm[frame_idx]  # (n, N, 3) mm

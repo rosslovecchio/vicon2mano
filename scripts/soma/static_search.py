@@ -100,7 +100,7 @@ def fit_cmd(p: str, static: Path, c: dict, rdir: Path) -> list[str]:
     for k in ("min_dorsal_dot", "w_inside", "icp_rounds", "thumb_dorsal", "min_own_weight", "biomech", "twist_weight",
               "w_pose", "n_frames", "iters_surface"):
         args += ["--" + k.replace("_", "-"), str(c[k])]
-    for k in ("complete_frames", "fit_scale", "fit_thickness"):
+    for k in ("complete_frames", "fit_scale", "fit_thickness", "fit_segments", "freeze_global"):
         if c.get(k):
             args.append("--" + k.replace("_", "-"))
     if c.get("palm_first"):
@@ -385,6 +385,26 @@ def palm_manual(participants, pins_file, radius, arm="palm_manual", widths=None,
         fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c, OUT / p / arm)
 
 
+PALM_MARKERS = ["Palm1", "Palm2", "Palm3", "Thumb1", "Index1", "Middle1", "Ring1", "Pinky1"]
+
+
+def fingers(participants, palm_arm, radius=6.0, arm="fingers"):
+    """Step 2 of palm-first: the markers of every finger on the frozen palm of ``palm_arm`` (its shape, scale,
+    orientation, position and its palm attachments held): finger pose and a length per finger segment are fitted.
+    The photo is not used here: the fingers' pose differs between photo and static."""
+    import static_pose_check as spc
+    J = Judge()
+    for p in participants:
+        best, start = best_run(p), OUT / p / palm_arm / "static_params.npz"
+        if best is None or not start.exists():
+            print(f"{p}: no palm fit {palm_arm} to start from, skipped", flush=True)
+            continue
+        c = best["config"] | {"fit_scale": True, "fit_segments": True, "freeze_global": True, "save_static": True,
+                              "init_static": str(start), "palm1_pin": False, "attach_radius": radius,
+                              "pins": attached_vertices(p, palm_arm, PALM_MARKERS)}
+        fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c, OUT / p / arm)
+
+
 def palm_free(participants, scratch=False):
     """Palm-only again from the pinned palm fit's pose, with the derived pins dropped: each palm marker
     re-attaches to the nearest allowed face of that mesh (Palm1 included: nothing is pinned)."""
@@ -515,6 +535,8 @@ def main():
     ap.add_argument("--n-configs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--fingers", action="store_true", help="step 2: finger pose + segment lengths on the frozen palm of --palm-arm")
+    ap.add_argument("--palm-arm", default="palm_manual_webs_photo_v2", help="with --fingers: the accepted palm fit's arm")
     ap.add_argument("--palm-manual", default=None, metavar="PINS.json",
                     help="palm-only from scratch with hand-picked vertices {marker: vertex}, each free to move within --radius")
     ap.add_argument("--palm-widths", default=None, help="with --palm-manual: photo_overlay.py's *_palm_widths.json")
@@ -533,6 +555,8 @@ def main():
     if a.report:
         od = Path(a.onedrive) if a.onedrive else None
         return palm_report(od, a.arm or ("palm_free" if a.palm_free else "palm_pinned") + ("_scratch" if a.scratch else "")) if a.palm or a.palm_free or a.arm else refine_report(od) if a.refine else report(od)
+    if a.fingers:
+        return fingers([p for p in a.participants.split(",") if p], a.palm_arm, a.radius or 6.0, a.arm or "fingers")
     if a.palm_manual:
         return palm_manual([p for p in a.participants.split(",") if p], a.palm_manual, a.radius, a.arm or "palm_manual", a.palm_widths, a.w_width, a.w_web, a.fit_thickness, a.init_arm)
     if a.palm_free:

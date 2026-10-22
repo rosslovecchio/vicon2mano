@@ -705,8 +705,12 @@ def palm_row_loss(spec, mk, names, F, dev):
     def report(V):
         """[(through markers, mesh lo, hi, photo lo, hi)] in mm, frame-averaged."""
         with torch.no_grad():
-            return [(r["through"], *(1e3 * float(x.mean()) for x in edges(V, p0, lo, hi)[:2]), r["lo_mm"], r["hi_mm"])
-                    for r, (p0, lo, hi) in zip(spec["rows"], rows)]
+            out = []
+            for r, (p0, lo, hi) in zip(spec["rows"], rows):
+                left, right, good = edges(V, p0, lo, hi)
+                if good.any():                                  # frames where the plane misses the mesh have no edges
+                    out.append((r["through"], 1e3 * float(left[good].mean()), 1e3 * float(right[good].mean()), r["lo_mm"], r["hi_mm"]))
+            return out
 
     return loss, report
 
@@ -763,6 +767,52 @@ def write_vertex_picker(V, F, mk, names, path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(str(path), include_plotlyjs=True)
     print(f"saved vertex picker: {path}")
+
+
+# finger bones (MANO order) proximal -> distal, and the fingertip vertex that ends each chain
+_FINGER_CHAINS = [((1, 2, 3), 320), ((4, 5, 6), 443), ((7, 8, 9), 671), ((10, 11, 12), 554), ((13, 14, 15), 744)]
+
+
+class SegmentModel:
+    """MANO with a length factor per finger segment (15 bones); log-length 0 = MANO's.
+
+    Segment k (joint k to its child joint, the fingertip vertex for a distal bone) is lengthened by moving the shaped
+    template's vertices: those distal to the segment by the whole change of its bone vector, those on the segment
+    by the fraction along it (by their skinning weight to it). Posing, skinning and the joint regressor then work on
+    the changed template, so the joints follow. Betas are applied here and zeroed for the wrapped model.
+    """
+
+    def __init__(self, model, device, limit=0.5):
+        import torch
+        self.model = model
+        self.log_lim = float(np.log(1 + limit))
+        self.log_len = torch.zeros(15, device=device, requires_grad=True)
+        self.v0 = model.v_template.detach().clone()
+        W = model.lbs_weights.detach()
+        self.own = torch.stack([W[:, k] for k in range(1, 16)], 1)                       # (V, 15) weight to each bone
+        self.beyond = torch.zeros_like(self.own)                                         # weight to the bones distal of it
+        for bones, _ in _FINGER_CHAINS:
+            for i, k in enumerate(bones[:-1]):
+                self.beyond[:, k - 1] = W[:, list(bones[i + 1:])].sum(1)
+
+    def __getattr__(self, k):
+        return getattr(self.model, k)
+
+    def __call__(self, **kw):
+        import torch
+        betas = kw.pop("betas")
+        m = self.model
+        v = (self.v0[None] + torch.einsum("bl,mkl->bmk", betas[:1], m.shapedirs))[0]      # shaped template (betas are shared)
+        J = torch.einsum("ik,ji->jk", v, m.J_regressor)
+        s = self.log_len.clamp(-self.log_lim, self.log_lim).exp() - 1
+        shift = torch.zeros_like(v)
+        for bones, tip in _FINGER_CHAINS:
+            for i, k in enumerate(bones):
+                bone = (J[bones[i + 1]] if i < 2 else v[tip]) - J[k]
+                frac = (((v - J[k]) @ bone) / (bone @ bone)).clamp(0, 1)
+                shift = shift + s[k - 1] * (self.beyond[:, k - 1] + self.own[:, k - 1] * frac)[:, None] * bone
+        m.v_template = v + shift
+        return m(betas=torch.zeros_like(betas), **kw)
 
 
 class ScaledModel:
@@ -982,6 +1032,13 @@ def main() -> None:
                     help="start stage 2 from the pose/shape/scale of an earlier --save-static (skips stage 1; same --n-frames)")
     ap.add_argument("--save-static", default=None, metavar="NPZ",
                     help="write the static stage's betas, scale, orientation, position and pose (the frozen palm for a later fit)")
+    ap.add_argument("--fit-segments", action="store_true",
+                    help="a length factor per finger segment (SegmentModel), fitted in the static stage")
+    ap.add_argument("--seg-limit", type=float, default=0.5, help="--fit-segments stays within 1/(1+L) .. 1+L")
+    ap.add_argument("--w-seglen", type=float, default=1e-5, help="pull of the segment lengths toward MANO's (metres^2 per log^2)")
+    ap.add_argument("--freeze-global", action="store_true",
+                    help="hold shape, scale, orientation and position at their --init-static values: only the finger pose, "
+                         "segment lengths and thumb slide are fitted (palm first, fingers after)")
     ap.add_argument("--thickness-limit", type=float, default=0.25,
                     help="--fit-thickness stays within 1/(1+L) .. 1+L (unbounded it flattens the palm to a third to put the markers outside the skin)")
     ap.add_argument("--fit-thickness", action="store_true",
@@ -1166,11 +1223,14 @@ def main() -> None:
     model, dev = fitter._model, fitter.device
     if args.fit_thickness and not args.fit_scale:
         raise SystemExit("--fit-thickness needs --fit-scale")
+    seg = SegmentModel(model, dev, args.seg_limit) if args.fit_segments else None
+    model = seg or model
     if args.fit_scale:
         model = ScaledModel(model, dev, args.fit_thickness, args.thickness_limit)
     scale_grp = [{"params": [model.log_scale], "lr": 1e-2}] if args.fit_scale else []
     if args.fit_thickness:
         scale_grp.append({"params": [model.log_thick], "lr": 1e-2})
+    seg_grp = [{"params": [seg.log_len], "lr": 5e-3}] if seg else []
     F = np.asarray(model.faces, dtype=np.int64)
 
     jidx = {n: i for i, n in enumerate(MANO_JOINT_NAMES)}
@@ -1276,6 +1336,8 @@ def main() -> None:
                 model.log_scale.fill_(float(np.log(z["scale"])))
             if args.fit_thickness and "thickness" in z:
                 model.log_thick.fill_(float(np.log(z["thickness"])))
+            if seg and "seglen" in z:
+                seg.log_len.copy_(torch.tensor(np.log(z["seglen"]), device=dev))
         n_joint = 0
         print(f"\nstage 1 skipped: starting from {args.init_static}")
     print(f"\nstage 1 -- joint-centre fit ({n_joint} iters)")
@@ -1416,8 +1478,9 @@ def main() -> None:
         # (scale collapsed to 0.49 on P4), and holding the root through the
         # finger phase left the fingers 13-29 mm off their markers.
         root = [{"params": [orient], "lr": 5e-3}, {"params": [tr], "lr": 3e-3}]
-        every = root + scale_grp + [{"params": [betas], "lr": 5e-3}, {"params": [hp], "lr": 2e-2},
-                                    {"params": [slide], "lr": 0.5}]
+        every = ([{"params": [hp], "lr": 2e-2}, {"params": [slide], "lr": 0.5}] + seg_grp if args.freeze_global else
+                 root + scale_grp + [{"params": [betas], "lr": 5e-3}, {"params": [hp], "lr": 2e-2},
+                                     {"params": [slide], "lr": 0.5}] + seg_grp)
         phases = [("palm", palm_cols, root), ("fingers", None, every)] if args.palm_first else [("", None, every)]
         wts = torch.where(palm_cols, max(args.palm_first, 1.0), 1.0).expand(S, -1)
         for tag, cols, groups in phases:
@@ -1448,6 +1511,7 @@ def main() -> None:
                 loss = ((wt * (d ** 2).sum(-1)).sum() / wt.sum()
                         + args.w_inside * (inward ** 2).mean()
                         + args.w_shape * (betas ** 2).sum() + 0.1 * ((slide * 1e-3) ** 2).sum()
+                        + (args.w_seglen * (seg.log_len ** 2).sum() if seg else 0.0)
                         + (args.w_width * width_loss(out.vertices) if width_loss else 0.0)
                         + (args.w_web * web_loss_fn(out.vertices) if web_loss_fn else 0.0)
                         # Shrink toward MANO's mean pose. Without this a full
@@ -1500,9 +1564,16 @@ def main() -> None:
         np.savez(args.save_static, betas=betas.detach().cpu().numpy(), global_orient=orient.detach().cpu().numpy(),
                  transl=tr.detach().cpu().numpy(), hand_pose=hp.detach().cpu().numpy(),
                  scale=np.float32(model.log_scale.exp().item() if args.fit_scale else 1.0),
-                 thickness=np.float32(model.log_thick.clamp(-model.log_lim, model.log_lim).exp().item() if args.fit_thickness else 1.0), names=np.array(names))
+                 thickness=np.float32(model.log_thick.clamp(-model.log_lim, model.log_lim).exp().item() if args.fit_thickness else 1.0),
+                 seglen=(seg.log_len.clamp(-seg.log_lim, seg.log_lim).exp().detach().cpu().numpy() if seg else np.ones(15)).astype(np.float32),
+                 names=np.array(names))
     if args.fit_scale:
         print(f"fitted global scale = {model.log_scale.exp().item():.3f}")
+    if seg:
+        L = seg.log_len.clamp(-seg.log_lim, seg.log_lim).exp().detach().cpu().numpy()
+        print("fitted segment lengths (x MANO): " + ", ".join(
+            f"{f} {L[k[0] - 1]:.2f}/{L[k[1] - 1]:.2f}/{L[k[2] - 1]:.2f}"
+            for f, (k, _) in zip(("Index", "Middle", "Pinky", "Ring", "Thumb"), _FINGER_CHAINS)) + "  (proximal/middle/distal)")
     if args.fit_thickness:
         print(f"fitted palm thickness = {model.log_thick.clamp(-model.log_lim, model.log_lim).exp().item():.3f}  (limit {args.thickness_limit:.2f})")
     if Bmat is not None:                     # thumb joint angles of the static pose (deg)
@@ -1996,6 +2067,7 @@ def main() -> None:
                      transl=full_tr, betas=betas_f.cpu().numpy().astype(np.float32),
                      scale=np.float32(model.log_scale.exp().item() if args.fit_scale else 1.0),
                      thickness=np.float32(model.log_thick.clamp(-model.log_lim, model.log_lim).exp().item() if args.fit_thickness else 1.0),
+                     seglen=(seg.log_len.clamp(-seg.log_lim, seg.log_lim).exp().detach().cpu().numpy() if seg else np.ones(15)).astype(np.float32),
                      frames_fitted=mf.astype(np.int64))
             print(f"saved {args.npz_out}")
 

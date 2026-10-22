@@ -156,3 +156,41 @@ def test_palm_thickness_is_bounded():
     model = fsm.ScaledModel(_stub_model([[1.0] + [0.0] * 15, [0.0] * 16]), "cpu", thickness=True, limit=0.25)
     model.log_thick.data.fill_(float(np.log(0.1)))                    # asks for a paper-thin palm
     assert torch.allclose(model(a=1).vertices[0, 0, 2], torch.tensor(0.01 / 1.25 ), atol=1e-6)
+
+
+class _ChainStub:
+    """One finger chain on a line: vertices at x = 0, 10, 20, 30, 40 mm skinned to bones 0, 1, 2, 3, 3 (joint j on vertex j,
+    tip = vertex 4), plus an off-line palm vertex; zero shape directions."""
+    def __init__(self):
+        self.v_template = torch.tensor([[0., 0, 0], [10., 0, 0], [20., 0, 0], [30., 0, 0], [40., 0, 0], [0., 5, 0]])
+        W = torch.zeros(6, 16)
+        for i, b in enumerate([0, 1, 2, 3, 3, 0]):
+            W[i, b] = 1.0
+        self.lbs_weights = W
+        self.shapedirs = torch.zeros(6, 3, 10)
+        R = torch.zeros(16, 6)
+        for j in range(4):
+            R[j, j] = 1.0
+        R[4:, 5] = 1.0
+        self.J_regressor = R
+
+    def __call__(self, **kw):
+        class O:
+            pass
+        o = O()
+        o.vertices = self.v_template[None].clone()
+        o.betas = kw["betas"]
+        return o
+
+
+def test_segment_lengths_move_only_distal_vertices_and_zero_the_betas(monkeypatch):
+    monkeypatch.setattr(fsm, "_FINGER_CHAINS", [((1, 2, 3), 4)])
+    stub = _ChainStub()
+    model = fsm.SegmentModel(stub, "cpu", limit=1.0)
+    base = model(betas=torch.zeros(1, 10)).vertices[0].clone()
+    assert torch.allclose(base, model.v0)                              # all factors 1 = MANO unchanged
+    model.log_len.data[1] = float(np.log(2.0))                        # bone 2 (joint at 20 mm -> joint at 30 mm) twice as long
+    out = model(betas=torch.ones(1, 10))
+    assert torch.allclose(out.vertices[0, :3], base[:3]) and torch.allclose(out.vertices[0, 5], base[5])   # not distal: untouched
+    assert torch.allclose(out.vertices[0, 3:5], base[3:5] + torch.tensor([10.0, 0, 0]))         # distal: by the bone's whole change
+    assert float(out.betas.abs().sum()) == 0.0                        # betas are applied by the wrapper, zeroed for MANO
