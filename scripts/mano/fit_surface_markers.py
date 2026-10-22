@@ -881,6 +881,8 @@ def main() -> None:
     ap.add_argument("--n-frames", type=int, default=30)
     ap.add_argument("--fit-scale", action="store_true",
                     help="also fit one global hand scale (about the wrist) in the static stages; the movement fit keeps it")
+    ap.add_argument("--attach-radius", type=float, default=0.0, metavar="MM",
+                    help="a --attach vertex may move to the better-fitting dorsal vertex within MM of the pin (0 = fixed)")
     ap.add_argument("--init-static", default=None, metavar="NPZ",
                     help="start stage 2 from the pose/shape/scale of an earlier --save-static (skips stage 1; same --n-frames)")
     ap.add_argument("--save-static", default=None, metavar="NPZ",
@@ -1259,8 +1261,22 @@ def main() -> None:
         # Hand-picked attachments override the search entirely. The automatic
         # one has to infer which bit of skin a marker is taped to; you may
         # simply know, and a pinned vertex is not re-litigated each round.
-        for nm, vtx in pinned.items():
+        nvm = vertex_normals(Vm, F) if args.attach_radius > 0 else None
+        for nm, vtx0 in pinned.items():
             k = names.index(nm)
+            vtx = vtx0
+            if args.attach_radius > 0 and np.isfinite(mkm[k]).all():
+                # a pin is where you expect the marker; the skin it is really taped to can be a few mm away
+                # (people differ), so take the closest dorsal vertex within the radius of the PIN (not of the
+                # previous choice, so it cannot wander), the standoff point above it nearest the marker
+                near = np.flatnonzero(np.linalg.norm(Vm - Vm[vtx0], axis=1) <= args.attach_radius * 1e-3)
+                if dors is not None:
+                    near = near[nvm[near] @ dors[k] >= args.min_dorsal_dot]
+                if len(near):
+                    vtx = int(near[np.linalg.norm(Vm[near] + args.standoff * 1e-3 * nvm[near] - mkm[k], axis=1).argmin()])
+                if rnd == args.icp_rounds - 1 and vtx != vtx0:
+                    print(f"    {nm}: pin {vtx0} -> vertex {vtx} "
+                          f"({np.linalg.norm(Vm[vtx] - Vm[vtx0]) * 1e3:.1f} mm from the pin)")
             fid[k], bary[k] = onehot_attachment(F, vtx)
             # Pinned vertices used to bypass the own-bone weight check, which
             # runs inside allowed_faces -- the pin is written in afterwards.

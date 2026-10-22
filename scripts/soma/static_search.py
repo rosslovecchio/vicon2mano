@@ -45,7 +45,7 @@ sys.path.insert(0, str(CODE / "scripts" / "mano"))            # its helpers too,
 STANDOFF = 3.0
 # refine arms: the best search setting plus these fit flags
 FINGER_MARKERS = [f"{f}{k}" for f in ("Thumb", "Index", "Middle", "Ring", "Pinky") for k in (1, 2, 3)]
-PALM_EXCLUDE = [m for m in FINGER_MARKERS if m not in ("Index1", "Middle1", "Ring1", "Pinky1")]   # keeps Palm1-3 + the MCPs
+PALM_EXCLUDE = [m for m in FINGER_MARKERS if m not in ("Thumb1", "Index1", "Middle1", "Ring1", "Pinky1")]   # keeps Palm1-3, Thumb1 + the MCPs
 PALM_W = 10.0                                                 # --palm-first weight of the palm markers
 ARMS = {"v_best": {}, "v_scale": {"fit_scale": True}, "v_palm": {"palm_first": PALM_W},
         "v_scale_palm": {"fit_scale": True, "palm_first": PALM_W}}
@@ -93,7 +93,8 @@ def fit_cmd(p: str, static: Path, c: dict, rdir: Path) -> list[str]:
     drop = set(c.get("exclude", ())) | (set() if c["palm1_pin"] else {"Palm1"})
     attach, _ = rf.prune_attach(cfg, present - drop, rdir / "attach.json")
     if c.get("pins") and attach is not None:
-        attach.write_text(json.dumps(json.loads(attach.read_text()) | c["pins"]), encoding="utf-8")
+        mine = {k: v for k, v in c["pins"].items() if k in present - drop}        # a participant may lack a marker
+        attach.write_text(json.dumps(json.loads(attach.read_text()) | mine), encoding="utf-8")
     if attach is not None:
         args += ["--attach", str(attach)]
     for k in ("min_dorsal_dot", "w_inside", "icp_rounds", "thumb_dorsal", "min_own_weight", "biomech", "twist_weight",
@@ -106,6 +107,8 @@ def fit_cmd(p: str, static: Path, c: dict, rdir: Path) -> list[str]:
         args += ["--palm-first", str(c["palm_first"])]
     if c.get("exclude"):
         args += ["--exclude", ",".join(c["exclude"])]
+    if c.get("attach_radius"):
+        args += ["--attach-radius", str(c["attach_radius"])]
     if c.get("init_static"):
         args += ["--init-static", str(c["init_static"])]
     if c.get("save_static"):
@@ -322,7 +325,7 @@ def refine(participants):
             fit_one(J, p, static, best["config_id"], best["config"] | extra, OUT / p / arm)
 
 
-PALM_PINNED = ["Palm2", "Palm3", "Index1", "Middle1", "Ring1", "Pinky1"]
+PALM_PINNED = ["Palm2", "Palm3", "Thumb1", "Index1", "Middle1", "Ring1", "Pinky1"]
 
 
 def attached_vertices(p: str, arm: str = "v_scale", names=PALM_PINNED) -> dict:
@@ -360,6 +363,22 @@ def palm(participants, scratch=False):
             fit_one(J, p, static, best["config_id"], c, OUT / p / "palm_scratch")
         fit_one(J, p, static, best["config_id"], c | {"pins": attached_vertices(p, "palm_scratch" if scratch else "v_scale")},
                 OUT / p / ("palm_pinned_scratch" if scratch else "palm_pinned"))
+
+
+def palm_manual(participants, pins_file, radius, arm="palm_manual"):
+    """Palm-only from scratch with hand-picked vertices (``pins_file``: {marker: vertex}, valid for every
+    participant: MANO's topology is shared) that may each move to a better dorsal vertex within ``radius`` mm."""
+    import static_pose_check as spc
+    J = Judge()
+    pins = json.loads(Path(pins_file).read_text())
+    for p in participants:
+        best = best_run(p)
+        if best is None:
+            print(f"{p}: no usable search run, skipped", flush=True)
+            continue
+        c = best["config"] | {"fit_scale": True, "exclude": PALM_EXCLUDE, "save_static": True, "pins": pins,
+                              "palm1_pin": False, "attach_radius": radius}
+        fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c, OUT / p / arm)
 
 
 def palm_free(participants, scratch=False):
@@ -492,6 +511,10 @@ def main():
     ap.add_argument("--n-configs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--palm-manual", default=None, metavar="PINS.json",
+                    help="palm-only from scratch with hand-picked vertices {marker: vertex}, each free to move within --radius")
+    ap.add_argument("--radius", type=float, default=0.0, help="with --palm-manual: mm a pin may move to a better vertex")
+    ap.add_argument("--arm", default=None, help="with --report: tabulate/publish this palm arm (e.g. palm_manual)")
     ap.add_argument("--scratch", action="store_true", help="with --palm/--palm-free: base the pins on a fresh palm-only fit, not the all-marker fit")
     ap.add_argument("--palm-free", action="store_true", help="palm-only refit from the pinned palm fit with the derived pins dropped")
     ap.add_argument("--palm", action="store_true", help="palm-only fit (finger markers excluded), per participant")
@@ -500,7 +523,9 @@ def main():
     a = ap.parse_args()
     if a.report:
         od = Path(a.onedrive) if a.onedrive else None
-        return palm_report(od, ("palm_free" if a.palm_free else "palm_pinned") + ("_scratch" if a.scratch else "")) if a.palm or a.palm_free else refine_report(od) if a.refine else report(od)
+        return palm_report(od, a.arm or ("palm_free" if a.palm_free else "palm_pinned") + ("_scratch" if a.scratch else "")) if a.palm or a.palm_free or a.arm else refine_report(od) if a.refine else report(od)
+    if a.palm_manual:
+        return palm_manual([p for p in a.participants.split(",") if p], a.palm_manual, a.radius)
     if a.palm_free:
         return palm_free([p for p in a.participants.split(",") if p], a.scratch)
     if a.palm:
