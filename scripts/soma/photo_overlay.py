@@ -157,6 +157,16 @@ def ray_hits(V, F, cam, mean, f, size, pixels) -> list[tuple[float, int, np.ndar
     return out
 
 
+def nearest_to_ray(V, cam, mean, f, size, pixel) -> tuple[int, float]:
+    """Vertex nearest the camera ray through a pixel (for a ray that grazes past the mesh edge) and its distance, mm."""
+    R = Rotation.from_rotvec(cam[:3]).as_matrix()
+    d = R.T @ np.array([(pixel[0] - size[0] / 2) / f, (pixel[1] - size[1] / 2) / f, 1.0])
+    d /= np.linalg.norm(d)
+    rel = V - (mean - R.T @ cam[3:6])
+    perp = np.linalg.norm(rel - np.outer(rel @ d, d), axis=1)
+    return int(perp.argmin()), float(perp.min())
+
+
 def skin_mask(im: Image.Image) -> np.ndarray:
     """Pink skin (not the yellower wood or the dark tape) with the marker patches closed."""
     a = np.asarray(im.convert("RGB")).astype(float)
@@ -312,7 +322,8 @@ def main():
         pins, rows = {}, []
         for k, h in zip(mk, hits):
             if h is None:
-                print(f"  {k}: the ray misses the mesh")
+                pins[k], off = nearest_to_ray(view["V"], cam, mean, f, im.size, px[k])
+                rows.append(f"  {k:8s} the ray misses the mesh: nearest vertex {pins[k]} ({off:.1f} mm off the ray)")
                 continue
             _, fi, bary = h
             pins[k] = int(view["F"][fi][int(bary.argmax())])
