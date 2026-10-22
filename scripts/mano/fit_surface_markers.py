@@ -881,6 +881,8 @@ def main() -> None:
     ap.add_argument("--n-frames", type=int, default=30)
     ap.add_argument("--fit-scale", action="store_true",
                     help="also fit one global hand scale (about the wrist) in the static stages; the movement fit keeps it")
+    ap.add_argument("--save-static", default=None, metavar="NPZ",
+                    help="write the static stage's betas, scale, orientation, position and pose (the frozen palm for a later fit)")
     ap.add_argument("--palm-first", type=float, default=0.0, metavar="W",
                     help="each stage-2 round first places the hand rigidly on Palm1-3 and the finger MCP markers, "
                          "then fits everything with those markers weighted W (0 = off)")
@@ -1342,6 +1344,11 @@ def main() -> None:
         print("thumb slide (mm along segment): "
               + ", ".join(f"{n} {v:+.1f}" for n, v in zip(names, slide.tolist()) if n in _THUMB_SEG))
     print(f"\ncalibrated betas = {betas.detach().cpu().numpy().round(3)}")
+    if args.save_static:
+        Path(args.save_static).parent.mkdir(parents=True, exist_ok=True)
+        np.savez(args.save_static, betas=betas.detach().cpu().numpy(), global_orient=orient.detach().cpu().numpy(),
+                 transl=tr.detach().cpu().numpy(), hand_pose=hp.detach().cpu().numpy(),
+                 scale=np.float32(model.log_scale.exp().item() if args.fit_scale else 1.0), names=np.array(names))
     if args.fit_scale:
         print(f"fitted global scale = {model.log_scale.exp().item():.3f}")
     if Bmat is not None:                     # thumb joint angles of the static pose (deg)

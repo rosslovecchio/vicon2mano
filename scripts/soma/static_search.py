@@ -19,6 +19,8 @@ score = 10 * (markers absent from the view + not dorsal + inside) + mean |distan
     python scripts/soma/static_search.py --report --onedrive <dir>
     python scripts/soma/static_search.py --refine --participants P3,P4         # best setting +/- scale, palm-first
     python scripts/soma/static_search.py --refine --report --onedrive <dir>
+    python scripts/soma/static_search.py --palm --participants P3,P4           # palm markers only, saves static_params.npz
+    python scripts/soma/static_search.py --palm --report --onedrive <dir>
 """
 
 from __future__ import annotations
@@ -42,6 +44,8 @@ CODE = REPO.parent / "vicon2mano_frozen"                    # frozen checkout th
 sys.path.insert(0, str(CODE / "scripts" / "mano"))            # its helpers too, not the live tree's
 STANDOFF = 3.0
 # refine arms: the best search setting plus these fit flags
+FINGER_MARKERS = [f"{f}{k}" for f in ("Thumb", "Index", "Middle", "Ring", "Pinky") for k in (1, 2, 3)]
+PALM_EXCLUDE = [m for m in FINGER_MARKERS if m not in ("Index1", "Middle1", "Ring1", "Pinky1")]   # keeps Palm1-3 + the MCPs
 PALM_W = 10.0                                                 # --palm-first weight of the palm markers
 ARMS = {"v_best": {}, "v_scale": {"fit_scale": True}, "v_palm": {"palm_first": PALM_W},
         "v_scale_palm": {"fit_scale": True, "palm_first": PALM_W}}
@@ -86,7 +90,8 @@ def fit_cmd(p: str, static: Path, c: dict, rdir: Path) -> list[str]:
     cfg = CODE / "configs/surface_fit" / (f"{p}.json" if p in ("P1", "P2") else "P10.json")
     args = rf.fit_args_from_config(cfg)
     present = rf.present_markers(static)
-    attach, _ = rf.prune_attach(cfg, present - (set() if c["palm1_pin"] else {"Palm1"}), rdir / "attach.json")
+    drop = set(c.get("exclude", ())) | (set() if c["palm1_pin"] else {"Palm1"})
+    attach, _ = rf.prune_attach(cfg, present - drop, rdir / "attach.json")
     if attach is not None:
         args += ["--attach", str(attach)]
     for k in ("min_dorsal_dot", "w_inside", "icp_rounds", "thumb_dorsal", "min_own_weight", "biomech", "twist_weight",
@@ -97,6 +102,10 @@ def fit_cmd(p: str, static: Path, c: dict, rdir: Path) -> list[str]:
             args.append("--" + k.replace("_", "-"))
     if c.get("palm_first"):
         args += ["--palm-first", str(c["palm_first"])]
+    if c.get("exclude"):
+        args += ["--exclude", ",".join(c["exclude"])]
+    if c.get("save_static"):
+        args += ["--save-static", str(rdir / "static_params.npz")]
     from vicon2mano.core.dataset import DATA_ROOT
     return [sys.executable, "-W", "ignore", "scripts/mano/fit_surface_markers.py",
             "--mano-dir", str(DATA_ROOT / "mano_v1_2" / "models"), "--static", str(static),
@@ -309,6 +318,43 @@ def refine(participants):
             fit_one(J, p, static, best["config_id"], best["config"] | extra, OUT / p / arm)
 
 
+def palm(participants):
+    """Step 1 of palm-first: each participant's best setting + --fit-scale on the palm markers alone."""
+    import static_pose_check as spc
+    J = Judge()
+    for p in participants:
+        best = best_run(p)
+        if best is None:
+            print(f"{p}: no usable search run, skipped", flush=True)
+            continue
+        c = best["config"] | {"fit_scale": True, "exclude": PALM_EXCLUDE, "save_static": True}
+        fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c, OUT / p / "palm")
+
+
+def palm_report(onedrive: Path | None):
+    """Table + views of the palm-only fits, with the full fit's scale beside it."""
+    import re
+    import shutil
+    key = lambda p: int("".join(ch for ch in p if ch.isdigit()))
+    scale = lambda log: (re.findall(r"fitted global scale = ([0-9.]+)", log.read_text(errors="replace")) or ["-"])[-1] if log.exists() else "-"
+    lines = ["# Palm-only fit (Palm1-3 + the four MCP markers), best search setting + --fit-scale", "",
+             "Per palm marker: dorsal yes/NO, signed distance from the skin in mm (negative = inside). "
+             "Full-fit scale = the same setting fitted on all markers (v_scale).", "",
+             "| P | scale (palm only) | scale (full fit) | palm markers: dorsal / distance mm |", "|---|---|---|---|"]
+    for p in sorted((d.name for d in OUT.iterdir() if (d / "palm" / "diag.json").exists()), key=key):
+        r = json.loads((OUT / p / "palm" / "diag.json").read_text())
+        mk = ", ".join(f"{m['marker']} {'yes' if m['dorsal'] else 'NO'} / {m['distance_mm']}" for m in r.get("markers", []) if not m.get("absent"))             or f"failed (rc={r.get('returncode')})"
+        lines.append(f"| {p} | {scale(OUT / p / 'palm' / 'fit.log')} | {scale(OUT / p / 'v_scale' / 'fit.log')} | {mk} |")
+        if onedrive and (OUT / p / "palm" / "static.html").exists():
+            (onedrive / p).mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(OUT / p / "palm" / "static.html", onedrive / p / f"{p}_palm.html")
+            (onedrive / p / f"{p}_palm_diagnostics.json").write_text(json.dumps(r, indent=1))
+    text = "\n".join(lines) + "\n"
+    print(text)
+    for d in ([OUT] + ([onedrive] if onedrive else [])):
+        (d / "README_palm.md").write_text(text, encoding="utf-8")
+
+
 def refine_report(onedrive: Path | None):
     import re
     import shutil
@@ -395,12 +441,15 @@ def main():
     ap.add_argument("--n-configs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--palm", action="store_true", help="palm-only fit (finger markers excluded), per participant")
     ap.add_argument("--refine", action="store_true", help="refit each participant's best setting in every arm of ARMS")
     ap.add_argument("--onedrive", default=None, help="with --report: copy production/best views and tables here")
     a = ap.parse_args()
     if a.report:
         od = Path(a.onedrive) if a.onedrive else None
-        return refine_report(od) if a.refine else report(od)
+        return palm_report(od) if a.palm else refine_report(od) if a.refine else report(od)
+    if a.palm:
+        return palm([p for p in a.participants.split(",") if p])
     if a.refine:
         return refine([p for p in a.participants.split(",") if p])
     run([p for p in a.participants.split(",") if p], a.n_configs, a.seed)
