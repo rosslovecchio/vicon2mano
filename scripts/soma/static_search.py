@@ -343,8 +343,10 @@ def attached_vertices(p: str, arm: str = "v_scale", names=PALM_PINNED) -> dict:
     return out
 
 
-def palm(participants):
-    """Step 1 of palm-first: each participant's best setting + --fit-scale on the palm markers alone."""
+def palm(participants, scratch=False):
+    """Step 1 of palm-first: each participant's best setting + --fit-scale on the palm markers alone, pinned to the
+    all-marker fit's attachments; ``scratch``: pinned instead to the attachments of a fresh palm-only fit (arm
+    palm_scratch), written as palm_pinned_scratch."""
     import static_pose_check as spc
     J = Judge()
     for p in participants:
@@ -352,24 +354,27 @@ def palm(participants):
         if best is None:
             print(f"{p}: no usable search run, skipped", flush=True)
             continue
-        c = best["config"] | {"fit_scale": True, "exclude": PALM_EXCLUDE, "save_static": True,
-                              "pins": attached_vertices(p)}
-        fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c, OUT / p / "palm_pinned")
+        c = best["config"] | {"fit_scale": True, "exclude": PALM_EXCLUDE, "save_static": True}
+        static = spc.sources(p)[p][0]
+        if scratch:
+            fit_one(J, p, static, best["config_id"], c, OUT / p / "palm_scratch")
+        fit_one(J, p, static, best["config_id"], c | {"pins": attached_vertices(p, "palm_scratch" if scratch else "v_scale")},
+                OUT / p / ("palm_pinned_scratch" if scratch else "palm_pinned"))
 
 
-def palm_free(participants):
+def palm_free(participants, scratch=False):
     """Palm-only again from the pinned palm fit's pose, with the derived pins dropped: each palm marker
     re-attaches to the nearest allowed face of that mesh (Palm1 included: nothing is pinned)."""
     import static_pose_check as spc
     J = Judge()
     for p in participants:
-        best, start = best_run(p), OUT / p / "palm_pinned" / "static_params.npz"
+        best, start = best_run(p), OUT / p / ("palm_pinned_scratch" if scratch else "palm_pinned") / "static_params.npz"
         if best is None or not start.exists():
             print(f"{p}: no pinned palm fit to start from, skipped", flush=True)
             continue
         c = best["config"] | {"fit_scale": True, "exclude": PALM_EXCLUDE, "save_static": True, "init_static": str(start),
                               "palm1_pin": False}
-        fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c, OUT / p / "palm_free")
+        fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c, OUT / p / ("palm_free_scratch" if scratch else "palm_free"))
 
 
 def palm_report(onedrive: Path | None, arm: str = "palm_pinned"):
@@ -381,14 +386,14 @@ def palm_report(onedrive: Path | None, arm: str = "palm_pinned"):
     lines = ["# Palm-only fit (Palm1-3 + the four MCP markers), best search setting + --fit-scale", "",
              "Per palm marker: dorsal yes/NO, signed distance from the skin in mm (negative = inside). "
              "Full-fit scale = the same setting fitted on all markers (v_scale).", "",
-             "| P | scale (palm only) | scale (full fit) | palm markers: dorsal / distance mm |" + (" attachment moved from the pin, mm |" if arm == "palm_free" else ""),
-             "|---|---|---|---|" + ("---|" if arm == "palm_free" else "")]
+             "| P | scale (palm only) | scale (full fit) | palm markers: dorsal / distance mm |" + (" attachment moved from the pin, mm |" if arm.startswith("palm_free") else ""),
+             "|---|---|---|---|" + ("---|" if arm.startswith("palm_free") else "")]
     for p in sorted((d.name for d in OUT.iterdir() if (d / arm / "diag.json").exists()), key=key):
         r = json.loads((OUT / p / arm / "diag.json").read_text())
         mk = ", ".join(f"{m['marker']} {'yes' if m['dorsal'] else 'NO'} / {m['distance_mm']}" for m in r.get("markers", []) if not m.get("absent"))             or f"failed (rc={r.get('returncode')})"
         moved = ""
-        if arm == "palm_free" and (OUT / p / arm / "static.html").exists():      # where each marker's attachment went, mm on the new mesh
-            new, old, V = attached_vertices(p, arm), attached_vertices(p, "palm_pinned"), read_view(OUT / p / arm / "static.html")["V"]
+        if arm.startswith("palm_free") and (OUT / p / arm / "static.html").exists():      # where each marker's attachment went, mm on the new mesh
+            new, old, V = attached_vertices(p, arm), attached_vertices(p, arm.replace("free", "pinned")), read_view(OUT / p / arm / "static.html")["V"]
             moved = ", ".join(f"{n} {np.linalg.norm(V[new[n]] - V[old[n]]):.1f}" for n in new if n in old)
         lines.append(f"| {p} | {scale(OUT / p / arm / 'fit.log')} | {scale(OUT / p / 'v_scale' / 'fit.log')} | {mk} |" + (f" {moved} |" if moved else ""))
         if onedrive and (OUT / p / arm / "static.html").exists():
@@ -487,6 +492,7 @@ def main():
     ap.add_argument("--n-configs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--scratch", action="store_true", help="with --palm/--palm-free: base the pins on a fresh palm-only fit, not the all-marker fit")
     ap.add_argument("--palm-free", action="store_true", help="palm-only refit from the pinned palm fit with the derived pins dropped")
     ap.add_argument("--palm", action="store_true", help="palm-only fit (finger markers excluded), per participant")
     ap.add_argument("--refine", action="store_true", help="refit each participant's best setting in every arm of ARMS")
@@ -494,11 +500,11 @@ def main():
     a = ap.parse_args()
     if a.report:
         od = Path(a.onedrive) if a.onedrive else None
-        return palm_report(od, "palm_free" if a.palm_free else "palm_pinned") if a.palm or a.palm_free else refine_report(od) if a.refine else report(od)
+        return palm_report(od, ("palm_free" if a.palm_free else "palm_pinned") + ("_scratch" if a.scratch else "")) if a.palm or a.palm_free else refine_report(od) if a.refine else report(od)
     if a.palm_free:
-        return palm_free([p for p in a.participants.split(",") if p])
+        return palm_free([p for p in a.participants.split(",") if p], a.scratch)
     if a.palm:
-        return palm([p for p in a.participants.split(",") if p])
+        return palm([p for p in a.participants.split(",") if p], a.scratch)
     if a.refine:
         return refine([p for p in a.participants.split(",") if p])
     run([p for p in a.participants.split(",") if p], a.n_configs, a.seed)
