@@ -411,8 +411,8 @@ def fingers(participants, palm_arm, radius=6.0, arm="fingers", finger_pins=None,
             name = arm if f is None or i == len(one_by_one) - 1 else f"{arm}_{f}"
             if f:
                 todo = [g.capitalize() + "3" for g in one_by_one[i + 1:]]
-                c = c | {"only_finger": f, "exclude": sorted(set(c.get("exclude", ())) | set(todo))}
-            fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c | {"init_static": str(start)}, OUT / p / name)
+                step = c | {"only_finger": f, "exclude": sorted(set(c.get("exclude", ())) | set(todo))}
+            fit_one(J, p, spc.sources(p)[p][0], best["config_id"], (step if f else c) | {"init_static": str(start)}, OUT / p / name)
             start = OUT / p / name / "static_params.npz"
 
 
