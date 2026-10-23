@@ -24,6 +24,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
+from pillow_heif import register_heif_opener
 from scipy import ndimage
 from scipy.optimize import least_squares, linear_sum_assignment
 from scipy.spatial.transform import Rotation
@@ -35,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 RIGID = ["Palm1", "Palm2", "Palm3", "Thumb1", "Index1", "Middle1", "Ring1", "Pinky1"]
 HAND = RIGID + [f"{f}{k}" for f in ("Thumb", "Index", "Middle", "Ring", "Pinky") for k in (2, 3)]
 PHOTOS = "soma_transfer/photos"
+register_heif_opener()                                    # the iPhone photos of P12-P17 are HEIC
 # the crotch between adjacent fingers on the MANO mesh (hand-picked vertices; MANO's topology is shared by everyone)
 WEB_VERTICES = json.loads((REPO / "configs/surface_fit/web_vertices.json").read_text())
 
@@ -271,7 +273,7 @@ def main():
     a = ap.parse_args()
     p = a.participant
 
-    photo = Path(a.photo) if a.photo else next(iter(sorted((Path(DATA_ROOT) / PHOTOS / p).glob("*.[jJpP][pPnN][gGeE]*"))), None)
+    photo = Path(a.photo) if a.photo else next((f for f in sorted((Path(DATA_ROOT) / PHOTOS / p).iterdir()) if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".heic")), None)
     if photo is None:
         raise SystemExit(f"no photo for {p}: put one in {Path(DATA_ROOT) / PHOTOS / p}")
     im = Image.open(photo)
