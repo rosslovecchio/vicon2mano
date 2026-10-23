@@ -1037,8 +1037,8 @@ def main() -> None:
     ap.add_argument("--seg-limit", type=float, default=0.5, help="--fit-segments stays within 1/(1+L) .. 1+L")
     ap.add_argument("--w-seglen", type=float, default=1e-5, help="pull of the segment lengths toward MANO's (metres^2 per log^2)")
     ap.add_argument("--hold-lengths", action="store_true",
-                    help="with --fit-segments: hold the proximal and middle segment lengths at their --init-static values "
-                         "(only the distal ones are fitted)")
+                    help="with --fit-segments: hold the proximal segment lengths at their --init-static values "
+                         "(the middle and distal ones are fitted)")
     ap.add_argument("--freeze-global", action="store_true",
                     help="hold shape, scale, orientation and position at their --init-static values: only the finger pose, "
                          "segment lengths and thumb slide are fitted (palm first, fingers after)")
@@ -1235,7 +1235,7 @@ def main() -> None:
         scale_grp.append({"params": [model.log_thick], "lr": 1e-2})
     seg_grp = [{"params": [segm.log_len], "lr": 5e-3}] if segm else []
     if segm and args.hold_lengths:
-        segm.log_len.register_hook(lambda g: g * (torch.arange(15, device=g.device) % 3 == 2))     # chains run proximal, middle, distal
+        segm.log_len.register_hook(lambda g: g * (torch.arange(15, device=g.device) % 3 > 0))      # chains run proximal, middle, distal
     F = np.asarray(model.faces, dtype=np.int64)
 
     jidx = {n: i for i, n in enumerate(MANO_JOINT_NAMES)}
