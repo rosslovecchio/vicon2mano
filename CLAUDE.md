@@ -19,6 +19,21 @@ own page rather than one ever-growing log.
 .viconvenv/Scripts/python.exe -m pytest tests/ -q     # 306 tests (6 skipped)
 ```
 
+## Code conventions (read before writing code)
+
+- **Keep the code short and tidy — this is a top-priority goal.** Prefer
+  deleting or simplifying over adding; no dead code, speculative options, or
+  duplicated logic.
+- **Reuse before writing.** [docs/API_REFERENCE.md](docs/API_REFERENCE.md)
+  indexes every public function and class (signature + one-line purpose).
+  Search it (and `core/`) first; extend an existing function rather than
+  writing a near-duplicate. Shared code goes in `core/`, not in a strategy or script.
+- **Keep the reference current.** After adding, renaming, or removing a public
+  function/class, regenerate it:
+  `.viconvenv/Scripts/python.exe scripts/shared/gen_api_reference.py`.
+  Give every new public function a one-line docstring — that line is what the
+  reference shows.
+
 ## Layout
 
 Code is organised by **which strategy it belongs to**. Anything used by more

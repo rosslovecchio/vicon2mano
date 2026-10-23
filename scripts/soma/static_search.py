@@ -100,7 +100,7 @@ def fit_cmd(p: str, static: Path, c: dict, rdir: Path) -> list[str]:
     for k in ("min_dorsal_dot", "w_inside", "icp_rounds", "thumb_dorsal", "min_own_weight", "biomech", "twist_weight",
               "w_pose", "n_frames", "iters_surface"):
         args += ["--" + k.replace("_", "-"), str(c[k])]
-    for k in ("complete_frames", "fit_scale", "fit_thickness", "fit_segments", "freeze_global", "hold_lengths"):
+    for k in ("complete_frames", "fit_scale", "fit_thickness", "fit_segments", "freeze_global", "hold_lengths", "torsion_only"):
         if c.get(k):
             args.append("--" + k.replace("_", "-"))
     if c.get("palm_first"):

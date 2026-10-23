@@ -164,6 +164,28 @@
             ]
         },
 
+        {
+            "name": "MANO: fit surface markers (P10 static)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scripts/mano/fit_surface_markers.py",
+            "python": "${workspaceFolder}/.viconvenv/Scripts/python.exe",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false,
+            "args": [
+                // P10's static is the clean one (see CLAUDE.md); add e.g.
+                // --palm-first / --fit-scale / --movement here as needed.
+                "--static",
+                "C:/Users/RL000009/OneDrive - Vrije Universiteit Brussel/A-Skills/data_June25/P10/static_trial.csv",
+                "--out",
+                "results/mano/P10_Trial2_handsonly/eval/static_fit_surface.html",
+                // ../clean_kinematics (the script default) is absent here
+                "--mano-dir",
+                "C:/Users/RL000009/OneDrive - Vrije Universiteit Brussel/A-Skills/data_June25/mano_v1_2/models"
+            ]
+        },
+
         // --- pre-existing configs, fixed to the Windows venv and the
         // post-reorganisation script paths (scripts/deep/...) ---
 
