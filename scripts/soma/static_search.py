@@ -109,7 +109,7 @@ def fit_cmd(p: str, static: Path, c: dict, rdir: Path) -> list[str]:
         args += ["--exclude", ",".join(c["exclude"])]
     if c.get("palm_widths"):
         args += ["--palm-widths", str(c["palm_widths"]), "--w-width", str(c.get("w_width", 1.0)), "--w-web", str(c.get("w_web", 1.0))]
-    for k in ("seg_limit", "w_seglen"):
+    for k in ("seg_limit", "w_seglen", "only_finger"):
         if c.get(k) is not None:
             args += ["--" + k.replace("_", "-"), str(c[k])]
     if c.get("attach_radius"):
@@ -391,21 +391,29 @@ def palm_manual(participants, pins_file, radius, arm="palm_manual", widths=None,
 PALM_MARKERS = ["Palm1", "Palm2", "Palm3", "Thumb1", "Index1", "Middle1", "Ring1", "Pinky1"]
 
 
-def fingers(participants, palm_arm, radius=6.0, arm="fingers", finger_pins=None, overrides=None):
+def fingers(participants, palm_arm, radius=6.0, arm="fingers", finger_pins=None, overrides=None, start_arm=None, one_by_one=()):
     """Step 2 of palm-first: the markers of every finger on the frozen palm of ``palm_arm`` (its shape, scale,
     orientation, position and its palm attachments held): finger pose and a length per finger segment are fitted.
-    The photo is not used here: the fingers' pose differs between photo and static."""
+    The photo is not used here: the fingers' pose differs between photo and static. ``start_arm`` starts from another
+    arm's fit instead. ``one_by_one`` (finger names) fits the fingers in that order, each from the last one's result,
+    with only its own pose and lengths free and the markers 3 of the fingers not yet reached left out."""
     import static_pose_check as spc
     J = Judge()
     for p in participants:
-        best, start = best_run(p), OUT / p / palm_arm / "static_params.npz"
+        best, start = best_run(p), OUT / p / (start_arm or palm_arm) / "static_params.npz"
         if best is None or not start.exists():
             print(f"{p}: no palm fit {palm_arm} to start from, skipped", flush=True)
             continue
         c = best["config"] | {"fit_scale": True, "fit_segments": True, "freeze_global": True, "save_static": True,
-                              "init_static": str(start), "palm1_pin": False, "attach_radius": radius,
+                              "palm1_pin": False, "attach_radius": radius,
                               "pins": attached_vertices(p, palm_arm, PALM_MARKERS) | (json.loads(Path(finger_pins).read_text()) if finger_pins else {})} | (overrides or {})
-        fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c, OUT / p / arm)
+        for i, f in enumerate(one_by_one or [None]):
+            name = arm if f is None or i == len(one_by_one) - 1 else f"{arm}_{f}"
+            if f:
+                todo = [g.capitalize() + "3" for g in one_by_one[i + 1:]]
+                c = c | {"only_finger": f, "exclude": sorted(set(c.get("exclude", ())) | set(todo))}
+            fit_one(J, p, spc.sources(p)[p][0], best["config_id"], c | {"init_static": str(start)}, OUT / p / name)
+            start = OUT / p / name / "static_params.npz"
 
 
 def palm_free(participants, scratch=False):
@@ -541,6 +549,8 @@ def main():
     ap.add_argument("--fingers", action="store_true", help="step 2: finger pose + segment lengths on the frozen palm of --palm-arm")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="with --fingers: override a fit setting, e.g. seg_limit=1.0 biomech=1 w_pose=0 w_seglen=1e-6 (repeatable)")
+    ap.add_argument("--start-arm", default=None, help="with --fingers: start from this arm's fit instead of --palm-arm's")
+    ap.add_argument("--one-by-one", default="", help="with --fingers: fit these fingers in this order, e.g. index,middle,ring,pinky,thumb")
     ap.add_argument("--finger-pins", default=None, help="with --fingers: hand-picked {marker: vertex} for the finger markers")
     ap.add_argument("--palm-arm", default="palm_manual_webs_photo_v2", help="with --fingers: the accepted palm fit's arm")
     ap.add_argument("--palm-manual", default=None, metavar="PINS.json",
@@ -563,7 +573,7 @@ def main():
         return palm_report(od, a.arm or ("palm_free" if a.palm_free else "palm_pinned") + ("_scratch" if a.scratch else "")) if a.palm or a.palm_free or a.arm else refine_report(od) if a.refine else report(od)
     if a.fingers:
         return fingers([p for p in a.participants.split(",") if p], a.palm_arm, a.radius if a.radius is not None else 6.0, a.arm or "fingers", a.finger_pins,
-                       {k: json.loads(v) for k, v in (kv.split("=", 1) for kv in a.set)})
+                       {k: json.loads(v) for k, v in (kv.split("=", 1) for kv in a.set)}, a.start_arm, [f for f in a.one_by_one.split(",") if f])
     if a.palm_manual:
         return palm_manual([p for p in a.participants.split(",") if p], a.palm_manual, a.radius, a.arm or "palm_manual", a.palm_widths, a.w_width, a.w_web, a.fit_thickness, a.init_arm)
     if a.palm_free:

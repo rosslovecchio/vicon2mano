@@ -1039,6 +1039,9 @@ def main() -> None:
     ap.add_argument("--hold-lengths", action="store_true",
                     help="with --fit-segments: hold the proximal segment lengths at their --init-static values "
                          "(the middle and distal ones are fitted)")
+    ap.add_argument("--only-finger", choices=["index", "middle", "pinky", "ring", "thumb"], default=None,
+                    help="with --fit-segments and --no-pca/--biomech: only this finger's pose and lengths are fitted, "
+                         "the other fingers keep their --init-static values")
     ap.add_argument("--freeze-global", action="store_true",
                     help="hold shape, scale, orientation and position at their --init-static values: only the finger pose, "
                          "segment lengths and thumb slide are fitted (palm first, fingers after)")
@@ -1316,6 +1319,12 @@ def main() -> None:
     betas = nn.Parameter(torch.zeros(10, device=dev))
     orient = nn.Parameter(torch.tensor(init_go, device=dev))
     hp = nn.Parameter(torch.zeros(S, fitter._pose_dim(), device=dev))
+    if args.only_finger:                                         # joints and lengths run index, middle, pinky, ring, thumb
+        fi = ["index", "middle", "pinky", "ring", "thumb"].index(args.only_finger)
+        mine = lambda n: (torch.arange(n, device=dev) // (n // 5)) == fi
+        hp.register_hook(lambda g: g * mine(g.shape[-1]))
+        if segm:
+            segm.log_len.register_hook(lambda g: g * mine(15))
     tr = nn.Parameter(torch.tensor(init_tr, device=dev))
 
     def fwd(verts=True):
