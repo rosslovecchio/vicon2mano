@@ -4,7 +4,8 @@
 Starts from a static_search arm's static_params.npz (or an earlier output of this script, to polish it) and
 alternates (a) choosing each marker's vertex among the dorsal vertices of the same bone within --radius mm of its
 pin (for markers 2 and 3 of every digit, only vertices on the segment's dorsal midline, within --axis-tol mm of
-the plane through its bone axis and dorsal direction) and (b) Adam on pose, shape, scale and placement. The loss
+the plane through its bone axis and dorsal direction; with --along, only the pin or its mesh neighbour straight
+up or down the segment) and (b) Adam on pose, shape, scale and placement. The loss
 holds each marker 3 mm out along its vertex normal, penalises distances above --cap, markers inside the skin or above non-dorsal skin, and joints outside the
 anatomical limits (with --margin inside them, finger twist within --twist, PIP/DIP abduction within --hinge, DIP
 flexion at most 2/3 of the PIP's plus --couple). No segment lengths, so the Judge's pose recovery reproduces the
@@ -86,6 +87,8 @@ def main():
     ap.add_argument("--twist", type=float, default=4.0, help="deg: finger twist the fit may use (before --margin)")
     ap.add_argument("--margin", type=float, default=3.0, help="deg kept inside every limit by the fit")
     ap.add_argument("--hinge", type=float, default=3.0, help="deg: PIP/DIP abduction allowed")
+    ap.add_argument("--along", action="store_true",
+                    help="markers 2 and 3 keep their pin or move to the neighbouring vertex straight up or down the segment")
     ap.add_argument("--axis-tol", type=float, default=2.0,
                     help="mm: markers 2 and 3 attach only to vertices this close to their segment's dorsal midline")
     ap.add_argument("--couple", type=float, default=10.0, help="deg: DIP flexion allowed beyond 2/3 of the PIP's")
@@ -124,6 +127,19 @@ def main():
     child = {b: end for (j1, j2, j3), tip in fsm._FINGER_CHAINS                # bone -> its far end: joint or fingertip vertex
              for b, end in ((j1, ("j", j2)), (j2, ("j", j3)), (j3, ("v", tip)))}
     on_axis = [n[-1] in "23" and not n.startswith("Palm") for n in mk]
+
+    def along(s_, V, Jm):
+        """Pin ``s_`` plus its mesh neighbours most nearly straight distal and proximal along its bone."""
+        nb = torch.unique(F[(F == s_).any(1)])
+        nb = nb[nb != s_]
+        b = int(bone[s_])
+        kind, e = child[b]
+        u = (Jm[e] if kind == "j" else V[e]) - Jm[b]
+        u = u / u.norm()
+        rel = V[nb] - V[s_]
+        ax = rel @ u
+        side = (rel - ax[:, None] * u).norm(dim=-1)
+        return torch.stack([s_, nb[(ax - 2 * side).argmax()], nb[(-ax - 2 * side).argmax()]])
 
     def midline(c, V, Jm, d):
         """|Distance| (mm) of vertices ``c`` (one bone) from the plane through that bone's axis and dorsal ``d``."""
@@ -169,6 +185,10 @@ def main():
     fixed = set(a.fix.split(","))
     cand = [torch.nonzero((bone == bone[s]) & ((V0 - V0[s]).norm(dim=-1) * 1000 <= (0 if n in fixed else a.radius))).flatten()
             for s, n in zip(pin, mk)]
+    if a.along:
+        with torch.no_grad():
+            o0 = fwd()[0]
+        cand = [along(s, V0, o0.joints[0]) if on_axis[i] else c for i, (s, c) in enumerate(zip(pin, cand))]
     att = torch.tensor(z["att"], device=dev) if "att" in z and list(z["names"]) == mk else pin.clone()
     params = [P["hp"], P["betas"], sm.log_scale, P["go"], P["tr"]]
     for r in range(a.rounds):
@@ -178,7 +198,7 @@ def main():
             for i, c in enumerate(cand):
                 ok = (N[c] @ dors[i]) > a.min_dorsal
                 c = c[ok] if ok.any() else c
-                if on_axis[i]:                                                 # dorsal midline only
+                if on_axis[i] and not a.along:                                 # dorsal midline only
                     off = midline(c, V, o.joints[0], dors[i])
                     c = c[off <= a.axis_tol] if (off <= a.axis_tol).any() else c[off.argsort()[:3]]
                 e = (M[i] - (V[c] + a.standoff * 1e-3 * N[c])).norm(dim=-1) + torch.relu(-((M[i] - V[c]) * N[c]).sum(-1))
