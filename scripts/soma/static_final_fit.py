@@ -3,8 +3,9 @@
 
 Starts from a static_search arm's static_params.npz (or an earlier output of this script, to polish it) and
 alternates (a) choosing each marker's vertex among the dorsal vertices of the same bone within --radius mm of its
-pin and (b) Adam on pose, shape, scale and placement. The loss holds each marker 3 mm out along its vertex normal,
-penalises distances above --cap, markers inside the skin or above non-dorsal skin, and joints outside the
+pin (for markers 2 and 3 of every digit, only vertices on the segment's dorsal midline, within --axis-tol mm of
+the plane through its bone axis and dorsal direction) and (b) Adam on pose, shape, scale and placement. The loss
+holds each marker 3 mm out along its vertex normal, penalises distances above --cap, markers inside the skin or above non-dorsal skin, and joints outside the
 anatomical limits (with --margin inside them, finger twist within --twist, PIP/DIP abduction within --hinge, DIP
 flexion at most 2/3 of the PIP's plus --couple). No segment lengths, so the Judge's pose recovery reproduces the
 mesh and its pose check agrees with the fit's own angles.
@@ -84,7 +85,9 @@ def main():
     ap.add_argument("--w-nat", type=float, default=1e-2)
     ap.add_argument("--twist", type=float, default=4.0, help="deg: finger twist the fit may use (before --margin)")
     ap.add_argument("--margin", type=float, default=3.0, help="deg kept inside every limit by the fit")
-    ap.add_argument("--hinge", type=float, default=2.0, help="deg: PIP/DIP abduction allowed")
+    ap.add_argument("--hinge", type=float, default=3.0, help="deg: PIP/DIP abduction allowed")
+    ap.add_argument("--axis-tol", type=float, default=2.0,
+                    help="mm: markers 2 and 3 attach only to vertices this close to their segment's dorsal midline")
     ap.add_argument("--couple", type=float, default=10.0, help="deg: DIP flexion allowed beyond 2/3 of the PIP's")
     ap.add_argument("--w-shape", type=float, default=1e-7)
     ap.add_argument("--min-dorsal", type=float, default=0.7, help="candidate vertex normal . its segment's dorsal")
@@ -118,6 +121,17 @@ def main():
     lo, hi = lo + np.radians(a.margin), hi - np.radians(a.margin)
     clo, chi = check_limits(J, a.hinge)
     bone = model.lbs_weights.detach().argmax(1)
+    child = {b: end for (j1, j2, j3), tip in fsm._FINGER_CHAINS                # bone -> its far end: joint or fingertip vertex
+             for b, end in ((j1, ("j", j2)), (j2, ("j", j3)), (j3, ("v", tip)))}
+    on_axis = [n[-1] in "23" and not n.startswith("Palm") for n in mk]
+
+    def midline(c, V, Jm, d):
+        """|Distance| (mm) of vertices ``c`` (one bone) from the plane through that bone's axis and dorsal ``d``."""
+        b = int(bone[c[0]])
+        kind, e = child[b]
+        axis = (Jm[e] if kind == "j" else V[e]) - Jm[b]
+        lat = torch.cross(axis, d, dim=0)
+        return (((V[c] - Jm[b]) @ (lat / lat.norm())) * 1000).abs()
 
     def fwd():
         o = sm(global_orient=P["go"][None], hand_pose=P["hp"][None], transl=P["tr"][None], betas=P["betas"][None], return_verts=True)
@@ -160,10 +174,13 @@ def main():
     for r in range(a.rounds):
         dors = dorsals()
         with torch.no_grad():                                                  # best dorsal vertex for each marker
-            _, V, N = fwd()
+            o, V, N = fwd()
             for i, c in enumerate(cand):
                 ok = (N[c] @ dors[i]) > a.min_dorsal
                 c = c[ok] if ok.any() else c
+                if on_axis[i]:                                                 # dorsal midline only
+                    off = midline(c, V, o.joints[0], dors[i])
+                    c = c[off <= a.axis_tol] if (off <= a.axis_tol).any() else c[off.argsort()[:3]]
                 e = (M[i] - (V[c] + a.standoff * 1e-3 * N[c])).norm(dim=-1) + torch.relu(-((M[i] - V[c]) * N[c]).sum(-1))
                 att[i] = c[e.argmin()]
         opt = torch.optim.Adam([{"params": [q], "lr": 2e-2 if q is P["hp"] else 2e-3 if q is P["tr"] else 5e-3} for q in params])
@@ -187,6 +204,10 @@ def main():
               flush=True)
 
     d, ex, c = report(att)
+    dors = dorsals()
+    with torch.no_grad():
+        o, V, _ = fwd()
+        off = {n: round(float(midline(att[i:i + 1], V, o.joints[0], dors[i])[0]), 1) for i, n in enumerate(mk) if on_axis[i]}
     out.mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
         o = fwd()[0]
@@ -204,7 +225,7 @@ def main():
                 inside=g["n_inside"], judge_score=g["score"], scale=round(float(sm.log_scale.exp()), 4),
                 attachments={n: int(v) for n, v in zip(mk, att.cpu().numpy())},
                 moved_from_pin_mm={n: round(float(np.linalg.norm(V1[int(v)] - V1[pins[n]])), 1) for n, v in zip(mk, att.cpu().numpy())},
-                marker_mm={n: round(float(x), 2) for n, x in zip(mk, d)}, options=vars(a))
+                marker_mm={n: round(float(x), 2) for n, x in zip(mk, d)}, off_midline_mm=off, options=vars(a))
     (out / "summary.json").write_text(json.dumps(summ, indent=1))
     print(json.dumps({k: summ[k] for k in ("goal_met", "max_mm", "worst", "pose_past_limits_deg", "judge_natural_deg", "not_dorsal", "inside", "scale")}))
 
