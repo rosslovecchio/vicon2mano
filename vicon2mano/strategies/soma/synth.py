@@ -90,9 +90,12 @@ class SynthGenerator:
         return torch.randint(0, hi, shape, generator=self.g).to(self.dev)
 
     def sample(self, B: int, *, mix: bool = True, augment: bool = True,
-               src: torch.Tensor | None = None):
+               src: torch.Tensor | None = None, complete: bool = False):
         """Generate B clouds. ``mix=False, augment=False`` with ``src`` given
-        reproduces library frames exactly (round-trip test)."""
+        reproduces library frames exactly (round-trip test). ``complete``: return
+        the labelled markers instead, (B, M, 3) mm in the hand's own frame plus
+        (B, M) which of them carry a measured residual -- before drops, ghosts,
+        rotation and centring."""
         cfg, L, M = self.cfg, self.hp.shape[0], self.M
         if src is None:
             src = self._randint(L, B, self.n_groups)
@@ -115,7 +118,7 @@ class SynthGenerator:
         with torch.no_grad():
             out = self.model(global_orient=torch.zeros(B, 3, device=self.dev), hand_pose=hp,
                              betas=betas, transl=torch.zeros(B, 3, device=self.dev))
-        V = out.vertices * 1000.0
+        V = out.vertices * (1000.0 * self.lib.scale)       # scale about the origin; clouds are median-centred
         # 3. markers = attachment + face-frame residual from each marker's source frame
         P, R = face_frames(V, self.F, self.face_idx, self.bary)          # (B,M,3), (B,M,3,3)
         rsrc = src.gather(1, self.group_of[None].expand(B, -1))          # (B, M)
@@ -124,6 +127,9 @@ class SynthGenerator:
         present = torch.isfinite(res).all(-1)
         if augment:
             X = X + cfg.jitter_mm * self._randn(B, M, 3)
+        if complete:
+            return X, present
+        if augment:
             # 4. extra drops, weighted by real miss rates, capped in total
             k_extra = self._randint(cfg.max_missing + 1, B)
             keys = -torch.log(self._rand(B, M)) / self.drop_w            # exponential race

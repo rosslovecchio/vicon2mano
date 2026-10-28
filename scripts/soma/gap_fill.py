@@ -8,6 +8,9 @@ donor markers: among the six whose distance to the missing marker is steadiest a
 triplet visible in that frame; the marker's coordinates in the donors' frame are taken from the nearest frames
 before and after the gap where marker and triplet were all seen, blended linearly across the gap. Writes the CSV
 in the same layout, a JSON report and an .npz of what was filled.
+
+With --filler (scripts/soma/train_filler.py) the longer gaps are filled by the learned filler instead: the marker
+predicted from the other markers seen in each frame, shifted to meet its observed position at both gap edges.
 """
 import argparse, json, sys
 from itertools import combinations
@@ -25,6 +28,7 @@ ap.add_argument("--spline", type=int, default=10, help="frames: spline fill up t
 ap.add_argument("--max-gap", type=int, default=2000, help="frames: rigid fill up to this gap length")
 ap.add_argument("--jump", type=float, default=8.0, help="mm: a labelled position this far from its last one starts a new piece")
 ap.add_argument("--window", type=int, default=50, help="frames either side used to pick donors")
+ap.add_argument("--filler", default=None, help="learned filler .pt: replaces the rigid fill for gaps longer than --spline")
 a = ap.parse_args()
 
 X, names = load_csv(a.csv)[:2]
@@ -48,7 +52,19 @@ for m in range(M):
     dropped[names[m]] = int(len(bad))
 seen = np.isfinite(X).all(-1)
 Y = X.copy()
-how = np.zeros((T, M), np.int8)                                              # 0 observed/empty, 1 spline, 2 rigid, 3 jump left empty
+how = np.zeros((T, M), np.int8)                                  # 0 observed/empty, 1 spline, 2 rigid, 3 jump left empty, 4 learned
+if a.filler:
+    import torch
+    from vicon2mano.strategies.soma import fill
+    filler = fill.load(a.filler, "cuda" if torch.cuda.is_available() else "cpu")
+    order = [names.index(n) for n in filler.labels]
+
+
+def learned(m, fr):
+    """The filler's prediction of marker ``m`` at frames ``fr`` from the other markers observed there."""
+    Z = X[fr][:, order]
+    Z[:, order.index(m)] = np.nan
+    return fill.predict(filler, Z)[:, order.index(m)]
 
 
 def frame(P):
@@ -77,7 +93,7 @@ for m, nm in enumerate(names):
     miss = ~seen[:, m]
     d = np.diff(np.r_[0, miss.astype(int), 0])
     starts, ends = np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]           # gap = [s, e)
-    cnt = dict(gaps=int(len(starts)), missing=int(miss.sum()), spline=0, rigid=0, left=0)
+    cnt = dict(gaps=int(len(starts)), missing=int(miss.sum()), spline=0, rigid=0, learned=0, left=0)
     for s, e in zip(starts, ends):
         L = e - s
         if L > a.max_gap or (s == 0 and e == T):
@@ -91,6 +107,21 @@ for m, nm in enumerate(names):
                 how[s:e, m] = 1
                 cnt["spline"] += L
                 continue
+        if a.filler:
+            edges = [t for t in (s - 1, e) if 0 <= t < T]
+            P = learned(m, np.r_[s:e, edges])
+            off = {t: X[t, m] - p for t, p in zip(edges, P[L:]) if np.isfinite(p).all()}
+            w = (np.arange(s, e) - (s - 1)) / (e - s + 1)
+            if len(off) == 2:
+                P[:L] += (1 - w)[:, None] * off[s - 1] + w[:, None] * off[e]
+            elif off:
+                P[:L] += next(iter(off.values()))
+            ok = np.isfinite(P[:L]).all(1)
+            Y[s:e][ok, m] = P[:L][ok]
+            how[s:e][ok, m] = 4
+            cnt["learned"] += int(ok.sum())
+            cnt["left"] += int(L - ok.sum())
+            continue
         lo, hi = max(0, s - a.window), min(T, e + a.window)
         edge = np.r_[lo:s, e:hi]
         edge = edge[seen[edge, m]]
@@ -133,9 +164,9 @@ for t in range(T):
     out.append(",".join(pre + vals))
 Path(a.out).parent.mkdir(parents=True, exist_ok=True)
 Path(a.out).write_text("\n".join(out) + "\n")
-tot = {k: sum(r[k] for r in report.values()) for k in ("missing", "spline", "rigid", "left")}
+tot = {k: sum(r[k] for r in report.values()) for k in ("missing", "spline", "rigid", "learned", "left")}
 how[dropmask & (how == 0)] = 3
 np.savez_compressed(Path(a.out).with_suffix(".npz"), how=how, names=np.array(names))
 Path(a.out).with_suffix(".json").write_text(json.dumps(dict(total=tot, per_marker=report), indent=1))
 print("total:", tot)
-print({k: (v["missing"], v["spline"] + v["rigid"]) for k, v in report.items() if v["missing"]})
+print({k: (v["missing"], v["spline"] + v["rigid"] + v["learned"]) for k, v in report.items() if v["missing"]})
