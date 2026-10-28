@@ -54,4 +54,7 @@ res = {}
 for m, s, L in cuts:
     res.setdefault(L, []).append(np.nanmedian(np.linalg.norm(F[s:s + L, m] - X[s:s + L, m], axis=1)))
 for L, v in sorted(res.items()):
-    print(f"gap {L:5d} frames ({L / hz:.2f} s): {len(v)} cuts, median error {np.median(v):.1f} mm, worst {np.max(v):.1f} mm")
+    v = np.array(v)
+    ok = v[np.isfinite(v)]                                               # a cut the method left empty has no error
+    print(f"gap {L:5d} frames ({L / hz:.2f} s): {len(v)} cuts, {len(v) - len(ok)} left empty; filled: median error "
+          + (f"{np.median(ok):.1f} mm, worst {np.max(ok):.1f} mm" if len(ok) else "-"))
