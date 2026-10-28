@@ -79,10 +79,40 @@ identical markers. The per-batch summaries the run printed, which include
 filled markers, were worse for the retrained labels on HOI (for example
 Trial 1 HOI) and flagged 2–9 points fewer frames.
 
-**Conclusion:** retraining did not help. The monitor accuracy dropped, the
-labels changed on the hard fingers without a clear gain in fit, and more
-points went unlabelled. The old labels (`results/soma/fullset/P16`) remain
-the ones in use. One likely reason is the stretched synthetic clouds above.
+**Conclusion:** no improvement on the monitor; the cause is under
+investigation. This is not evidence that personalising the labeller hurts:
+
+- **The monitor truth is mostly unverified.** `train.py` draws its 2000
+  monitor frames at random (seed 0) from the 42,775 frames of
+  `trial1_handsonly` with at most 4 markers missing. The manually labelled
+  export is trustworthy only at the frames reviewed for the 500-frame sample,
+  which are spread over 64 trials, so few if any of the 2000 frames were
+  reviewed. The review list (`results/shared/frame_sample/manual_annotations.csv`)
+  is not on this machine, so the exact overlap is still to be counted.
+  Elsewhere the export carries Vicon-like labels.
+- **Most of the drop is in the Sinkhorn number.** Plain argmax fell only 1.8
+  points (87.9% to 86.1%).
+- **One run each, same settings.** Both models used the same `train.py`
+  (unchanged since `c678d95`), 10,000 steps, seed 0 and the same monitor
+  frames; only the library differed, along with the scale it applies. The
+  9.0 vs 6.3 min training times reflect machine load. Run-to-run variance is
+  unknown.
+- **The fit results are mixed.** The largest error per frame was lower with
+  the retrained labels on both Hands-only trials and on Trial2 HOI, and
+  higher on Trial 1 HOI. The typical error was lower on both Hands-only
+  trials and higher on both HOI trials. The label sets observe different
+  markers, so this is not like-for-like.
+- **More unlabelled points are ambiguous.** They could mean more caution
+  about ghost points rather than more errors.
+- **The over-stretching explanation is untested.** It rests on the ad-hoc
+  segment-length checks above.
+
+To settle it:
+- score both labellers on P16's reviewed frames (and other participants');
+- repeat each training with the same seed and settings;
+- test scale-only or limited-beta personalisation for the synthetic clouds.
+
+Until then the old labels (`results/soma/fullset/P16`) remain the ones in use.
 
 ## 2. Gap-filling methods
 
@@ -299,7 +329,8 @@ included.
 3. Only 0.1 was tried. A sweep over the weight (for example 0.03 and 0.3),
    and a check of fill error inside real grasp occlusions, would settle the
    remaining HOI gap.
-4. Keep P16's old labels; the final-static labeller did not improve them.
+4. Keep P16's old labels until the final-static labeller is scored on the
+   reviewed frames (see section 1).
 
 ## Reproduce
 
