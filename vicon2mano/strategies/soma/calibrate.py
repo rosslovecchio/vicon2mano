@@ -202,3 +202,26 @@ def calibrated_library(lib: MarkerLibrary, betas: np.ndarray, r_s: np.ndarray,
     return replace(lib, betas=np.asarray(betas, np.float32), residual=res.astype(np.float32),
                    miss_rate=lib.miss_rate if miss_rate is None else np.asarray(miss_rate),
                    source=f"{source} | base: {lib.source}")
+
+
+def final_static_library(lib: MarkerLibrary, model, params, cloud_mm: np.ndarray,
+                         miss_rate: np.ndarray | None = None, source: str = "") -> MarkerLibrary:
+    """``lib`` re-attached at a final static fit's vertices (``scripts/soma/static_final_fit.py`` params.npz) with
+    its shape and scale; each attached marker's residuals re-centred on its offset in ``cloud_mm`` (M, 3, lib order)."""
+    t = lambda k: torch.as_tensor(np.asarray(params[k], np.float32).reshape(1, -1))
+    with torch.no_grad():
+        o = model.cpu()(betas=t("betas"), hand_pose=t("hand_pose"), global_orient=t("global_orient"), transl=t("transl"))
+    w = o.joints[0, :1]
+    V = ((w + float(params["scale"]) * (o.vertices[0] - w)) * 1000).numpy()
+    F = np.asarray(model.faces, np.int64)
+    face_idx, bary = lib.face_idx.copy(), lib.bary.copy()
+    att = {str(n): int(v) for n, v in zip(params["names"], params["att"])}
+    for m, n in enumerate(lib.labels):
+        if n in att:
+            face_idx[m] = np.flatnonzero((F == att[n]).any(1))[0]
+            bary[m] = F[face_idx[m]] == att[n]
+    P, R = face_frames(V, F, face_idx, bary)
+    r_s = np.einsum("mji,mj->mi", R, cloud_mm - P)
+    r_s[[n not in att for n in lib.labels]] = np.nan
+    cal = calibrated_library(replace(lib, face_idx=face_idx, bary=bary), params["betas"], r_s, miss_rate, source)
+    return replace(cal, scale=float(params["scale"]))

@@ -54,6 +54,7 @@ class MarkerLibrary:
     frames: np.ndarray         # (N,) source frame numbers
     miss_rate: np.ndarray      # (M,) fraction of raw frames each marker is absent
     source: str = ""
+    scale: float = 1.0         # global hand scale on top of betas (a final static's, see calibrate.final_static_library)
 
     def subset(self, labels: list[str]) -> "MarkerLibrary":
         """The same library restricted to ``labels`` (in that order) -- e.g. a
@@ -64,14 +65,15 @@ class MarkerLibrary:
         return MarkerLibrary(labels=list(labels), face_idx=self.face_idx[idx], bary=self.bary[idx],
                              hand_pose=self.hand_pose, betas=self.betas,
                              residual=self.residual[:, idx], frames=self.frames,
-                             miss_rate=self.miss_rate[idx], source=f"{self.source} | subset {len(idx)}")
+                             miss_rate=self.miss_rate[idx], source=f"{self.source} | subset {len(idx)}",
+                             scale=self.scale)
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(path, labels=np.array(self.labels), face_idx=self.face_idx,
                             bary=self.bary, hand_pose=self.hand_pose, betas=self.betas,
                             residual=self.residual, frames=self.frames,
-                            miss_rate=self.miss_rate, source=np.array(self.source))
+                            miss_rate=self.miss_rate, source=np.array(self.source), scale=self.scale)
 
     @classmethod
     def load(cls, path: str | Path) -> "MarkerLibrary":
@@ -79,7 +81,8 @@ class MarkerLibrary:
         return cls(labels=[str(s) for s in z["labels"]], face_idx=z["face_idx"],
                    bary=z["bary"], hand_pose=z["hand_pose"], betas=z["betas"],
                    residual=z["residual"], frames=z["frames"],
-                   miss_rate=z["miss_rate"], source=str(z["source"]))
+                   miss_rate=z["miss_rate"], source=str(z["source"]),
+                   scale=float(z["scale"]) if "scale" in z.files else 1.0)
 
 
 # ---------------------------------------------------------------- geometry

@@ -35,7 +35,7 @@ sys.path.insert(0, str(REPO))
 from vicon2mano.core.dataset import DATA_ROOT, REF_CSV, find_session_file, find_trial_csv, load_trial_sessions
 from vicon2mano.core.fitter import FitConfig, MANOFitter
 from vicon2mano.core.loader import load_csv
-from vicon2mano.strategies.soma.calibrate import calibrated_library, fit_static, static_cloud
+from vicon2mano.strategies.soma.calibrate import calibrated_library, final_static_library, fit_static, static_cloud
 from vicon2mano.strategies.soma.library import MarkerLibrary, face_frames
 
 SEGMENTS = [(f"{f}{a}", f"{f}{b}") for f in ("Thumb", "Index", "Middle", "Ring", "Pinky")
@@ -100,6 +100,9 @@ def main():
     ap.add_argument("--window", default=None,
                     help="start:end frames to search instead of the whole file -- e.g. a still stretch "
                          "of a movement trial standing in for a missing static")
+    ap.add_argument("--final", default=None,
+                    help="a final static fit's params.npz (scripts/soma/static_final_fit.py): take its shape, scale "
+                         "and attachments instead of fitting")
     ap.add_argument("--out", required=True)
     ap.add_argument("--html", default=None, help="fitted static mesh + markers (plotly)")
     args = ap.parse_args()
@@ -133,10 +136,11 @@ def main():
           f"{[n for n, p in zip(lib.labels, info['present']) if p < 0.5] or 'none'}")
 
     offset_only = tuple(o for o in args.offset_only.split(",") if o)
-    out = fit_static(model, lib, cloud, device=dev, w_pose=args.w_pose, offset_only=offset_only)
-    print(f"betas: {np.round(out['betas'], 2).tolist()}  (base subject: {np.round(lib.betas, 2).tolist()})")
-    print(f"{'marker':9s} {'fit err mm':>10s}  note")
-    for m, n in enumerate(lib.labels):
+    out = None if args.final else fit_static(model, lib, cloud, device=dev, w_pose=args.w_pose, offset_only=offset_only)
+    if out:
+        print(f"betas: {np.round(out['betas'], 2).tolist()}  (base subject: {np.round(lib.betas, 2).tolist()})")
+        print(f"{'marker':9s} {'fit err mm':>10s}  note")
+    for m, n in enumerate(lib.labels if out else []):
         note = "not fitted (layout differs), offset from static" if n in offset_only else \
                "forearm: not fitted, keeps base offsets" if n.startswith("Forearm") else \
                "SUSPECT: excluded, keeps base offsets" if n in out["suspects"] else \
@@ -175,12 +179,18 @@ def main():
         print(f"miss rates from {trial}: {Path(p).name} ({len(Y)} frames)")
     miss = 1 - np.concatenate(pres).mean(0) if pres else None
 
-    new = calibrated_library(lib, out["betas"], out["r_s"], miss,
-                             source=f"{args.participant} static {Path(args.static).name}")
+    src = f"{args.participant} static {Path(args.static).name}"
+    if args.final:
+        new = final_static_library(lib, model, np.load(args.final), cloud, miss, source=f"{src}, final {args.final}")
+        print(f"attached at the final static: {sorted(set(map(str, np.load(args.final)['names'])) & set(lib.labels))}; "
+              f"scale {new.scale:.3f}")
+    else:
+        new = calibrated_library(lib, out["betas"], out["r_s"], miss, source=src)
+        print(f"calibrated {int(np.isfinite(out['r_s']).all(-1).sum())}/{len(lib.labels)} markers")
     new.save(args.out)
-    print(f"calibrated {int(np.isfinite(out['r_s']).all(-1).sum())}/{len(lib.labels)} markers; saved {args.out}")
+    print(f"saved {args.out}")
 
-    if args.html:
+    if args.html and out:
         write_static_html(model, lib, cloud, out, args.html,
                           f"{args.participant} static fit; suspects: {out['suspects'] or 'none'}")
         print(f"saved {args.html}")
