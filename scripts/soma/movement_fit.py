@@ -4,7 +4,7 @@
 Each frame starts from the static pose moved rigidly onto that frame's palm
 markers (Kabsch), then chunks of frames are fitted together with the static's terms: marker on its attached vertex
 (+standoff along the normal), never inside, joints inside the anatomical limits (finger twist ~0, PIP/DIP abduction,
-DIP coupled to the PIP), plus frame-to-frame smoothness. Writes fit.npz / pred.npz / summary.json.
+DIP coupled to the PIP), plus frame-to-frame smoothness; --w-filled down-weights gap-filled values. Writes fit.npz / pred.npz / summary.json.
 """
 import argparse, json, sys, time
 from pathlib import Path
@@ -38,6 +38,7 @@ ap.add_argument("--w-inside", type=float, default=100.0)
 ap.add_argument("--cap", type=float, default=4.5, help="mm: hinge on |marker - attached vertex| above this")
 ap.add_argument("--w-cap", type=float, default=30.0)
 ap.add_argument("--w-smooth", type=float, default=1e-3)
+ap.add_argument("--w-filled", type=float, default=1.0, help="weight of gap-filled values (gap_fill.py's .npz next to --csv)")
 a = ap.parse_args()
 p = a.participant
 
@@ -107,7 +108,11 @@ for t in range(T):
     TR[t] = R @ (J0 + tr_s) + t_ - J0
 
 Mt = torch.tensor(np.nan_to_num(X), dtype=torch.float32, device=dev)
-seen = torch.tensor(np.isfinite(X).all(-1), device=dev).float()              # (T, 18)
+seen = np.isfinite(X).all(-1).astype(np.float32)                              # (T, 18)
+if a.w_filled != 1.0:
+    filled = np.load(Path(a.csv).with_suffix(".npz"))["how"][:, [names.index(n) for n in mk]][frames] > 0
+    seen[filled] *= a.w_filled
+seen = torch.tensor(seen, device=dev)
 HP, GOf, TRf = np.zeros((T, 45), np.float32), GO.copy(), TR.copy()
 prev_hp = torch.tensor(hp_s, device=dev)
 t0 = time.time()

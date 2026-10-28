@@ -28,14 +28,16 @@ ap.add_argument("--library", help="participant library: synthetic clouds")
 ap.add_argument("--csv", nargs="*", default=[], help="labelled recordings: real frames")
 ap.add_argument("--mano-dir", default=str(DATA_ROOT / "mano_v1_2" / "models"))
 ap.add_argument("--steps", type=int, default=20000)
+ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--out", required=True)
 a = ap.parse_args()
 dev = "cuda" if torch.cuda.is_available() else "cpu"
+torch.manual_seed(a.seed)
 srcs, labels = [], None
 if a.library:
     lib = MarkerLibrary.load(a.library)
     model = MANOFitter(FitConfig(mano_model_path=a.mano_dir, hand_side="right", use_pca=False))._model
-    gen = SynthGenerator(lib, model, device=dev)
+    gen = SynthGenerator(lib, model, device=dev, seed=a.seed)
     srcs.append(lambda B: gen.sample(B, complete=True))
     labels = lib.labels
 if a.csv:

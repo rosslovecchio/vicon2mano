@@ -221,6 +221,9 @@ P12 manual files carry an index/middle confusion at PIP and fingertip, and
 
 ## Tools
 
+- Gap filling before the movement fit (rigid, learned on synthetic or real
+  frames) and the P16 labeller retrain: [soma_gap_fill.md](soma_gap_fill.md).
+
 - `infer.label_trial` labels a whole raw trial (per frame, then piece vote);
   `eval_trial.py` and `eval_sample.py` both use it.
 - `preview_labels.py`: side-by-side 3-D animation of Vicon's vs SOMA's labels,
