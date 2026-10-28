@@ -30,7 +30,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_fullset as rf  # noqa: E402
-from vicon2mano.core.dataset import DATA_ROOT, REF_CSV, load_trial_sessions  # noqa: E402
+from vicon2mano.core.dataset import DATA_ROOT, MANO_DIR, REF_CSV, load_trial_sessions  # noqa: E402
 
 DEFAULT_HZ = 200.0
 
@@ -100,7 +100,7 @@ def main():
     ap.add_argument("--participants", default="P3,P4,P9,P10,P11,P12,P13,P14,P15,P16,P17")
     ap.add_argument("--out-root", default=str(REPO / "results/soma/fullset"))
     ap.add_argument("--mesh-dir", default=str(REPO / "results/soma/mesh"))
-    ap.add_argument("--mano-dir", default=str(DATA_ROOT / "mano_v1_2" / "models"))
+    ap.add_argument("--mano-dir", default=str(MANO_DIR))
     ap.add_argument("--n-out", type=int, default=1500, help="frames sampled into each animation")
     ap.add_argument("--watch", action="store_true", help="keep rendering as fits finish, until the run is done")
     ap.add_argument("--poll-min", type=float, default=5.0)

@@ -3,18 +3,21 @@
 
 Every 10th frame is fitted with the participant's final static. Everything is copied to OneDrive
 soma_transfer/results/soma/<name>/<trial>/. Batches already on OneDrive are skipped, and a filled CSV already in
---work is reused, so a killed run resumes.
+--work is reused, so a killed run resumes. Each trial gets a provenance.json: commit, uncommitted changes, code and
+input hashes (labels, final static, filler), and the arguments.
 
     python scripts/soma/fit_trials.py P16                                   # rigid fill -> results/soma/movement
     python scripts/soma/fit_trials.py P16 --filler results/soma/real_fill/filler_{p}_all.pt --max-gap 100000 \
         --work results/soma/real_fill/movement --name {p}_realfill --note "real-data gap fill"
 """
-import argparse, json, shutil, subprocess, sys
+import argparse, hashlib, json, shutil, subprocess, sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 from vicon2mano.core.dataset import DATA_ROOT  # noqa: E402
+sys.path.insert(0, str(REPO / "scripts/soma"))
+import provenance  # noqa: E402
 
 ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
 ap.add_argument("participants", nargs="+")
@@ -28,6 +31,9 @@ ap.add_argument("--note", default="", help="added to the viewer title")
 a = ap.parse_args()
 DATA = DATA_ROOT / "soma_transfer"
 BATCH, NB, STEP = 10000, 5, 10
+CODE = ["scripts/soma/fit_trials.py", "scripts/soma/gap_fill.py", "scripts/soma/movement_fit.py", "scripts/soma/frame_diagnostics.py",
+        "vicon2mano/strategies/soma/fill.py"]
+sha = lambda f: hashlib.sha256(Path(f).read_bytes()).hexdigest()[:16]
 
 
 def sh(args, log):
@@ -45,6 +51,11 @@ for p in a.participants:
         w, one = REPO / a.work / p / trial, DATA / "results/soma" / a.name.format(p=p) / trial
         w.mkdir(parents=True, exist_ok=True)
         one.mkdir(parents=True, exist_ok=True)
+        inputs = {"labels": tdir / "soma_labelled.csv", "static": static} | ({"filler": REPO / a.filler.format(p=p)} if a.filler else {})
+        snap = provenance.snapshot("fit_trials", code=CODE) | dict(args=vars(a), inputs={k: dict(path=str(f), sha256=sha(f))
+                                                                                          for k, f in inputs.items()})
+        provenance.write(w / "fit_trials_provenance.json", snap)
+        shutil.copy(w / "fit_trials_provenance.json", one / f"{p}_{trial}_provenance.json")
         try:
             filled = w / "soma_labelled_filled.csv"
             if not filled.exists():

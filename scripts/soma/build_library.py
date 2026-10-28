@@ -21,7 +21,7 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from vicon2mano.core.dataset import DATA_ROOT
+from vicon2mano.core.dataset import DATA_ROOT, MANO_DIR
 from vicon2mano.core.fitter import FitConfig, MANOFitter
 from vicon2mano.core.loader import load_csv
 from vicon2mano.strategies.soma.library import build_library
@@ -33,7 +33,7 @@ def main():
     ap.add_argument("--fit", default=str(REPO / "results/mano/P10_Trial2_handsonly/mano_fit_right_calibrated.npz"))
     ap.add_argument("--labelled", default=str(p10 / "Trial2_handsonly_manuallylabelled_filled.csv"))
     ap.add_argument("--raw", default=str(p10 / "Trial2_handsonly.csv"))
-    ap.add_argument("--mano-dir", default=str(REPO / "../clean_kinematics/mano_v1_2/models"))
+    ap.add_argument("--mano-dir", default=str(MANO_DIR))
     ap.add_argument("--min-real", type=int, default=20,
                     help="library frames need at least this many real (unfilled) markers")
     ap.add_argument("--out", default=str(REPO / "results/soma/libraries/library_P10_Trial2.npz"))

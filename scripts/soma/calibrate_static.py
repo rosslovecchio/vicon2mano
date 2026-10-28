@@ -32,7 +32,7 @@ import torch
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from vicon2mano.core.dataset import DATA_ROOT, REF_CSV, find_session_file, find_trial_csv, load_trial_sessions
+from vicon2mano.core.dataset import DATA_ROOT, MANO_DIR, REF_CSV, find_session_file, find_trial_csv, load_trial_sessions
 from vicon2mano.core.fitter import FitConfig, MANOFitter
 from vicon2mano.core.loader import load_csv
 from vicon2mano.strategies.soma.calibrate import calibrated_library, final_static_library, fit_static, static_cloud
@@ -88,7 +88,7 @@ def main():
                     help="a manual_frames.csv session of --participant, e.g. 'Static' or "
                          "'Trial 1 Hands only' (with --window, a still stretch standing in for a static)")
     ap.add_argument("--base-library", default=str(REPO / "results/soma/libraries/library_P10_Trial2.npz"))
-    ap.add_argument("--mano-dir", default=str(REPO / "../clean_kinematics/mano_v1_2/models"))
+    ap.add_argument("--mano-dir", default=str(MANO_DIR))
     ap.add_argument("--n-frames", type=int, default=200)
     ap.add_argument("--w-pose", type=float, default=20.0,
                     help="pull of the static pose toward a flat hand (see calibrate.fit_static)")

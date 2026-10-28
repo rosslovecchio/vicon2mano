@@ -41,10 +41,10 @@ def _git(*args, repo: Path = REPO, strip: bool = True) -> str:
     return out.strip() if strip else out
 
 
-def snapshot(source: str = "driver", started_at: float | None = None, repo: Path = REPO) -> dict:
+def snapshot(source: str = "driver", started_at: float | None = None, repo: Path = REPO, code=CODE) -> dict:
     """The code state of ``repo`` right now. Hashes are of the files on disk (what a new process imports)."""
     files = {}
-    for rel in CODE:
+    for rel in code:
         p = repo / rel
         if p.exists():
             data = p.read_bytes()

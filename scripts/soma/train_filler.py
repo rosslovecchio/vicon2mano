@@ -16,7 +16,7 @@ import torch
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
-from vicon2mano.core.dataset import DATA_ROOT  # noqa: E402
+from vicon2mano.core.dataset import MANO_DIR  # noqa: E402
 from vicon2mano.core.fitter import FitConfig, MANOFitter  # noqa: E402
 from vicon2mano.core.loader import load_csv  # noqa: E402
 from vicon2mano.strategies.soma import fill  # noqa: E402
@@ -26,7 +26,7 @@ from vicon2mano.strategies.soma.synth import SynthGenerator  # noqa: E402
 ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
 ap.add_argument("--library", help="participant library: synthetic clouds")
 ap.add_argument("--csv", nargs="*", default=[], help="labelled recordings: real frames")
-ap.add_argument("--mano-dir", default=str(DATA_ROOT / "mano_v1_2" / "models"))
+ap.add_argument("--mano-dir", default=str(MANO_DIR))
 ap.add_argument("--steps", type=int, default=20000)
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--out", required=True)

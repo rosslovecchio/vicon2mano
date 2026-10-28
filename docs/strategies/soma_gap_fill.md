@@ -306,16 +306,38 @@ included.
 **Environment:**
 - Windows, `.viconvenv`, run from the repo root. `$D` is the data root,
   `C:/Users/RL000009/OneDrive - Vrije Universiteit Brussel/A-Skills/data_June25`.
-- MANO weights: pass `--mano-dir "$D/mano_v1_2/models"` wherever a script
-  defaults to `../clean_kinematics`, which does not exist on this machine.
-- `train_filler.py` already defaults to that path.
+- MANO weights: `core.dataset.MANO_DIR` uses the sibling
+  `../clean_kinematics/mano_v1_2/models` if it exists, else
+  `$D/mano_v1_2/models`. Every SOMA script defaults to it, so `--mano-dir` is
+  only needed to override it.
 
 **Commits:**
 - `e090368`: library from a final static fit.
 - `7c19595`: learned filler.
-- The next commit adds `--w-filled`, `--seed` and the experiment scripts
+- `18ec8d8`: `--w-filled`, `--seed`, and the experiment scripts
   (`fit_trials.py`, `score_observed.py`, `keep_observed.py`,
   `compare_labels.py`).
+- The commit after it adds the `MANO_DIR` fallback and the per-trial
+  provenance records.
+
+**Inputs these runs start from:**
+- **SOMA labels:** `results/soma/fullset/<P>/<trial>/soma_labelled.csv`,
+  written by `run_fullset.py` (`eval_trial.py` with
+  `results/soma/models/labeler_<P>.pt`) between 2026-10-17 and 2026-10-20.
+  - They came from this checkout, not from `vicon2mano_frozen`.
+  - The labelling code (`infer.py`, `model.py`, `eval_trial.py`,
+    `core/loader.py`) has not changed since `c678d95` (2026-10-16), before the
+    first label was written.
+  - The labeller models were trained over that period while `run_fullset.py`
+    itself changed (`99d927a` to `334dcb9`). So the labels are kept as fixed
+    inputs and identified by hash, not regenerated.
+- **Final statics:** `$D/soma_transfer/static_final/<P>/<P>_static_final_params.npz`.
+- **Provenance:** every `fit_trials.py` run now writes
+  `<work>/<P>/<trial>/fit_trials_provenance.json` and copies it to OneDrive
+  as `<P>_<trial>_provenance.json`. It holds the commit, the uncommitted
+  changes, hashes of the code that ran and of its inputs (labels, final
+  static, filler), and the arguments. P16 Trial2 HOI labels:
+  `2af504902fc263be`; P16 final static: `ab8ed687c0ee95b4`.
 
 **Caveats on exact reproduction:**
 - **Runs made before the scripts were committed** used copies of the
@@ -326,11 +348,14 @@ included.
   checkout whose `results/` is a link to this repo's `results/`. Its code was
   on this branch, with the same `gap_fill.py` rigid path and the same
   `movement_fit.py`.
-- **Fillers are not bit-for-bit reproducible.** They were trained before
-  `--seed` existed: the synthetic generator was seeded (0), but the network
-  initialisation and the real-frame sampling were not. Retraining gives
-  statistically similar fillers, not identical ones. The trained `.pt` files
-  are kept and give the exact numbers above.
+- **The P16 fillers above are not bit-for-bit reproducible.** They were
+  trained before `--seed` existed: the synthetic generator was seeded (0), but
+  the network initialisation and the real-frame sampling were not. The trained
+  `.pt` files are kept and give the exact numbers above.
+- **Fillers trained from now on are reproducible.** With `--seed` (default
+  0), two trainings on this machine's GPU gave bit-identical weights, both
+  from real CSVs (1000 steps) and from a library (200 steps). Other GPUs or
+  library versions may still differ slightly.
 
 ```bash
 PY=.viconvenv/Scripts/python.exe; D="C:/Users/RL000009/OneDrive - Vrije Universiteit Brussel/A-Skills/data_June25"

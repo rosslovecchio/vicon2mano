@@ -25,7 +25,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_ROOT = Path(r"C:\Users\RL000009\OneDrive - Vrije Universiteit Brussel\A-Skills\data_June25")
 REF_CSV = DATA_ROOT / "manual_frames.csv"
 TRIAL_MAP_CSV = DATA_ROOT / "trial_filename_map.csv"
-MANO_DIR = REPO_ROOT.parent / "clean_kinematics" / "mano_v1_2" / "models"
+MANO_DIR = next((d for d in (REPO_ROOT.parent / "clean_kinematics" / "mano_v1_2" / "models", DATA_ROOT / "mano_v1_2" / "models")
+                 if d.exists()), REPO_ROOT.parent / "clean_kinematics" / "mano_v1_2" / "models")  # sibling repo, else the data root
 
 # Static recordings usable for MANO calibration but NOT as the cascade's
 # bone-length reference. P9's static was taken after a Forearm marker fell

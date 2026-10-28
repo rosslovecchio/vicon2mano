@@ -54,7 +54,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
 from vicon2mano.core.dataset import (  # noqa: E402
-    DATA_ROOT, MANO_ONLY_STATIC, REF_CSV, find_manual_csv, find_session_file,
+    DATA_ROOT, MANO_DIR, MANO_ONLY_STATIC, REF_CSV, find_manual_csv, find_session_file,
     find_trial_csv, load_trial_sessions, participant_sort_key, slug)
 
 PY = sys.executable
@@ -526,9 +526,7 @@ def main():
     ap.add_argument("--stages", default=",".join(STAGES))
     ap.add_argument("--shard", default="0/1", help="i/n: this process takes every n-th participant")
     ap.add_argument("--out-root", default=str(REPO / "results/soma/fullset"))
-    ap.add_argument("--mano-dir", default=str(DATA_ROOT / "mano_v1_2" / "models"
-                                              if (DATA_ROOT / "mano_v1_2" / "models").exists()
-                                              else REPO / "../clean_kinematics/mano_v1_2/models"))
+    ap.add_argument("--mano-dir", default=str(MANO_DIR))
     ap.add_argument("--artifact-dir", default=str(REPO / "results/soma"),
                     help="where <dir>/libraries/library_<P>.npz and <dir>/models/labeler_<P>.pt live "
                          "(use a scratch dir for experiments so the real ones are not overwritten)")

@@ -25,7 +25,7 @@ import torch
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from vicon2mano.core.dataset import DATA_ROOT
+from vicon2mano.core.dataset import DATA_ROOT, MANO_DIR
 from vicon2mano.core.fitter import FitConfig, MANOFitter
 from vicon2mano.core.loader import load_csv
 from vicon2mano.strategies.soma.library import MarkerLibrary
@@ -53,7 +53,7 @@ def accuracy(net, pts, valid, label, bs=512):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--library", default=str(REPO / "results/soma/libraries/library_P10_Trial2.npz"))
-    ap.add_argument("--mano-dir", default=str(REPO / "../clean_kinematics/mano_v1_2/models"))
+    ap.add_argument("--mano-dir", default=str(MANO_DIR))
     ap.add_argument("--steps", type=int, default=30000)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)

@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import provenance  # noqa: E402
 import run_fullset as rf  # noqa: E402
-from vicon2mano.core.dataset import DATA_ROOT  # noqa: E402
+from vicon2mano.core.dataset import DATA_ROOT, MANO_DIR  # noqa: E402
 
 
 def main():
@@ -38,7 +38,7 @@ def main():
     ap.add_argument("--labels", default=str(REPO / "results/soma/fullset/P10/Trial2_Hands_only/soma_labelled.csv"))
     ap.add_argument("--manual", default=str(DATA_ROOT / "P10/Trial2_handsonly_manuallylabelled_filled.csv"))
     ap.add_argument("--static", default=str(DATA_ROOT / "P10/static_trial.csv"))
-    ap.add_argument("--mano-dir", default=str(DATA_ROOT / "mano_v1_2" / "models"))
+    ap.add_argument("--mano-dir", default=str(MANO_DIR))
     ap.add_argument("--fit-config", default=str(REPO / "configs/surface_fit/P10.json"))
     ap.add_argument("--only", default="", help="comma list of arms to run")
     ap.add_argument("--code-dir", default=str(REPO),
