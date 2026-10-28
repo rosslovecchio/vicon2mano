@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gap-fill each SOMA-labelled trial of a participant, then fit, diagnose and render it in 10k-frame batches.
+"""Gap-fill each SOMA-labelled trial of a participant, then fit, diagnose and render all of it in 10k-frame batches.
 
 Every 10th frame is fitted with the participant's final static. Everything is copied to OneDrive
 soma_transfer/results/soma/<name>/<trial>/. Batches already on OneDrive are skipped, and a filled CSV already in
@@ -30,7 +30,7 @@ ap.add_argument("--w-filled", type=float, default=1.0, help="movement_fit.py --w
 ap.add_argument("--note", default="", help="added to the viewer title")
 a = ap.parse_args()
 DATA = DATA_ROOT / "soma_transfer"
-BATCH, NB, STEP = 10000, 5, 10
+BATCH, STEP = 10000, 10
 CODE = ["scripts/soma/fit_trials.py", "scripts/soma/gap_fill.py", "scripts/soma/movement_fit.py", "scripts/soma/frame_diagnostics.py",
         "vicon2mano/strategies/soma/fill.py"]
 sha = lambda f: hashlib.sha256(Path(f).read_bytes()).hexdigest()[:16]
@@ -65,10 +65,8 @@ for p in a.participants:
                                  (".npz", "_soma_labelled_filled_status.npz")):
                     shutil.copy(filled.with_suffix(suf), one / f"{p}_{trial}{dst}")
             T = sum(1 for _ in open(filled)) - 1
-            for b in range(NB):
-                s, e = b * BATCH, min(T, (b + 1) * BATCH)
-                if s >= T:
-                    break
+            for s in range(0, T, BATCH):
+                e = min(T, s + BATCH)
                 tag = f"{s}-{e}_every{STEP}"
                 html = one / f"{p}_{trial}_{tag}_live.html"
                 if html.exists():
