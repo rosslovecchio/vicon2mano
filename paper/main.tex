@@ -376,16 +376,29 @@ HOI & $-0.4$ ($-1.6$ to $+0.7$) & 10 / 0 / 7 & $-0.2$ ($-0.3$ to $+0.4$) & 13 / 
 \tbd{all values; method and plan in Section~\ref{sec:benchmarking}}
 
 \begin{table}[h]\centering\small
-\caption{Labelling benchmark: accuracy on reviewed frames only (\%). \tbd{}}\label{tab:bench-label}
+\caption{Labelling benchmark: accuracy on reviewed frames only (\% of real points), pooled over all points (median
+over participants in brackets). Hands only: 164 frames, 3287 points, 16 participants; HOI: 247 frames, 4744 points, 17
+participants.}\label{tab:bench-label}
 \begin{tabular}{lcc}\toprule
 Method & Hands only & HOI \\\midrule
-Vicon raw labels & \tbd{} & \tbd{} \\
-Generic SOMA (P10 model) & \tbd{} & \tbd{} \\
-Participant-calibrated SOMA & \tbd{} & \tbd{} \\
+Vicon raw labels & 93.6 (96.6) & 71.7 (86.4) \\
+Generic SOMA (P10 model) & 83.8 (97.3) & 89.3 (92.6) \\
+Participant-calibrated SOMA & 85.6 (99.0) & 91.8 (94.9) \\
 Spatial GMM + Viterbi (optional) & \tbd{} & \tbd{} \\
 3-D U-Net (optional) & \tbd{} & \tbd{} \\\bottomrule
 \end{tabular}
 \end{table}
+On HOI, both SOMA labellers were more accurate than Vicon's labels, pooled and per participant (median), and the
+calibrated labeller was 2.5 points above the generic one. On Hands only, the pooled figures favour Vicon, but this
+comes from one trial: P9 Trial2 Hands only (63 of the 164 frames) scored 52\% for both SOMA labellers against 92\% for
+Vicon. Without P9, Hands-only accuracy was 94.5\% (Vicon), 95.8\% (generic) and 98.7\% (calibrated). Exceptions where
+Vicon beat both SOMA labellers: P1 and P16 HOI (P16's mirrored-hand episode, Section~\ref{sec:res-personalisation}),
+P15 HOI, and P9 Hands only. P10's calibrated model is the generic model. P5 has no calibrated model and uses the
+generic one in both rows. Three reviewed trials (P5 Trial2 HOI, P6 Trial 1 HOI, P7 Trial2 Hands only) were not
+scored, because their corrected exports have a different number of frames from the raw files.
+\note{Measured 2026-10-29 with scripts/soma/eval\_sample.py (results/soma/eval/bench\_\{generic,calibrated\}\_*). SOMA
+scores are after the piece vote. Spatial GMM and 3-D U-Net not yet run. The cause of P9 Trial2 Hands only is not yet
+investigated.}
 
 \begin{table}[h]\centering\small
 \caption{Gap-filling benchmark: median / worst error (mm), all methods on identical cuts, and share of missing values

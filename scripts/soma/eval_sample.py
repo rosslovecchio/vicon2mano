@@ -112,9 +112,10 @@ def main():
     by_c = df.groupby("category").apply(summ)
     df["missing_bin"] = np.where(df.n_missing <= 4, "<=4 missing", ">4 missing")
     by_m = df.groupby("missing_bin").apply(summ)
+    by_t = df.groupby(np.where(df.trial_id.str.contains("HOI"), "HOI", "Hands only")).apply(summ)
     tot = summ(df).to_frame("ALL").T
     held = summ(df[df.participant != "P10"]).to_frame("ALL except P10 (held out)").T
-    summary = pd.concat([by_p, by_c, by_m, tot, held])
+    summary = pd.concat([by_p, by_c, by_m, by_t, tot, held])
     summary.round(2).to_csv(f"{out}_summary.csv")
     pd.set_option("display.width", 200)
     print("\n", summary.round(2).to_string())
