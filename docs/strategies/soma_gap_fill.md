@@ -108,8 +108,45 @@ investigation. This is not evidence that personalising the labeller hurts:
 - **The over-stretching explanation is untested.** It rests on the ad-hoc
   segment-length checks above.
 
+**Scored on P16's reviewed frames** (`eval_sample.py --participants P16`,
+2026-10-29; 28 frames, 554 points, all four trials; outputs in
+`results/soma/eval/sample500_labeler_{P16,P16_final}_*`). Accuracy on real
+points, with SOMA after the piece vote:
+
+| Trial | Frames | Vicon | SOMA, old library | SOMA, final static |
+|---|---|---|---|---|
+| Trial 1 HOI | 11 | 95.8% | 54.5% | 52.6% |
+| Trial 1 Hands only | 3 | 95.2% | 100.0% | 96.8% |
+| Trial2 HOI | 13 | 78.8% | 91.9% | 87.6% |
+| Trial2 Hands only | 1 | 95.0% | 100.0% | 100.0% |
+| **All** | 28 | **87.7%** | **78.7%** | **75.6%** |
+
+Points left unlabelled: 2.0% (old), 4.2% (final). Ghosts left unlabelled:
+81.8% for both (11 ghosts).
+
+- **On these frames the final-static labeller is 3.1 points below the old
+  one**, the same direction as the monitor. This is still one participant, 28
+  correlated frames and one training run each.
+- **Both SOMA labellers score below Vicon's labels on P16**, because of Trial
+  1 HOI. In 7 of its 11 reviewed frames (14204–20255), both labellers label
+  the hand mirrored: Forearm1↔3, Forearm2↔4, Index↔Ring, Thumb↔Pinky,
+  Palm1↔Thumb1. The reviewer and Vicon agree with each other there.
+- **How common the mirroring is across the trials** (SOMA's labels compared
+  with Vicon's):
+  - Whole-hand mirroring (SOMA's Thumb2 on Vicon's Pinky1) affects only
+    0.1–0.4% of frames per P16 trial. The reviewed frames, which are
+    weighted toward hard cases, happen to fall inside one such episode.
+  - Forearm 1↔3 swaps against Vicon are frequent: 18.7%, 5.9%, 12.0% and
+    27.1% of frames (Trial 1 Hands only, Trial 1 HOI, Trial2 Hands only,
+    Trial2 HOI). Which side is right is not established; on Trial2 HOI, Vicon
+    scores below SOMA on the reviewed frames. The movement fit uses only the
+    18 hand markers, so forearm swaps do not affect the fits.
+- **This was not caught before.** The earlier cross-participant SOMA
+  evaluation (`soma.md`) reported 87.0% for SOMA against 79.2% for Vicon
+  overall; P16 is an exception to that.
+
 To settle it:
-- score both labellers on P16's reviewed frames (and other participants');
+- score both labellers on other participants' reviewed frames;
 - repeat each training with the same seed and settings;
 - test scale-only or limited-beta personalisation for the synthetic clouds.
 
