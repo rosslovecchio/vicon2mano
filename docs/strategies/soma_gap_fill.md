@@ -406,10 +406,11 @@ Share of missing values left empty, over the 34 trials:
 | Rigid | 1.6–76.4% | 47.6% |
 | Learned | 0.0–39.1% | 10.2% |
 
-- **Learned leaves fewer empty** in 27 of 34 trials.
-- **Learned leaves slightly more empty** in 6 Hands-only trials (P14 Trial 1,
-  P15 both, P17, and others within about 2 points) and the same in 1 (P3
-  Trial 1 Hands only, 19.7% both).
+- **Learned leaves fewer empty** in 29 of 34 trials.
+- **Learned leaves more empty** in 4 Hands-only trials: P14 Trial 1 (30.1% →
+  32.6%), P15 Trial2 (18.5% → 27.0%), P15 Trial 1 (1.6% → 3.1%) and P17
+  Trial 1 (26.8% → 27.9%).
+- **The same** in 1 trial: P3 Trial 1 Hands only, 19.7% both.
 - **Likely reason:** the learned filler skips frames with fewer than 3
   near-rigid markers visible, where the rigid fill can still find donors.
   Not checked.
