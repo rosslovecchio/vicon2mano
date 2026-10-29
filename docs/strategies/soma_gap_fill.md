@@ -86,10 +86,11 @@ investigation. This is not evidence that personalising the labeller hurts:
   monitor frames at random (seed 0) from the 42,775 frames of
   `trial1_handsonly` with at most 4 markers missing. The manually labelled
   export is trustworthy only at the frames reviewed for the 500-frame sample,
-  which are spread over 64 trials, so few if any of the 2000 frames were
-  reviewed. The review list (`results/shared/frame_sample/manual_annotations.csv`)
-  is not on this machine, so the exact overlap is still to be counted.
-  Elsewhere the export carries Vicon-like labels.
+  and only 3 of those lie in this trial (frames 21023, 31702 and 46078). Just
+  1 of the 2000 monitor frames is a reviewed frame (counted by repeating
+  `train.py`'s selection; `manual_annotations.csv` frame numbers are row
+  indices, as in `eval_sample.py`). Elsewhere the export carries Vicon-like
+  labels, so the monitor mostly measures agreement with those.
 - **Most of the drop is in the Sinkhorn number.** Plain argmax fell only 1.8
   points (87.9% to 86.1%).
 - **One run each, same settings.** Both models used the same `train.py`
