@@ -354,6 +354,83 @@ included.
   `fit_trials.py` fits at most 5 batches of 10k frames per trial, so all four
   columns cover the same frames.
 
+## 5. Cohort: all nine participants with a final static (2026-10-29)
+
+**What was run:** `bash scripts/soma/run_realfill.sh P3 P4 P6 P11 P12 P14 P15 P17`
+(commit `573cad3`, with the `gap_fill_check.py` fix `c96c536`), then the same
+weighted fit for P16's missing tail. Per participant:
+- a held-out check: a filler trained without one HOI trial, tested on it;
+- a filler trained on all labelled trials (seed 0);
+- fill, fit (filled values weighted 0.1) and views for every frame, every
+  10th frame fitted, with no unfitted tails;
+- scores against the rigid-fill fits in `results/soma/movement`.
+
+All 167 batches fitted with no failures (P3 20, P4 23, P6 18, P11 18, P12 21,
+P14 21, P15 21, P17 12, P16 13 + the 50k–57k tail). Logs are
+`results/soma/real_fill/<P>_{heldout,train_all,fit,score}.log`, views are in
+OneDrive `results/soma/<P>_realfill_w01/`, and every trial has a
+`fit_trials_provenance.json`.
+
+### Held-out gap fill (each participant's Trial2 HOI; Trial 1 HOI for P17)
+
+Median / worst error in mm, rigid fill → own-data filler, same cuts. The
+first P3 run printed NaN for the rigid fill (an empty cut); its rigid row was
+rerun after the fix (`P3_heldout_rigid_rerun.log`).
+
+| P | 1 s | 5 s | 10 s | 25 s |
+|---|---|---|---|---|
+| P3 | 2.9/32.0 → 1.9/9.7 | 3.9/17.4 → 1.8/6.3 | 4.0/34.9 → 3.0/9.9 | 8.2/25.0 → 3.6/6.2 |
+| P4 | 1.8/25.5 → 1.8/17.4 | 7.5/32.6 → 3.4/16.5 | 11.2/32.1 → 4.1/16.7 | 14.7/22.9 → 5.9/14.9 |
+| P6 | 2.1/67.2 → 1.7/28.8 | 4.4/39.2 → 3.3/29.4 | 5.4/32.3 → 4.2/28.7 | no cuts |
+| P11 | 3.5/28.7 → 2.3/13.4 | 4.7/27.4 → 3.1/13.6 | 6.2/22.0 → 5.2/13.3 | 11.8/21.0 → 3.8/11.7 |
+| P12 | 2.9/33.0 → 1.9/17.2 | 5.3/53.1 → 2.8/14.0 | 9.9/44.9 → 4.5/9.8 | 11.4/24.0 → 5.1/5.4 |
+| P14 | 1.5/44.3 → 1.9/9.8 | 2.8/42.9 → 2.0/11.0 | 12.7/40.1 → 5.0/10.5 | 5.6/24.2 → 4.3/6.9 |
+| P15 | 4.4/25.7 → 2.8/20.1 | 9.1/24.8 → 3.6/17.0 | 8.4/47.3 → 3.6/14.9 | 8.0/47.3 → 4.8/13.5 |
+| P17 | 1.5/21.2 → 1.8/24.5 | 2.2/21.8 → 2.1/24.6 | 3.5/22.3 → 3.7/23.2 | 3.0/21.3 → 2.6/23.2 |
+
+- **The worst errors fall** for P3, P4, P6, P11, P12, P14 and P15. For
+  example, P12 at 10 s goes from 44.9 to 9.8 mm.
+- **The medians fall** at 5 s and longer for every participant except P17.
+- **P17 is the exception.** Rigid and learned are about equal, and the
+  learned worst error is a little higher. P17's filler was trained on its
+  single other labelled trial (Hands only).
+- **Empty cuts:** the rigid fill left 0–4 cuts empty per length (P3, P6, P15,
+  P17); the learned filler left none.
+
+### Completeness
+
+Share of missing values left empty, over the 34 trials:
+
+| Fill | Range | Median |
+|---|---|---|
+| Rigid | 1.6–76.4% | 47.6% |
+| Learned | 0.0–39.1% | 10.2% |
+
+- **Learned leaves fewer empty** in 27 of 34 trials.
+- **Learned leaves slightly more empty** in 6 Hands-only trials (P14 Trial 1,
+  P15 both, P17, and others within about 2 points) and the same in 1 (P3
+  Trial 1 Hands only, 19.7% both).
+- **Likely reason:** the learned filler skips frames with fewer than 3
+  near-rigid markers visible, where the rigid fill can still find donors.
+  Not checked.
+
+### Fit error on observed markers (median over frames, mm, rigid → learned weighted 0.1)
+
+Change in the largest and typical observed-marker distance per frame, over 17
+trials per condition:
+
+| Condition | Largest: median change (range) | Better / same / worse | Typical: median change (range) | Better / same / worse |
+|---|---|---|---|---|
+| Hands only | −0.4 (−0.9 to 0.0) | 14 / 3 / 0 | −0.1 (−0.2 to 0.0) | 9 / 8 / 0 |
+| HOI | −0.4 (−1.6 to +0.7) | 10 / 0 / 7 | −0.2 (−0.3 to +0.4) | 13 / 2 / 2 |
+
+- **Hands only:** never worse than the rigid fill.
+- **HOI:** better for P3, P4, P11, P12 and P14. Worse for P6 (+0.5/+0.4),
+  P15 (+0.7/+0.5), P16 (+0.5/+0.4) and P17 (+0.1, Trial 1 HOI only).
+- **Per participant:** the `<P>_score.log` files have every trial.
+- **P16's provenance files** were written by the tail run, so they record
+  that run's commit. P16's earlier batches came from `18ec8d8`.
+
 ## Recommendation
 
 1. Train each participant's filler on that participant's own labelled trials
@@ -361,9 +438,9 @@ included.
    participant's recording.
 2. Fill every gap with it (`gap_fill.py --filler ... --max-gap 100000`), and
    fit with filled values down-weighted (`movement_fit.py --w-filled 0.1`).
-   The trials become nearly complete, and the fit to the real markers is at
-   least as good as with the rigid fill, except the largest-marker error on
-   HOI (+0.4–0.5 mm).
+   Across the nine participants, this never fits Hands-only trials worse than
+   the rigid fill. On HOI it is better for five participants and up to
+   0.7 mm worse on the largest error for four (P6, P15, P16, P17).
 3. Only 0.1 was tried. A sweep over the weight (for example 0.03 and 0.3),
    and a check of fill error inside real grasp occlusions, would settle the
    remaining HOI gap.
