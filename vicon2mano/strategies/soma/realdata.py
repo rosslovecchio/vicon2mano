@@ -103,9 +103,9 @@ def relabelled_markers(raw: np.ndarray, slot_label: np.ndarray, n_labels: int) -
     return out
 
 
-def write_wide_csv(path, markers: np.ndarray, labels: list[str]) -> None:
+def write_wide_csv(path, markers: np.ndarray, labels: list[str], frames=None) -> None:
     """(T, N, 3) mm -> single-header wide Nexus CSV that
-    ``vicon2mano.core.loader.load_csv`` reads back; blank cells for NaN."""
+    ``vicon2mano.core.loader.load_csv`` reads back; blank cells for NaN. ``frames``: the Frame column (default 1..T)."""
     import csv
     from pathlib import Path
     path = Path(path)
@@ -115,4 +115,4 @@ def write_wide_csv(path, markers: np.ndarray, labels: list[str]) -> None:
         w.writerow(["_Frame", "_Sub Frame"] + [h for l in labels for h in (f"{l}_X", "_Y", "_Z")])
         for t in range(markers.shape[0]):
             v = markers[t].reshape(-1)
-            w.writerow([t + 1, 0] + ["" if not np.isfinite(x) else f"{x:.6f}" for x in v])
+            w.writerow([t + 1 if frames is None else int(frames[t]), 0] + ["" if not np.isfinite(x) else f"{x:.6f}" for x in v])

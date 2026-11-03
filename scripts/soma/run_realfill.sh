@@ -5,14 +5,14 @@
 #   3. fill + fit + views (fit_trials.py, filled values weighted 0.1), OneDrive results/soma/<P>_realfill_w01
 #   4. score against the rigid-fill fits on the markers really observed
 # Usage (repo root): bash scripts/soma/run_realfill.sh P3 P4 ...   Logs: results/soma/real_fill/<P>_*.log
-set -u
+set -euo pipefail                                  # any failed step stops the run with its exit code
 PY=.viconvenv/Scripts/python.exe
 R=results/soma/real_fill
 for p in "$@"; do
   L=results/soma/fullset/$p
-  trials=$(for d in $L/*/; do t=$(basename $d); [ $t != static ] && [ -f $d/soma_labelled.csv ] && echo $t; done)
+  trials=$(for d in $L/*/; do t=$(basename $d); if [ $t != static ] && [ -f $d/soma_labelled.csv ]; then echo $t; fi; done)
   test=$(echo "$trials" | grep -x Trial2_HOI || echo "$trials" | grep -x Trial_1_HOI)
-  rest=$(for t in $trials; do [ $t != $test ] && echo $L/$t/soma_labelled.csv; done)
+  rest=$(for t in $trials; do if [ $t != $test ]; then echo $L/$t/soma_labelled.csv; fi; done)
   { echo "== $p held out: $test"
     $PY -W ignore scripts/soma/train_filler.py --csv $rest --out $R/filler_${p}_no_$test.pt | tail -n 2
     for f in "" "--filler $R/filler_${p}_no_$test.pt"; do

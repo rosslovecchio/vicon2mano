@@ -44,6 +44,7 @@ def sh(args, log):
     return r.stdout
 
 
+failed = []
 for p in a.participants:
     static = DATA / f"static_final/{p}/{p}_static_final_params.npz"
     for tdir in sorted(d for d in (REPO / a.labels / p).iterdir() if (d / "soma_labelled.csv").exists() and d.name != "static"):
@@ -87,4 +88,8 @@ for p in a.participants:
                 print(f"{p} {trial} {tag}: max dist median {m['median']} p95 {m['p95']} | {flags}", flush=True)
         except Exception as ex:                                              # one bad trial must not stop the rest
             print(f"{p} {trial}: FAILED {ex}", flush=True)
+            failed.append(f"{p} {trial}")
     print(f"{p} done", flush=True)
+if failed:
+    print(f"{len(failed)} trial(s) failed: {', '.join(failed)}", flush=True)
+    sys.exit(1)

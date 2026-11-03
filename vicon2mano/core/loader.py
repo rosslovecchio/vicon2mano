@@ -151,6 +151,18 @@ def load_csv(path: str, *, mm: bool = True) -> tuple[np.ndarray, list[str]]:
     return markers, labels
 
 
+def csv_frame_numbers(path: str) -> np.ndarray:
+    """Vicon frame number (the Frame column) of each row :func:`load_csv` returns for ``path``."""
+    import csv
+    with open(path, newline="", encoding="latin-1") as fh:
+        rows = list(csv.reader(fh))
+    wide = next((i for i, r in enumerate(rows[:20]) if any(c.strip().endswith("_X") and len(c.strip()) > 2 for c in r)), None)
+    head = wide if wide is not None else next(i for i, r in enumerate(rows) if any(c.strip() in ("X", "Y", "Z") for c in r))
+    col = next(j for j, c in enumerate(rows[head]) if c.strip().lstrip("_") == "Frame")
+    ok = (lambda r: r and r[0].strip().lstrip("-").isdigit()) if wide is not None else (lambda r: r and r[0].strip().isdigit())
+    return np.array([int(r[col]) for r in rows[head + 1:] if ok(r)])
+
+
 def _parse_wide_rows(
     rows: list[list[str]],
     header_idx: int,

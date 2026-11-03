@@ -268,6 +268,9 @@ class Judge:
                     score=round(10 * (n_absent + n_not_dorsal + n_inside) + skin + 0.2 * natural, 3))
 
 
+FAILED: list[str] = []                                   # fits that did not finish; main() exits 1 if any
+
+
 def fit_one(J, p, static, ci, c, rdir):
     """Fit and judge one setting into ``rdir`` (resumable: an existing result is only re-scored if stale)."""
     res = rdir / "diag.json"
@@ -290,6 +293,8 @@ def fit_one(J, p, static, ci, c, rdir):
             rc = "timeout"
     head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=CODE, capture_output=True, text=True).stdout.strip()
     out = dict(participant=p, config_id=ci, config=c, static=str(static), returncode=rc, code_commit=head)
+    if rc != 0:
+        FAILED.append(str(rdir))
     if rc == 0 and (rdir / "static.html").exists():
         try:
             out |= J.judge(rdir / "static.html")
@@ -587,3 +592,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+    if FAILED:
+        print(f"{len(FAILED)} fit(s) failed: {', '.join(FAILED)}", flush=True)
+        sys.exit(1)

@@ -64,8 +64,8 @@ not a single algorithm but a chain of decisions, each with its own failure modes
 \begin{itemize}[nosep]
   \item automatic labels break during movement;
   \item grasps occlude markers for long periods;
-  \item sparse markers under-determine joint angles, so a hand model with participant-specific shape and marker
-  attachments is needed.
+  \item joint angles must be inferred from three markers per finger, through a hand model with participant-specific shape and marker
+  attachments.
 \end{itemize}
 This tutorial brings together established techniques (MANO, SOMA-style labelling, learned and rigid-body gap
 filling, marker-based model fitting). It documents the implementation decisions, validation procedures and failure
@@ -142,29 +142,37 @@ relabelled in full.
 GPU is recommended. Scripts look for MANO in a sibling \texttt{clean\_kinematics/mano\_v1\_2/models} directory, else
 under the data root, or take \texttt{--mano-dir}.
 
-\paragraph{Start here: synthetic quick-start.} \texttt{scripts/soma/quickstart\_synth.py} makes a participant
-from MANO alone and runs Steps 3--5 on it. This is \emph{synthetic data, not a recording}: it checks the installation,
-file formats and commands, and that the steps recover a known answer, but says nothing about accuracy on real Vicon
-data. It uses MANO's mean shape with markers on the released pins (3\,mm out along the normal), 2000 frames (10\,s) of
-smooth random finger poses inside the joint limits with a slow wrist motion, 0.5\,mm noise, and four fixed gaps:
-Middle2 8 frames, Thumb3 150, Index3 500 and Ring3 400. MANO is not included; it is read from the user's own copy. The
-check fills the gaps with the rigid fill and with a filler trained on the synthetic trial, fits every 10th frame with the
-learned fill, and compares everything with the truth. Reference run (seed 0, 67\,s on one RTX 5090):
+\paragraph{Start here: filling-and-fitting smoke test (synthetic data).}
+\texttt{scripts/soma/quickstart\_synth.py} generates a participant from MANO alone and runs gap filling and the movement
+fit (Steps 3--4) on it. This is \emph{synthetic data, not a recording, and not a labelling test}: it checks the
+installation, file formats and commands, and that these steps recover a known answer within fixed tolerances. It says
+nothing about accuracy on real Vicon data. The test is frozen in \texttt{configs/quickstart\_synth\_v1.json}: generator
+settings, gaps, tolerances, the pin file's hash, a fingerprint of the generated markers (so that a changed generator or
+MANO model is noticed) and the reference results. It uses MANO's mean shape with markers on the released pins (3\,mm out
+along the normal), 2000 frames (10\,s) of smooth random finger poses inside the joint limits with a slow wrist motion,
+0.5\,mm noise, and four fixed gaps: Middle2 8 frames, Thumb3 150, Index3 500 and Ring3 400. MANO is not included; it is
+read from the user's own copy. The gaps are filled with the rigid fill and with a filler trained on the synthetic trial;
+every 10th frame is fitted with the learned fill; all results are compared with the truth. Reference run (one RTX
+5090, about 70\,s):
 \begin{itemize}[nosep]
-  \item rigid fill: median error 1.8--2.7\,mm on the three shorter gaps, but 26.0\,mm on the 2\,s Ring3 gap, which is
-  the intended failure: rigid filling degrades on long finger gaps;
-  \item learned fill: median 1.0--3.1\,mm on all four gaps;
+  \item rigid fill: median error 1.8--2.7\,mm on the Middle2, Index3 and Thumb3 gaps, and 26.0\,mm on the Ring3 gap;
+  \item learned fill: median 1.0--3.2\,mm on all four gaps;
   \item movement fit: 99\% of fitted frames with every marker within 5\,mm of its attachment;
-  \item joint angles: median error 5.2\textdegree{} (95th percentile 13.8\textdegree), although the hand shape is known
-  exactly; sparse markers leave the angles partly undetermined.
+  \item local joint-rotation error (angle between fitted and true rotation of each joint relative to its parent): median
+  5.2\textdegree, 95th percentile 13.8\textdegree.
 \end{itemize}
-The check passes when every gap is filled with a learned-fill median of at most 10\,mm and the median joint-angle error
-is at most 10\textdegree. Labelling is not part of the quick-start, because training the labeller needs a participant
-library.
+The check passes when the generated markers match the frozen fingerprint, every gap is filled with a learned-fill
+median of at most 10\,mm, and the median local joint-rotation error is at most 10\textdegree. Repeated runs differ
+slightly (the learned Ring3 median was 3.12--3.34\,mm over three runs), so results are compared against tolerances, not
+exact values.
 \paragraph{Real-data example.} P3, a selected successful case: its accepted static meets the 5\,mm target, and its
 labeller scored 98.8\% (HOI) and 99.3\% (Hands only) on the reviewed frames, against 94.2\% and 96.7\% for Vicon. An
 excerpt is prepared locally (\texttt{make\_fixture.py}: a 30\,s HOI excerpt with two reviewed frames, a training
 excerpt from another trial, the accepted static, reviewed labels and fixed gap cuts, with hashes) but is not released.
+Every excerpt keeps the source's Vicon frame numbers, and a frame map lists, per excerpt row, the source row (the index
+the reviewed-frame annotations use) and the Vicon frame number. Regression tests (\texttt{tests/soma/test\_fixture.py})
+check the hashes, the frame maps, that the excerpts equal the source rows, that the gap cuts lie on observed values, and
+that the rigid fill reproduces the recorded reference within 0.01\,mm.
 \tbd{release decision for P3's data: public, controlled access or none}. P16 is the troubleshooting example
 (Section~\ref{sec:example}).
 

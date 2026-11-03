@@ -163,6 +163,7 @@ Load Vicon marker data from .c3d or .csv files.
 - `load_h5_trajectory(h5_path: str, participant: str, session: str) -> tuple[np.ndarray, list[str], float | None]` â€” Read one (participant, session) trajectory from the consolidated HDF5.
 - `load_c3d(path: str) -> tuple[np.ndarray, list[str], float]` â€” Read a Vicon .c3d file.
 - `load_csv(path: str, *, mm: bool=True) -> tuple[np.ndarray, list[str]]` â€” Read a Vicon-exported CSV (Nexus format).
+- `csv_frame_numbers(path: str) -> np.ndarray` â€” Vicon frame number (the Frame column) of each row :func:`load_csv` returns for ``path``.
 
 ### `vicon2mano/core/quality.py`
 
@@ -410,7 +411,7 @@ Real Vicon frames as unlabelled clouds, with ground-truth identities.
 - `pieces(raw: np.ndarray, jump_mm: float=5.0) -> np.ndarray` â€” (T, C) piece id per raw slot (-1 absent): each column is cut wherever the marker disappears or moves more than ``jump_mm`` in one frame.
 - `vote_pieces(frame_label: np.ndarray, frame_conf: np.ndarray, pid: np.ndarray, n_labels: int) -> np.ndarray` â€” Give every piece the label with the largest summed confidence over its frames, then resolve clashes: where two slots in a frame share a label, the piece with the larger vote share keeps it and the other is unlabelled (-1) in that frame. frame_label/conf: (T, C) per-frame labels (-1 none).
 - `relabelled_markers(raw: np.ndarray, slot_label: np.ndarray, n_labels: int) -> np.ndarray` â€” (T, n_labels, 3): each raw point moved to the column of its assigned label. Unlabelled points (-1) are dropped; positions are never altered.
-- `write_wide_csv(path, markers: np.ndarray, labels: list[str]) -> None` â€” (T, N, 3) mm -> single-header wide Nexus CSV that ``vicon2mano.core.loader.load_csv`` reads back; blank cells for NaN.
+- `write_wide_csv(path, markers: np.ndarray, labels: list[str], frames=None) -> None` â€” (T, N, 3) mm -> single-header wide Nexus CSV that ``vicon2mano.core.loader.load_csv`` reads back; blank cells for NaN. ``frames``: the Frame column (default 1..T).
 
 ### `vicon2mano/strategies/soma/synth.py`
 
@@ -752,6 +753,15 @@ Compare a raw Vicon export against manually-relabelled version(s) of it.
 - `make_missing_plot(datasets, out_dir: Path) -> None` â€” (no docstring)
 - `main() -> None` â€” (no docstring)
 
+### `scripts/shared/dataset_manifest.py`
+
+Per-trial status of every data type of the final dataset -> results/dataset/manifest.csv (docs/dataset.md).
+
+- `video_status(sync: dict | None) -> tuple[str, str]` â€” (no docstring)
+- `emg_sync_status(emg: dict | None, has_otb4: bool, has_vicon: bool) -> tuple[str, str]` â€” (no docstring)
+- `emg_quality_status(rows: list[dict]) -> tuple[str, str]` â€” (no docstring)
+- `main()` â€” (no docstring)
+
 ### `scripts/shared/detect_swaps.py`
 
 Detect (and optionally fix) marker-label swaps in "clean" recordings.
@@ -896,6 +906,13 @@ Calibrate the SOMA marker library to a participant from their static.
 Label a participant's movement trials with another SOMA model and compare with existing labels, slot by slot.
 
 
+### `scripts/soma/compare_statics.py`
+
+Compare each participant's historical accepted static with the static_passes.py pick, without changing either.
+
+- `row(d: Path) -> dict` â€” Scores of one static_final_fit.py output folder.
+- `main()` â€” (no docstring)
+
 ### `scripts/soma/eval_sample.py`
 
 Score SOMA on the manually reviewed 500-frame sample (all participants).
@@ -955,7 +972,8 @@ Live 3-D player (three.js) for a movement fit: rotatable mesh + markers, played 
 
 Cut a small real-data example out of one participant's recordings, for the tutorial. NOT FOR RELEASE by itself: the folder is local, and sharing it needs release authorisation for that participant's data.
 
-- `excerpt(trial: str, p: str, first: int, n: int, out: Path) -> dict` â€” Write frames [first, first + n) of ``p``'s raw ``trial`` to ``out``; return its source record.
+- `excerpt(trial: str, p: str, first: int, n: int, out: Path) -> dict` â€” Write rows [first, first + n) of ``p``'s raw ``trial`` to ``out`` (Vicon frame numbers kept) and its frame map.
+- `rigid_check(fixture: Path, work: Path) -> dict` â€” Cut the gap mask out of movement.csv, refill with gap_fill.py's rigid fill, and score against the cut values.
 - `main()` â€” (no docstring)
 
 ### `scripts/soma/make_meshes.py`
@@ -1040,10 +1058,12 @@ Record which version of the fit code a fit started with.
 
 ### `scripts/soma/quickstart_synth.py`
 
-Synthetic quick-start: a made-up participant generated from MANO alone, then gap-filled and fitted.
+Filling-and-fitting smoke test on SYNTHETIC data (a made-up participant generated from MANO alone).
 
 - `markers(J, att: torch.Tensor, go, hp, tr, standoff=3.0) -> np.ndarray` â€” Marker positions (T, M, 3) mm: attached vertices of the mean-shape MANO, ``standoff`` mm along the normal.
 - `poses(J, T: int, rng, every: int=250, frac: float=0.4) -> np.ndarray` â€” Smooth random hand poses (T, 45): keyframes inside ``frac`` of the joint limits, no twist or PIP/DIP abduction.
+- `sha(path: Path) -> str` â€” sha256 of a file, line endings normalised (so a checkout's CRLF does not change it).
+- `fingerprint(static: np.ndarray, truth: np.ndarray) -> dict` â€” A few statistics of the generated markers (mm), enough to notice a changed generator or MANO model.
 - `run(args: list, log: Path)` â€” Run a repo script with this interpreter, output to ``log``; raise if it fails.
 - `main()` â€” (no docstring)
 

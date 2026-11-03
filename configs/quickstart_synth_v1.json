@@ -1,0 +1,99 @@
+{
+ "version": "quickstart_synth_v1",
+ "description": "Filling-and-fitting smoke test on synthetic data generated from MANO's mean shape. Not a recording, not a labelling test, no accuracy claim on real data.",
+ "frozen": "2026-11-03",
+ "pins": "configs/surface_fit/static_final_pins.json",
+ "pins_sha256": "a3701833cddd5ce1c50c0ba7323258380be088f6cc0e12ef2ca7c74a9ac89756",
+ "seed": 0,
+ "frames": 2000,
+ "noise_mm": {
+  "static": 0.1,
+  "movement": 0.5
+ },
+ "gaps": {
+  "Middle2": [
+   100,
+   108
+  ],
+  "Index3": [
+   400,
+   900
+  ],
+  "Thumb3": [
+   1200,
+   1350
+  ],
+  "Ring3": [
+   1500,
+   1900
+  ]
+ },
+ "filler_steps": 5000,
+ "tolerances": {
+  "learned_fill_median_mm": 10.0,
+  "local_joint_rotation_median_deg": 10.0
+ },
+ "fingerprint": {
+  "static_mean": 10.36,
+  "truth_mean": 11.74,
+  "truth_std": 51.69
+ },
+ "reference": {
+  "run": "2026-11-03, one RTX 5090, about 70 s",
+  "gap_fill_mm": {
+   "rigid": {
+    "Middle2": {
+     "median": 1.78,
+     "max": 2.47,
+     "all_filled": true
+    },
+    "Index3": {
+     "median": 2.74,
+     "max": 5.4,
+     "all_filled": true
+    },
+    "Thumb3": {
+     "median": 2.36,
+     "max": 6.45,
+     "all_filled": true
+    },
+    "Ring3": {
+     "median": 25.98,
+     "max": 38.62,
+     "all_filled": true
+    }
+   },
+   "learned": {
+    "Middle2": {
+     "median": 1.78,
+     "max": 2.47,
+     "all_filled": true
+    },
+    "Index3": {
+     "median": 1.51,
+     "max": 4.8,
+     "all_filled": true
+    },
+    "Thumb3": {
+     "median": 1.01,
+     "max": 2.43,
+     "all_filled": true
+    },
+    "Ring3": {
+     "median": 3.18,
+     "max": 8.94,
+     "all_filled": true
+    }
+   }
+  },
+  "local_joint_rotation_error_deg": {
+   "median": 5.15,
+   "p95": 13.76
+  },
+  "fit_max_marker_distance_mm": {
+   "median": 4.51,
+   "p95": 4.81,
+   "frames_under_5mm_pct": 99.0
+  }
+ }
+}
