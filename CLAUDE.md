@@ -21,6 +21,9 @@ own page rather than one ever-growing log.
   never a constant fps. Vicon offset: `core/video_sync.py` (trigger pulse in 18
   trials, else motion xcorr, ±50 ms vs pulse). Full write-up:
   [docs/video_sync.md](docs/video_sync.md) — keep it updated when touching this.
+- Camera → Vicon calibration (cam1 head-mounted, cam2 fixed) and aligned-depth export:
+  `scripts/shared/calibrate_cameras.py`, needs `mediapipe`; see
+  [docs/camera_calibration.md](docs/camera_calibration.md). Final-dataset plan: [docs/dataset.md](docs/dataset.md).
 
 ```bash
 .viconvenv/Scripts/python.exe -m pytest tests/ -q     # 306 tests (6 skipped)

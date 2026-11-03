@@ -280,9 +280,9 @@ def resolve_model_path(mano_dir: str, side: str) -> Path:
     return model_path
 
 
-def forward_vertices(model, global_orient, hand_pose, transl, betas, scale=1.0, thickness=1.0, seglen=None) -> np.ndarray:
-    """No-grad forward pass -> (n, 778, 3) mesh vertices in metres, with the fit's global ``scale``, palm ``thickness``
-    and per-segment finger lengths ``seglen`` (fit_surface_markers --fit-scale / --fit-thickness / --fit-segments)."""
+def forward_mano(model, global_orient, hand_pose, transl, betas, scale=1.0, thickness=1.0, seglen=None):
+    """No-grad smplx forward pass (metres) with the fit's global ``scale``, palm ``thickness`` and per-segment
+    finger lengths ``seglen`` (fit_surface_markers --fit-scale / --fit-thickness / --fit-segments)."""
     import torch
     from fit_surface_markers import ScaledModel, SegmentModel
     n = global_orient.shape[0]
@@ -293,14 +293,18 @@ def forward_vertices(model, global_orient, hand_pose, transl, betas, scale=1.0, 
     m.log_scale.data.fill_(float(np.log(scale)))
     m.log_thick.data.fill_(float(np.log(thickness)))
     with torch.no_grad():
-        out = m(
+        return m(
             global_orient=torch.tensor(global_orient, dtype=torch.float32),
             hand_pose=torch.tensor(hand_pose, dtype=torch.float32),
             transl=torch.tensor(transl, dtype=torch.float32),
             betas=torch.tensor(betas, dtype=torch.float32).unsqueeze(0).expand(n, -1),
             return_verts=True,
         )
-    return out.vertices.numpy()
+
+
+def forward_vertices(model, global_orient, hand_pose, transl, betas, scale=1.0, thickness=1.0, seglen=None) -> np.ndarray:
+    """(n, 778, 3) mesh vertices in metres (see forward_mano)."""
+    return forward_mano(model, global_orient, hand_pose, transl, betas, scale, thickness, seglen).vertices.numpy()
 
 
 def load_model(mano_dir: str, side: str, pose_dim: int):
@@ -310,13 +314,22 @@ def load_model(mano_dir: str, side: str, pose_dim: int):
                         use_pca=(pose_dim != 45), num_pca_comps=pose_dim, flat_hand_mean=True, batch_size=1)
 
 
+def _fit_args(fit, frame_idx):
+    return (fit["global_orient"][frame_idx], fit["hand_pose"][frame_idx], fit["transl"][frame_idx], fit["betas"],
+            float(fit["scale"]) if "scale" in fit else 1.0,
+            float(fit["thickness"]) if "thickness" in fit else 1.0,
+            fit["seglen"] if "seglen" in fit and not np.allclose(fit["seglen"], 1.0) else None)
+
+
 def fit_vertices_mm(model, fit, frame_idx) -> np.ndarray:
     """(n, 778, 3) mesh vertices in mm for these frames of a FitResult npz."""
-    return 1000.0 * forward_vertices(
-        model, fit["global_orient"][frame_idx], fit["hand_pose"][frame_idx], fit["transl"][frame_idx], fit["betas"],
-        float(fit["scale"]) if "scale" in fit else 1.0,
-        float(fit["thickness"]) if "thickness" in fit else 1.0,
-        fit["seglen"] if "seglen" in fit and not np.allclose(fit["seglen"], 1.0) else None)
+    return 1000.0 * forward_vertices(model, *_fit_args(fit, frame_idx))
+
+
+def fit_joints21_m(model, fit, frame_idx) -> np.ndarray:
+    """(n, 21, 3) joints in metres, repo 21-joint order (= MediaPipe Hands' landmark order), for these fit frames."""
+    from vicon2mano.core.fitter import mano_output_to_joints21
+    return mano_output_to_joints21(forward_mano(model, *_fit_args(fit, frame_idx))).numpy()
 
 
 def view_box(verts_mm, markers_mm):

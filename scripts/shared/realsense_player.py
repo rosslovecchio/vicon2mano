@@ -36,13 +36,18 @@ from vicon2mano.core.viz import marker_bone_pairs, marker_color
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def read_color_frames(bag: Path):
-    """Yield (frame_number, global_timestamp_ms, rgb array) once per recorded colour frame."""
+def read_color_frames(bag: Path, depth: bool = False):
+    """Yield (frame_number, global_timestamp_ms, rgb array, depth in m aligned to colour or None), once per
+    recorded colour frame."""
     pipe, cfg = rs.pipeline(), rs.config()
     rs.config.enable_device_from_file(cfg, str(bag), repeat_playback=False)
     cfg.enable_stream(rs.stream.color)
+    if depth:
+        cfg.enable_stream(rs.stream.depth)
     prof = pipe.start(cfg)
-    prof.get_device().as_playback().set_real_time(False)
+    dev = prof.get_device()
+    dev.as_playback().set_real_time(False)
+    scale, align = (dev.first_depth_sensor().get_depth_scale(), rs.align(rs.stream.color)) if depth else (None, None)
     last = None
     try:
         while True:
@@ -52,7 +57,23 @@ def read_color_frames(bag: Path):
             c = fs.get_color_frame()
             if c and c.get_frame_number() != last:  # playback repeats framesets
                 last = c.get_frame_number()
-                yield last, c.get_timestamp(), np.asanyarray(c.get_data()).copy()
+                d = align.process(fs).get_depth_frame() if depth else None
+                yield (last, c.get_timestamp(), np.asanyarray(c.get_data()).copy(),
+                       np.asanyarray(d.get_data()) * scale if d else None)
+    finally:
+        pipe.stop()
+
+
+def bag_intrinsics(bag: Path) -> tuple[dict, float]:
+    """(colour intrinsics as fx, fy, ppx, ppy, width, height, model, coeffs; depth scale in m per unit) of a bag."""
+    pipe, cfg = rs.pipeline(), rs.config()
+    rs.config.enable_device_from_file(cfg, str(bag), repeat_playback=False)
+    prof = pipe.start(cfg)
+    try:
+        i = prof.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+        return ({"fx": i.fx, "fy": i.fy, "ppx": i.ppx, "ppy": i.ppy, "width": i.width, "height": i.height,
+                 "model": str(i.model).split(".")[-1], "coeffs": list(i.coeffs)},
+                prof.get_device().first_depth_sensor().get_depth_scale())
     finally:
         pipe.stop()
 
@@ -65,7 +86,7 @@ def export_bag(bag: Path, mp4: Path, crf: int = 23) -> list[tuple]:
     rows, prev = [], None
     with av.open(str(mp4), "w") as out:
         st = None
-        for n, ts, img in read_color_frames(bag):
+        for n, ts, img, _ in read_color_frames(bag):
             if st is None:
                 st = out.add_stream("libx264", rate=60, options={"crf": str(crf), "g": "30"})
                 st.width, st.height, st.pix_fmt = img.shape[1], img.shape[0], "yuv420p"

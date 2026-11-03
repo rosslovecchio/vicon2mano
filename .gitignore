@@ -30,3 +30,6 @@ results/
 
 # setuptools build artifact (was committed by accident early on)
 vicon2mano.egg-info/
+
+# MediaPipe hand landmarker model (downloaded by scripts/shared/calibrate_cameras.py)
+models/

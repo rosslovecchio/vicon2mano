@@ -971,6 +971,8 @@ Blank the gap-filled values of a labelled export: keep a value only where the ra
 Player comparing one trial's labellings beside cam1: Vicon labels, SOMA labels (no fill), learned gap fill.
 
 - `mesh_pane(model, fit: dict, rows: np.ndarray, keep: np.ndarray) -> dict` â€” Mesh vertices (int16 mm, (n, 778, 3)) of the fit's frames `keep`, with their Vicon rows, for the player.
+- `soma_pane(soma: Path, rate: float, mesh: bool)` â€” (marker pane, fit, rows) of the SOMA-labelled, unfilled trial; graded by flag_frames.py, one fit row per frame.
+- `fill_pane(fill: Path, rate: float, mesh: bool)` â€” (marker pane, fit, rows) of the learned-fill trial; graded by the fit's flags.json (fitted every 10th frame).
 - `main()` â€” (no docstring)
 
 ### `scripts/soma/live_viewer.py`
