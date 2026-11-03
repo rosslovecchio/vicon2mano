@@ -38,3 +38,25 @@ def marker_digit(label: str) -> str:
         if ch.isdigit():
             return ch
     return ""
+
+
+# Segments of the MARKER SET itself -- the chains the Vicon labels describe,
+# drawn so the markers read as a hand rather than a cloud of dots. This is
+# raw measured geometry, independent of the fitted model: where a bone and
+# the mesh disagree, that is the fit's error made visible.
+MARKER_BONES = [
+    ("Palm1", "Palm2"), ("Palm2", "Palm3"), ("Palm3", "Palm1"),
+    ("Palm2", "Thumb1"), ("Thumb1", "Thumb2"), ("Thumb2", "Thumb3"),
+    ("Palm2", "Index1"), ("Index1", "Index2"), ("Index2", "Index3"),
+    ("Palm2", "Middle1"), ("Middle1", "Middle2"), ("Middle2", "Middle3"),
+    ("Palm2", "Ring1"), ("Ring1", "Ring2"), ("Ring2", "Ring3"),
+    ("Palm2", "Pinky1"), ("Pinky1", "Pinky2"), ("Pinky2", "Pinky3"),
+    ("Index1", "Middle1"), ("Middle1", "Ring1"), ("Ring1", "Pinky1"),
+]
+
+
+def marker_bone_pairs(labels):
+    """(i, j) index pairs for MARKER_BONES present in this label set (subject prefixes like "P15:" ignored)."""
+    idx = {l.split(":")[-1]: i for i, l in enumerate(labels)}
+    return [(idx[a], idx[b]) for a, b in MARKER_BONES
+            if a in idx and b in idx]

@@ -13,7 +13,14 @@ own page rather than one ever-growing log.
 - MANO weights: `../clean_kinematics/mano_v1_2/models/` (sibling repo);
   override with `--mano-dir`
 - Recordings: `C:\Users\RL000009\OneDrive - Vrije Universiteit Brussel\A-Skills\data_June25` — see `vicon2mano/core/dataset.py`
-- Extra runtime deps not in pyproject: `plotly`, `matplotlib`
+- Extra runtime deps not in pyproject: `plotly`, `matplotlib`; `pyrealsense2`, `av` for
+  `scripts/shared/realsense_player.py` (RealSense .bag -> synced MP4 player)
+- Video: `D:\june25_data\<P>\Trial<n>\<cond>\RealSense` (2 cams per trial; the
+  OneDrive copy has no `.xcp`, which the sync needs). Cameras run at 60 fps but
+  the bags keep only ~7-20 fps, irregularly — sync on per-frame timestamps,
+  never a constant fps. Vicon offset: `core/video_sync.py` (trigger pulse in 18
+  trials, else motion xcorr, ±50 ms vs pulse). Full write-up:
+  [docs/video_sync.md](docs/video_sync.md) — keep it updated when touching this.
 
 ```bash
 .viconvenv/Scripts/python.exe -m pytest tests/ -q     # 306 tests (6 skipped)
@@ -51,7 +58,8 @@ vicon2mano/
     deep/        labeler.py, synth_data.py, real_data.py   CNN labeler
     template/    (lives in core/correspondence.py; see docs)
     soma/        library.py, synth.py, model.py, realdata.py, calibrate.py, infer.py   learned labeller (SOMA-style)
-scripts/   cascade/ · mano/ · gmm/ · deep/ · soma/ · shared/
+  core/emg.py    Novecento+ .otb4 reader + HD-sEMG channel quality (docs/emg.md)
+scripts/   cascade/ · mano/ · gmm/ · deep/ · soma/ · shared/ · emg/
 tests/     core/ · cascade/ · mano/ · gmm/ · deep/ · soma/
 results/   cascade/ · mano/ · gmm/ · soma/   (gitignored, regenerable)
 docs/      fitting.md · strategies/*.md
@@ -74,6 +82,11 @@ strategy driver just to locate a trial CSV.
 | **soma** | SOMA-style learned per-frame labeller trained on synthetic clouds from a MANO surface model; self-contained (imports `core` only) | [docs/strategies/soma.md](docs/strategies/soma.md) |
 
 Core MANO fitting (not a relabelling strategy): [docs/fitting.md](docs/fitting.md).
+
+**EMG** (Novecento+ HD-sEMG, 4 x 96-ch grids per trial, `D:\june25_data`):
+`.otb4` reader, per-channel quality report, and the AUX1/Vicon `Sync` pattern
+for aligning with kinematics. See [docs/emg.md](docs/emg.md), and update its
+results and changelog whenever EMG code or findings change.
 
 ## Assignment pipeline (`core/correspondence.py` — `get_assignment`)
 

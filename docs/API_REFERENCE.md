@@ -108,6 +108,19 @@ Locating recordings on disk: participants, trials, statics, references.
 - `find_manually_labelled_trials(data_root: Path=DATA_ROOT) -> list[tuple[str, str, Path, Path]]` â€” Every (participant, trial_stem, vicon_csv, manual_csv) pair on disk that has a manually-labelled export, across every participant directory.
 - `auto_reference(markers: np.ndarray, need: int=300) -> np.ndarray` â€” Fallback reference frames: the longest fully-present stretches.
 
+### `vicon2mano/core/emg.py`
+
+OT Bioelettronica Novecento+ ``.otb4`` reader and per-channel HD-sEMG quality metrics.
+
+- **class `Otb4Recording`** â€” Decoded ``.otb4``: raw int32 EMG per grid, ramps, and AUX channels (raw counts).
+- `read_otb4(path: Path) -> Otb4Recording` â€” Stream an ``.otb4`` from its tar without extracting it to disk.
+- `ramp_faults(ramp: np.ndarray) -> tuple[np.ndarray, np.ndarray]` â€” Sample indices where the ramp counter skipped (lost samples) or repeated.
+- `windowed(x: np.ndarray, n: int) -> np.ndarray` â€” Reshape (C, T) to (C, T // n, n), dropping the ragged tail.
+- `car_bandpass(raw: np.ndarray, fs: float, mv_per_count: float)` â€” (per-second p2p counts, dead mask, monopolar uV, CAR uV, CAR 20-450 Hz uV) of one (C, T) grid; dead rows NaN.
+- `rms_envelope(raw: np.ndarray, fs: float, mv_per_count: float, win_s: float=0.05) -> np.ndarray` â€” (C, W) RMS in uV of the CAR 20-450 Hz signal over consecutive win_s windows.
+- `channel_quality(raw: np.ndarray, fs: float, mv_per_count: float, win_s: float=0.5) -> dict[str, np.ndarray]` â€” Per-channel quality metrics for one (C, T) monopolar grid, plus the (C, W) windowed RMS in uV.
+- `flag_channels(q: dict[str, np.ndarray]) -> list[str]` â€” Per-channel ';'-joined reasons a channel is unusable ('' = good).
+
 ### `vicon2mano/core/export.py`
 
 Export FitResult to common formats.
@@ -181,6 +194,7 @@ Shared visualisation vocabulary for relabelling animations.
 
 - `marker_color(label: str) -> str` â€” (no docstring)
 - `marker_digit(label: str) -> str` â€” (no docstring)
+- `marker_bone_pairs(labels)` â€” (i, j) index pairs for MARKER_BONES present in this label set (subject prefixes like "P15:" ignored).
 
 ## Package: vicon2mano/strategies
 
@@ -459,6 +473,16 @@ Train the deep marker labeler (Han et al., SIGGRAPH 2018).
 - `focal_bce_loss(logits, targets, *, gamma: float=2.0, alpha: float=0.75)` â€” Sigmoid focal binary cross-entropy.
 - `main()` â€” (no docstring)
 
+## Scripts: scripts/emg
+
+### `scripts/emg/emg_quality.py`
+
+Per-channel quality report for the Novecento+ HD-sEMG recordings.
+
+- `aux_bursts(aux: np.ndarray, fs: float, gap_s: float=0.5) -> list[tuple[float, float]]` â€” (start, end) seconds of each interval where AUX1 (the Vicon sync input) is off baseline.
+- `run(otb4: Path) -> list[dict]` â€” Analyse one recording; write its channel CSV and heat map, return its summary rows.
+- `main() -> None` â€” (no docstring)
+
 ## Scripts: scripts/gmm
 
 ### `scripts/gmm/_common.py`
@@ -503,9 +527,12 @@ Ground-truth validation of strategyGMM: inject a known swap into clean real mark
 
 HTML animation: fitted MANO mesh surface + Vicon marker overlay, at real elapsed-time playback speed.
 
-- `marker_bone_pairs(labels)` â€” (i, j) index pairs for _MARKER_BONES present in this label set.
 - `resolve_model_path(mano_dir: str, side: str) -> Path` â€” (no docstring)
 - `forward_vertices(model, global_orient, hand_pose, transl, betas, scale=1.0, thickness=1.0, seglen=None) -> np.ndarray` â€” No-grad forward pass -> (n, 778, 3) mesh vertices in metres, with the fit's global ``scale``, palm ``thickness`` and per-segment finger lengths ``seglen`` (fit_surface_markers --fit-scale / --fit-thickness / --fit-segments).
+- `load_model(mano_dir: str, side: str, pose_dim: int)` â€” smplx MANO matching a fit's pose parameterisation: 45 = raw axis-angle, else PCA.
+- `fit_vertices_mm(model, fit, frame_idx) -> np.ndarray` â€” (n, 778, 3) mesh vertices in mm for these frames of a FitResult npz.
+- `view_box(verts_mm, markers_mm)` â€” (center, half-width) of a fixed cubic view over every vertex and finite marker.
+- `render_mesh_frames(verts_mm, markers_mm, faces, bone_pairs, center, half, frame_numbers, dpi=85) -> list[bytes]` â€” One JPEG per frame: opaque mesh + marker bones + markers; center is (3,) for fixed axes or (n, 3) to follow.
 - `main() -> None` â€” (no docstring)
 
 ### `scripts/mano/calibrate_shape_on_static.py`
@@ -735,6 +762,12 @@ Export per-frame finger flexion angles to CSV.
 
 - `flexion_angles(joints: np.ndarray) -> dict[str, np.ndarray]` â€” joints: (T, 21, 3) metres -> {f"{finger}_{joint}": (T,) degrees}.
 - `main()` â€” (no docstring)
+
+### `scripts/shared/gen_api_reference.py`
+
+- `first(doc, n=2)` â€” (no docstring)
+- `sig(fn)` â€” (no docstring)
+- `section(f)` â€” (no docstring)
 
 ### `scripts/shared/geometric_self_consistency.py`
 

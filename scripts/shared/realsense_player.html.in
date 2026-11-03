@@ -1,0 +1,269 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RealSense player</title>
+<style>
+  body{margin:0;background:#16181c;color:#ddd;font:13px system-ui,sans-serif}
+  header{padding:8px 14px;display:flex;gap:18px;align-items:baseline;flex-wrap:wrap}
+  h1{font-size:15px;margin:0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:8px;padding:0 14px;align-items:start}
+  .cam{background:#000;position:relative}
+  .cam video{width:100%;display:block}
+  .cam.off video,.cam.off canvas{opacity:.25}
+  .cam .lbl{position:absolute;left:6px;top:4px;font:12px ui-monospace,monospace;background:#000a;padding:2px 6px}
+  .cam .lbl input{width:60px;background:#222;color:#ddd;border:1px solid #444;font:inherit}
+  .bar{padding:10px 14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  #scrub{flex:1;min-width:200px}
+  button,select,input{background:#262a31;color:#ddd;border:1px solid #444;border-radius:4px;padding:3px 8px}
+  .mono{font-family:ui-monospace,monospace}
+  #clock span{margin-right:16px} #clock b{color:#8cf;font-weight:normal}
+  .hint{color:#888;padding:0 14px 10px}
+</style></head><body>
+<header><h1 id="title"></h1><div id="clock" class="mono"></div></header>
+<div class="grid" id="grid"></div>
+<div class="bar">
+  <button id="play">▶</button>
+  <button id="back">◀ frame</button><button id="fwd">frame ▶</button>
+  step on <select id="stepcam"></select>
+  speed <select id="rate"><option>0.1</option><option>0.25</option><option>0.5</option><option selected>1</option><option>2</option><option>4</option></select>
+  <input id="scrub" type="range" min="0" max="1000" step="1" value="0">
+</div>
+<div class="bar" id="syncbar">
+  RealSense→Vicon offset <input id="voff" type="number" step="0.005" style="width:80px"> s
+  <button id="vreset">reset</button> <span id="vmethod" style="color:#888"></span>
+  · go to Vicon frame <input id="vgo" type="number" style="width:90px">
+</div>
+<canvas id="strip" height="90" style="width:calc(100% - 28px);margin:0 14px;display:block;background:#0e0f12"></canvas>
+<div class="bar" id="emgbar" style="display:none">
+  EMG→Vicon offset <input id="eoff" type="number" step="0.005" style="width:80px"> s
+  <button id="ereset">reset</button>
+  · scale <select id="escale"><option value="row">per channel (p5–p99)</option><option value="abs">absolute</option></select>
+  <span id="emethod" style="color:#888"></span>
+</div>
+<canvas id="emgspatial" style="margin:4px 14px;display:none"></canvas>
+<canvas id="emgmap" style="width:calc(100% - 28px);margin:0 14px;display:none;background:#000;image-rendering:pixelated"></canvas>
+<div class="hint">Space play/pause · ←/→ step one frame of the chosen camera (Shift ×10) · per-camera offset (ms) shifts that camera on the common clock.
+Times are each camera's global timestamps (epoch ms, UTC); frame# is the sensor counter, gaps = frames the recorder dropped.
+Strip: ±3 s around the cursor — <span style="color:#fff">white</span> = Vicon hand-marker speed, colours = per-camera image motion. Adjust the offset until the peaks line up, then rerun with <code>--offset</code> to write it to the frame CSVs.</div>
+<script>
+const META = /*META*/null;
+const $ = id => document.getElementById(id);
+$('title').textContent = META.title;
+const cams = META.cams.map(c => {
+  const el = document.createElement('div'); el.className = 'cam';
+  el.innerHTML = `<video src="${c.file}" muted preload="auto" playsinline></video>
+    <div class="lbl">${c.name} · ${c.fps_recorded} fps rec · offset <input type="number" value="0"> ms<br><span></span></div>`;
+  $('grid').append(el);
+  $('stepcam').add(new Option(c.name, c.name));
+  return {...c, el, v: el.querySelector('video'), info: el.querySelector('span'),
+          off: el.querySelector('input'), end: c.t0 + c.ts[c.ts.length - 1]};
+});
+const T0 = Math.min(...cams.map(c => c.t0)), T1 = Math.max(...cams.map(c => c.end));
+let T = T0, playing = false, last = 0;
+
+// index of the last recorded frame at or before camera-local time ms (-1 if before the first)
+const idxAt = (c, ms) => { let lo = 0, hi = c.ts.length - 1;
+  if (ms < c.ts[0]) return -1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; c.ts[m] <= ms ? lo = m : hi = m - 1; } return lo; };
+const local = c => T - c.t0 - (+c.off.value || 0);
+const fmt = ms => new Date(ms).toISOString().slice(11, 23);
+
+function render() {
+  const rate = +$('rate').value;
+  for (const c of cams) {
+    const ms = local(c), i = idxAt(c, ms), inside = i >= 0 && ms <= c.ts[c.ts.length - 1] + 50;
+    c.el.classList.toggle('off', !inside);
+    if (inside) {
+      const target = (c.ts[i] + 1) / 1000;
+      if (playing) {
+        c.v.playbackRate = rate;
+        if (c.v.paused) c.v.play();
+        if (Math.abs(c.v.currentTime - ms / 1000) > 0.15) c.v.currentTime = ms / 1000;
+      } else if (!c.v.paused || Math.abs(c.v.currentTime - target) > 0.0005) { c.v.pause(); c.v.currentTime = target; }
+      const gap = i > 0 ? c.fn[i] - c.fn[i - 1] - 1 : 0;
+      c.info.textContent = `frame# ${c.fn[i]} · rec ${i + 1}/${c.n} · ${fmt(c.t0 + c.ts[i])}` + (gap ? ` · ${gap} dropped before` : '');
+    } else { c.v.pause(); c.info.textContent = 'no frame'; }
+  }
+  const trig = META.trigger_ms, vt = viconT(T);
+  $('clock').innerHTML = `<span>UTC <b>${fmt(T)}</b></span>` +
+    (trig ? `<span>t − trigger <b>${((T - trig) / 1000).toFixed(3)} s</b></span>` : '') +
+    (S ? `<span>Vicon <b>${vt.toFixed(3)} s · frame ${Math.floor(vt * S.vicon_rate) + 1}</b></span>` : '');
+  $('scrub').value = Math.round(1000 * (T - T0) / (T1 - T0));
+  $('play').textContent = playing ? '❚❚' : '▶';
+  if (S) drawStrip();
+  if (E) drawEmg();
+  if (M) drawMarkers();
+}
+
+// ---- Vicon sync -----------------------------------------------------------
+const S = META.sync, COLS = ['#f6a', '#6cf', '#fc6', '#8f8'];
+const viconT = t => S ? (t - S.vicon_start_ms) / 1000 + (+$('voff').value || 0) : NaN;
+const norm = a => { const l = a.map(Math.log1p), s = [...l].sort((x, y) => x - y)[Math.floor(l.length * .99)] || 1;
+                    return l.map(v => Math.min(v / s, 1.2)); };
+let speedN, motionN;
+if (S) {
+  $('voff').value = S.offset_s;
+  $('vmethod').textContent = `auto: ${S.offset_s} s, ${S.method}; xcorr ` +
+    Object.entries(S.xcorr).map(([k, v]) => `${k} ${v.lag_s} s (r=${v.r})`).join(', ');
+  $('vreset').onclick = () => { $('voff').value = S.offset_s; };
+  const goVicon = f => { playing = false; T = S.vicon_start_ms + ((f - 1) / S.vicon_rate - +$('voff').value) * 1000; };
+  $('vgo').onchange = e => goVicon(+e.target.value);
+  const h = /vf=(\d+)/.exec(location.hash); if (h) goVicon(+h[1]);  // player.html#vf=4000 opens at Vicon frame 4000
+  speedN = norm(META.speed50); motionN = cams.map(c => norm(c.motion));
+  cams.forEach((c, k) => c.el.querySelector('.lbl').style.borderLeft = `4px solid ${COLS[k % COLS.length]}`);
+} else $('syncbar').style.display = $('strip').style.display = 'none';
+
+// ---- live 3-D pane of the raw Vicon markers ---------------------------------
+const M = S && META.markers;
+let mk;
+if (M) {
+  const el = document.createElement('div'); el.className = 'cam';
+  el.innerHTML = `<canvas style="width:100%;aspect-ratio:16/10;display:block;background:#fff;cursor:grab;touch-action:none"></canvas>
+    <div class="lbl">Vicon markers (raw) · ${M.rate} Hz · drag rotate, wheel zoom<br><span></span></div>`;
+  $('grid').append(el);
+  mk = {el, cv: el.querySelector('canvas'), info: el.querySelector('span'), key: '', yaw: -0.8, pitch: 0.35, zoom: 1,
+        data: new Int16Array(Uint8Array.from(atob(M.data), c => c.charCodeAt(0)).buffer)};
+  mk.hand = M.labels.map((l, j) => l.toLowerCase().startsWith('forearm') ? -1 : j).filter(j => j >= 0);
+  let drag = null;
+  mk.cv.onpointerdown = e => { drag = [e.clientX, e.clientY]; mk.cv.setPointerCapture(e.pointerId); };
+  mk.cv.onpointerup = () => { drag = null; };
+  mk.cv.onpointermove = e => {
+    if (!drag) return;
+    mk.yaw += (e.clientX - drag[0]) * .01; mk.pitch = Math.max(-1.5, Math.min(1.5, mk.pitch + (e.clientY - drag[1]) * .01));
+    drag = [e.clientX, e.clientY]; mk.key = '';
+  };
+  mk.cv.onwheel = e => { e.preventDefault(); mk.zoom *= e.deltaY < 0 ? 1.15 : 1 / 1.15; mk.key = ''; };
+}
+const mkAt = (i, j) => { const o = (i * M.labels.length + j) * 3; return mk.data[o] === -32768 ? null : [mk.data[o], mk.data[o + 1], mk.data[o + 2]]; };
+function mkCentre(i) {  // hand centroid averaged over ±0.5 s: a reach still shows as movement, but the hand stays in view
+  const c = [0, 0, 0]; let n = 0, r = Math.round(M.rate / 2);
+  for (let f = Math.max(0, i - r); f <= Math.min(M.n - 1, i + r); f += 5) for (const j of mk.hand) {
+    const p = mkAt(f, j); if (p) { c[0] += p[0]; c[1] += p[1]; c[2] += p[2]; n++; }
+  }
+  return n ? c.map(v => v / n) : null;
+}
+function drawMarkers() {
+  const vt = viconT(T), i = Math.floor(vt * M.rate), cv = mk.cv, key = [i, mk.yaw, mk.pitch, mk.zoom, cv.clientWidth].join();
+  if (key === mk.key) return; mk.key = key;
+  const W = cv.width = cv.clientWidth, H = cv.height = cv.clientHeight, g = cv.getContext('2d');
+  const inside = i >= 0 && i < M.n, c = inside && mkCentre(i);
+  mk.el.classList.toggle('off', !inside);
+  if (!c) { mk.info.textContent = inside ? 'no hand markers' : 'no Vicon frame'; return; }
+  const s = Math.min(W, H) / 2 / 150 * mk.zoom, cy = Math.cos(mk.yaw), sy = Math.sin(mk.yaw), cp = Math.cos(mk.pitch), sp = Math.sin(mk.pitch);
+  const P = M.labels.map((_, j) => {
+    const p = mkAt(i, j); if (!p) return null;
+    const dx = p[0] - c[0], dy = p[1] - c[1], dz = p[2] - c[2], u = cy * dx - sy * dy, w = sy * dx + cy * dy;
+    return [W / 2 + u * s, H / 2 - (dz * cp - w * sp) * s];
+  });
+  g.strokeStyle = '#16a34a'; g.lineWidth = 2;
+  for (const [a, b] of M.bones) if (P[a] && P[b]) { g.beginPath(); g.moveTo(...P[a]); g.lineTo(...P[b]); g.stroke(); }
+  P.forEach((p, j) => { if (p) { g.fillStyle = M.colors[j]; g.beginPath(); g.arc(p[0], p[1], 4, 0, 7); g.fill(); } });
+  const seen = P.filter(Boolean).length;
+  mk.info.textContent = `Vicon frame ${Math.floor(vt * S.vicon_rate) + 1} · ${seen}/${M.labels.length} markers`;
+}
+
+// ---- EMG heatmap: channel x time, same ±3 s axis as the strip -------------
+const E = S && META.emg, GAP = 6;
+let emgData, emgLut, emgKey = '', emgLo, emgSpan;
+if (E) {
+  emgData = Uint8Array.from(atob(E.data), c => c.charCodeAt(0));
+  const nRows = E.grids.length * E.channels;  // per-channel p5/p99 for the "per channel" scale
+  emgLo = new Float32Array(nRows); emgSpan = new Float32Array(nRows);
+  for (let r = 0; r < nRows; r++) {
+    const s = emgData.slice(r * E.windows, (r + 1) * E.windows).sort();
+    emgLo[r] = s[Math.floor(s.length * .05)]; emgSpan[r] = Math.max(s[Math.floor(s.length * .99)] - emgLo[r], 1);
+  }
+  const stops = [[0, 0, 4], [40, 11, 84], [101, 21, 110], [159, 42, 99], [212, 72, 66], [245, 125, 21], [250, 193, 39], [252, 255, 164]];
+  emgLut = new Uint8Array(256 * 3);  // magma-like
+  for (let i = 0; i < 256; i++) {
+    const f = i / 255 * (stops.length - 1), k = Math.min(Math.floor(f), stops.length - 2), r = f - k;
+    for (let j = 0; j < 3; j++) emgLut[i * 3 + j] = stops[k][j] + (stops[k + 1][j] - stops[k][j]) * r;
+  }
+  $('eoff').value = E.offset_s;
+  $('emethod').textContent = `auto: ${E.offset_s} s, ${E.method} · ${E.file} · ${E.grids.length} grids × ${E.channels} ch, ` +
+    `log10 RMS 20-450 Hz CAR (absolute: 1 µV dark to ${Math.round(10 ** E.log_max)} µV light); red tick = flagged channel`;
+  $('ereset').onclick = () => { $('eoff').value = E.offset_s; };
+  $('emgbar').style.display = 'flex'; $('emgmap').style.display = $('emgspatial').style.display = 'block';
+}
+const emgVal = (r, raw, perRow) => perRow ? Math.max(0, Math.min(255, Math.round((raw - emgLo[r]) / emgSpan[r] * 255))) : raw;
+const rgb = v => `rgb(${emgLut[v * 3]},${emgLut[v * 3 + 1]},${emgLut[v * 3 + 2]})`;
+
+// one rows x cols map per grid at the cursor (mean of ±100 ms); channel k sits at row k % rows, column k / rows
+function drawSpatial(te, perRow) {
+  const cv = $('emgspatial'), cell = 15, gw = E.cols * cell, gap = 28, top = 16, nC = E.channels;
+  const W = E.grids.length * (gw + gap), H = top + E.rows * cell;
+  if (cv.width !== W) { cv.width = W; cv.height = H; }
+  const g = cv.getContext('2d'), w0 = Math.floor(te / E.win_s), k = Math.round(0.1 / E.win_s);
+  g.clearRect(0, 0, W, H); g.font = '11px ui-monospace,monospace';
+  E.grids.forEach((gr, gi) => {
+    const x0 = gi * (gw + gap);
+    g.fillStyle = '#ddd'; g.fillText(`grid ${gi + 1}`, x0, 11);
+    for (let c = 0; c < nC; c++) {
+      const r = gi * nC + c, a = Math.max(0, w0 - k), b = Math.min(E.windows - 1, w0 + k);
+      let s = 0; for (let w = a; w <= b; w++) s += emgData[r * E.windows + w];
+      const inside = w0 >= 0 && w0 < E.windows, x = x0 + Math.floor(c / E.rows) * cell, y = top + (c % E.rows) * cell;
+      g.fillStyle = inside ? rgb(emgVal(r, s / (b - a + 1), perRow)) : '#000'; g.fillRect(x, y, cell - 1, cell - 1);
+      if (gr.flagged.includes(c + 1)) { g.strokeStyle = '#f33'; g.strokeRect(x + .5, y + .5, cell - 2, cell - 2); }
+    }
+  });
+}
+function drawEmg() {
+  const cv = $('emgmap'), W = cv.clientWidth, nC = E.channels, H = E.grids.length * (nC + GAP) - GAP;
+  const perRow = $('escale').value === 'row', key = [T, W, $('voff').value, $('eoff').value, perRow].join();
+  if (key === emgKey) return; emgKey = key;
+  drawSpatial(viconT(T) + (+$('eoff').value || 0), perRow);
+  if (cv.width !== W) { cv.width = W; cv.height = H; cv.style.height = H + 'px'; }
+  const g = cv.getContext('2d'), img = g.createImageData(W, H), px = img.data, span = 3000, eoff = +$('eoff').value || 0;
+  for (let x = 0; x < W; x++) {
+    const te = viconT(T + (x / W * 2 - 1) * span) + eoff, w = Math.floor(te / E.win_s);
+    if (w < 0 || w >= E.windows) continue;
+    for (let gi = 0; gi < E.grids.length; gi++) for (let c = 0; c < nC; c++) {
+      const r = gi * nC + c, raw = emgData[r * E.windows + w], o = ((gi * (nC + GAP) + c) * W + x) * 4;
+      const v = emgVal(r, raw, perRow);
+      px[o] = emgLut[v * 3]; px[o + 1] = emgLut[v * 3 + 1]; px[o + 2] = emgLut[v * 3 + 2]; px[o + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  g.fillStyle = '#f33';
+  E.grids.forEach((gr, gi) => gr.flagged.forEach(c => g.fillRect(0, gi * (nC + GAP) + c - 1, 6, 1)));
+  g.fillStyle = '#ddd'; g.font = '11px ui-monospace,monospace';
+  E.grids.forEach((gr, gi) => g.fillText(`grid ${gi + 1} (${gr.name})`, 10, gi * (nC + GAP) + 12));
+  g.strokeStyle = '#fff'; g.beginPath(); g.moveTo(W / 2 + .5, 0); g.lineTo(W / 2 + .5, H); g.stroke();
+}
+
+function drawStrip() {
+  const cv = $('strip'), W = cv.width = cv.clientWidth, H = cv.height, g = cv.getContext('2d'), span = 3000;
+  const x = t => (t - T + span) / (2 * span) * W, y = v => H - 4 - v * (H - 10);
+  g.clearRect(0, 0, W, H);
+  const line = (pts, col) => { g.strokeStyle = col; g.beginPath(); pts.forEach(([t, v], i) => g[i ? 'lineTo' : 'moveTo'](x(t), y(v))); g.stroke(); };
+  const vt0 = viconT(T), i0 = Math.max(0, Math.floor((vt0 - span / 1000) * 50)), i1 = Math.min(speedN.length, Math.ceil((vt0 + span / 1000) * 50));
+  const pts = []; for (let i = i0; i < i1; i++) pts.push([T + ((i + .5) / 50 - vt0) * 1000, speedN[i]]);
+  line(pts, '#fff');
+  cams.forEach((c, k) => {
+    if (!c.motion.some(v => v)) return;  // no motion trace (e.g. a rendered mesh pane)
+    const off = c.t0 + (+c.off.value || 0), a = Math.max(1, idxAt(c, T - off - span)), b = Math.min(c.n - 1, idxAt(c, T - off + span) + 1);
+    const p = []; for (let i = a; i <= b; i++) p.push([off + (c.ts[i] + c.ts[i - 1]) / 2, motionN[k][i]]);
+    line(p, COLS[k % COLS.length]);
+  });
+  g.strokeStyle = '#888'; g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.stroke();
+}
+function tick(now) {
+  if (playing) { T += (now - last) * +$('rate').value; if (T >= T1) { T = T1; playing = false; } }
+  last = now; render(); requestAnimationFrame(tick);
+}
+function step(k) {
+  playing = false;
+  const c = cams.find(c => c.name === $('stepcam').value), i = idxAt(c, local(c));
+  const j = Math.max(0, Math.min(c.n - 1, i + k));
+  T = c.t0 + c.ts[j] + (+c.off.value || 0);
+}
+$('play').onclick = () => { playing = !playing; if (T >= T1) T = T0; };
+$('back').onclick = () => step(-1); $('fwd').onclick = () => step(1);
+$('scrub').oninput = e => { playing = false; T = T0 + (T1 - T0) * e.target.value / 1000; };
+document.onkeydown = e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.code === 'Space') { e.preventDefault(); $('play').click(); }
+  if (e.code === 'ArrowLeft') step(e.shiftKey ? -10 : -1);
+  if (e.code === 'ArrowRight') step(e.shiftKey ? 10 : 1);
+};
+requestAnimationFrame(t => { last = t; tick(t); });
+</script></body></html>

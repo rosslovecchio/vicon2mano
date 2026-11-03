@@ -53,27 +53,7 @@ for _attr, _builtin in {"int": int, "float": float, "bool": bool, "complex": com
         setattr(_np, _attr, _builtin)
 
 from vicon2mano.core.loader import load_csv
-
-# Segments of the MARKER SET itself -- the chains the Vicon labels describe,
-# drawn so the markers read as a hand rather than a cloud of dots. This is
-# raw measured geometry, independent of the fitted model: where a bone and
-# the mesh disagree, that is the fit's error made visible.
-_MARKER_BONES = [
-    ("Palm1", "Palm2"), ("Palm2", "Palm3"), ("Palm3", "Palm1"),
-    ("Palm2", "Thumb1"), ("Thumb1", "Thumb2"), ("Thumb2", "Thumb3"),
-    ("Palm2", "Index1"), ("Index1", "Index2"), ("Index2", "Index3"),
-    ("Palm2", "Middle1"), ("Middle1", "Middle2"), ("Middle2", "Middle3"),
-    ("Palm2", "Ring1"), ("Ring1", "Ring2"), ("Ring2", "Ring3"),
-    ("Palm2", "Pinky1"), ("Pinky1", "Pinky2"), ("Pinky2", "Pinky3"),
-    ("Index1", "Middle1"), ("Middle1", "Ring1"), ("Ring1", "Pinky1"),
-]
-
-
-def marker_bone_pairs(labels):
-    """(i, j) index pairs for _MARKER_BONES present in this label set."""
-    idx = {l: i for i, l in enumerate(labels)}
-    return [(idx[a], idx[b]) for a, b in _MARKER_BONES
-            if a in idx and b in idx]
+from vicon2mano.core.viz import marker_bone_pairs
 
 _HTML_TEMPLATE = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -323,6 +303,83 @@ def forward_vertices(model, global_orient, hand_pose, transl, betas, scale=1.0, 
     return out.vertices.numpy()
 
 
+def load_model(mano_dir: str, side: str, pose_dim: int):
+    """smplx MANO matching a fit's pose parameterisation: 45 = raw axis-angle, else PCA."""
+    import smplx
+    return smplx.create(str(resolve_model_path(mano_dir, side)), model_type="mano", is_rhand=(side == "right"),
+                        use_pca=(pose_dim != 45), num_pca_comps=pose_dim, flat_hand_mean=True, batch_size=1)
+
+
+def fit_vertices_mm(model, fit, frame_idx) -> np.ndarray:
+    """(n, 778, 3) mesh vertices in mm for these frames of a FitResult npz."""
+    return 1000.0 * forward_vertices(
+        model, fit["global_orient"][frame_idx], fit["hand_pose"][frame_idx], fit["transl"][frame_idx], fit["betas"],
+        float(fit["scale"]) if "scale" in fit else 1.0,
+        float(fit["thickness"]) if "thickness" in fit else 1.0,
+        fit["seglen"] if "seglen" in fit and not np.allclose(fit["seglen"], 1.0) else None)
+
+
+def view_box(verts_mm, markers_mm):
+    """(center, half-width) of a fixed cubic view over every vertex and finite marker.
+
+    Computed once (same pattern as scripts/gmm/relabel_trial.py's build_figure),
+    so the hand doesn't visually jump as the window re-centres frame to frame.
+    """
+    m = markers_mm.reshape(-1, 3)
+    pts = np.concatenate([verts_mm.reshape(-1, 3), m[np.isfinite(m).all(-1)]])
+    center = np.nanmean(pts, axis=0)
+    return center, np.nanmax(np.linalg.norm(pts - center, axis=-1)) * 1.1
+
+
+def render_mesh_frames(verts_mm, markers_mm, faces, bone_pairs, center, half, frame_numbers, dpi=85) -> list[bytes]:
+    """One JPEG per frame: opaque mesh + marker bones + markers; center is (3,) for fixed axes or (n, 3) to follow."""
+    center = np.broadcast_to(center, (len(frame_numbers), 3))
+    import io
+    fig = plt.figure(figsize=(8, 7))
+    ax = fig.add_subplot(111, projection="3d")
+    jpegs = []
+    for k in range(len(frame_numbers)):
+        ax.clear()
+        v = verts_mm[k]
+        # Known limitation, not yet fixed: mplot3d depth-sorts the mesh
+        # surface (Poly3DCollection) and the marker scatter (PathCollection)
+        # independently via separate per-artist heuristics, and regularly
+        # gets the ordering wrong -- an opaque mesh can hide markers that are
+        # geometrically in front of it. zorder does NOT fix this (mplot3d
+        # doesn't use it for cross-artist depth). Tried alpha<1 as a
+        # mitigation -- worse, not better: translucency also breaks
+        # mplot3d's self-sorting of the mesh's OWN overlapping triangles
+        # (fingers self-occlude heavily in 2D projection), producing visible
+        # dark hatching across the surface. Reverted to opaque. Real fix
+        # needs a renderer with actual depth-buffering (e.g. baking frames
+        # via Plotly+Kaleido instead of matplotlib) -- not done here.
+        ax.plot_trisurf(v[:, 0], v[:, 1], v[:, 2], triangles=faces,
+                        color="#e8a0a0", edgecolor="none", shade=True,
+                        antialiased=False, alpha=0.95)
+        m = markers_mm[k]
+        finite = np.isfinite(m).all(axis=-1)
+        for ia, ib in bone_pairs:
+            if finite[ia] and finite[ib]:
+                ax.plot([m[ia, 0], m[ib, 0]], [m[ia, 1], m[ib, 1]],
+                        [m[ia, 2], m[ib, 2]], c="#16a34a", lw=1.4)
+        if finite.any():
+            ax.scatter(*m[finite].T, c="#2c3e50", s=22, depthshade=False)
+        ax.set_xlim(center[k, 0] - half, center[k, 0] + half)
+        ax.set_ylim(center[k, 1] - half, center[k, 1] + half)
+        ax.set_zlim(center[k, 2] - half, center[k, 2] + half)
+        ax.set_box_aspect((1, 1, 1))
+        ax.set_title(f"frame {int(frame_numbers[k])}", fontsize=10)
+        ax.set_xlabel("X (mm)", fontsize=7)
+        ax.set_ylabel("Y (mm)", fontsize=7)
+        ax.set_zlabel("Z (mm)", fontsize=7)
+        ax.tick_params(labelsize=6)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="jpeg", dpi=dpi)
+        jpegs.append(buf.getvalue())
+    plt.close(fig)
+    return jpegs
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--npz", required=True, help="FitResult .npz from vicon2mano")
@@ -340,19 +397,12 @@ def main() -> None:
     ap.add_argument("--dpi", type=int, default=85, help="render resolution (lower = smaller file)")
     args = ap.parse_args()
 
-    import smplx
-    model_path = resolve_model_path(args.mano_dir, args.side)
     # The pose parameterisation has to match whatever produced the npz:
     # the stock fitter writes 6 PCA coefficients, the surface-marker fit
     # writes raw 45-DOF axis-angle. Infer it from the file rather than
     # assuming, so a 45-DOF npz is not silently misread as PCA.
     _npz_pose_dim = int(np.load(args.npz)["hand_pose"].shape[1])
-    model = smplx.create(
-        str(model_path), model_type="mano",
-        is_rhand=(args.side == "right"),
-        use_pca=(_npz_pose_dim != 45), num_pca_comps=_npz_pose_dim,
-        flat_hand_mean=True, batch_size=1,
-    )
+    model = load_model(args.mano_dir, args.side, _npz_pose_dim)
     print(f"[animate_mesh] hand_pose dim {_npz_pose_dim} -> "
           f"{'PCA' if _npz_pose_dim != 45 else 'full 45-DOF axis-angle'}")
     faces = model.faces  # (nf, 3) int
@@ -379,78 +429,17 @@ def main() -> None:
           f"-> {playback_fps:.1f} fps playback (real-time)")
 
     print("[animate_mesh] running forward pass for sampled frames...")
-    verts_m = forward_vertices(
-        model,
-        fit["global_orient"][frame_idx],
-        fit["hand_pose"][frame_idx],
-        fit["transl"][frame_idx],
-        fit["betas"],
-        float(fit["scale"]) if "scale" in fit else 1.0,
-        float(fit["thickness"]) if "thickness" in fit else 1.0,
-        fit["seglen"] if "seglen" in fit and not np.allclose(fit["seglen"], 1.0) else None,
-    )
-    verts_mm = verts_m * 1000.0  # metres -> mm, to match raw marker scale
+    verts_mm = fit_vertices_mm(model, fit, frame_idx)
     sampled_markers = markers_mm[frame_idx]  # (n, N, 3) mm
 
-    # Fixed camera range across the whole animation, computed once (same
-    # pattern as scripts/gmm/relabel_trial.py's build_figure), so the hand
-    # doesn't visually jump as the window re-centres frame to frame.
-    flat_markers = sampled_markers.reshape(-1, 3)
-    all_pts = np.concatenate([
-        verts_mm.reshape(-1, 3),
-        flat_markers[np.isfinite(flat_markers).all(-1)],
-    ], axis=0)
-    center = np.nanmean(all_pts, axis=0)
-    half = np.nanmax(np.linalg.norm(all_pts - center, axis=-1)) * 1.1
+    center, half = view_box(verts_mm, sampled_markers)
 
     print("[animate_mesh] rendering frames...")
     import base64
-    import io
-
-    fig = plt.figure(figsize=(8, 7))
-    ax = fig.add_subplot(111, projection="3d")
     bone_pairs = marker_bone_pairs(labels)
     print(f"[animate_mesh] drawing {len(bone_pairs)} marker bones")
-    frames_b64 = []
-    for k in range(len(frame_idx)):
-        ax.clear()
-        v = verts_mm[k]
-        # Known limitation, not yet fixed: mplot3d depth-sorts the mesh
-        # surface (Poly3DCollection) and the marker scatter (PathCollection)
-        # independently via separate per-artist heuristics, and regularly
-        # gets the ordering wrong -- an opaque mesh can hide markers that are
-        # geometrically in front of it. zorder does NOT fix this (mplot3d
-        # doesn't use it for cross-artist depth). Tried alpha<1 as a
-        # mitigation -- worse, not better: translucency also breaks
-        # mplot3d's self-sorting of the mesh's OWN overlapping triangles
-        # (fingers self-occlude heavily in 2D projection), producing visible
-        # dark hatching across the surface. Reverted to opaque. Real fix
-        # needs a renderer with actual depth-buffering (e.g. baking frames
-        # via Plotly+Kaleido instead of matplotlib) -- not done here.
-        ax.plot_trisurf(v[:, 0], v[:, 1], v[:, 2], triangles=faces,
-                         color="#e8a0a0", edgecolor="none", shade=True,
-                         antialiased=False, alpha=0.95)
-        m = sampled_markers[k]
-        finite = np.isfinite(m).all(axis=-1)
-        for ia, ib in bone_pairs:
-            if finite[ia] and finite[ib]:
-                ax.plot([m[ia, 0], m[ib, 0]], [m[ia, 1], m[ib, 1]],
-                        [m[ia, 2], m[ib, 2]], c="#16a34a", lw=1.4)
-        if finite.any():
-            ax.scatter(*m[finite].T, c="#2c3e50", s=22, depthshade=False)
-        ax.set_xlim(center[0] - half, center[0] + half)
-        ax.set_ylim(center[1] - half, center[1] + half)
-        ax.set_zlim(center[2] - half, center[2] + half)
-        ax.set_box_aspect((1, 1, 1))
-        ax.set_title(f"frame {int(frame_idx[k])}", fontsize=10)
-        ax.set_xlabel("X (mm)", fontsize=7)
-        ax.set_ylabel("Y (mm)", fontsize=7)
-        ax.set_zlabel("Z (mm)", fontsize=7)
-        ax.tick_params(labelsize=6)
-        buf = io.BytesIO()
-        fig.savefig(buf, format="jpeg", dpi=args.dpi)
-        frames_b64.append(base64.b64encode(buf.getvalue()).decode("ascii"))
-    plt.close(fig)
+    frames_b64 = [base64.b64encode(j).decode("ascii") for j in
+                  render_mesh_frames(verts_mm, sampled_markers, faces, bone_pairs, center, half, frame_idx, args.dpi)]
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
