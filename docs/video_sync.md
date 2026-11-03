@@ -171,8 +171,8 @@ the camera-disagreement trials listed under the cohort run.
 ```
 
 **All fitted trials** (2026-10-29) were rendered as the whole trial at `--step 4` (50 Hz:
-still 2–6× the cameras, and about 10k frames per trial). P16 Trial2 HOI kept its
-10k-frame, full-rate render. The fit folder is matched by normalised name, since fits
+still 2–6× the cameras, and about 10k frames per trial). P16 Trial2 HOI is instead
+rendered at every frame for the whole trial (200 Hz, 42,292 frames, 5 min, 77 MB). The fit folder is matched by normalised name, since fits
 spell `Trial 1` as `Trial_1`. Trials without a SOMA fit (P1, P2, P5, P13 except
 Trial1 Hands_only, P17 except Trial1 Hands_only) get no mesh pane but do get the markers pane.
 
@@ -282,6 +282,6 @@ by up to 1.1 s. That looks like the RealSense PC's clock being re-synced between
 `OneDrive/.../data_June25/soma_transfer/video/` mirrors `results/video/`: `<P>/<Trial>_<cond>/player.html`
 with its MP4s, frame CSVs and `sync.json` beside it, plus `sync_summary.csv`. Every synced
 trial has the markers pane, and fitted trials also have the whole-trial 50 Hz mesh.
-P16 Trial2 HOI instead has a 10k-frame, 200 Hz mesh (Vicon frames 1–10000) and the
-HD-sEMG panes (EMG offset 3.9325 s from the AUX 1 pulse). To refresh it, copy
+P16 Trial2 HOI instead has the whole-trial mesh at every frame (200 Hz). 58 trials
+also have the HD-sEMG panes (see emg.md). To refresh it, copy
 `results/video/.` over it again.
