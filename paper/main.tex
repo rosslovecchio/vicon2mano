@@ -138,9 +138,10 @@ the cohort evaluation.
 corrected exports are trustworthy only at those frames. One trial (P10 Trial2 Hands only, about 42k frames) was
 relabelled in full.
 
-\paragraph{Software.} \texttt{pip install -e ".[dev,train]"} plus \texttt{plotly} and \texttt{matplotlib}; a CUDA
-GPU is recommended. Scripts look for MANO in a sibling \texttt{clean\_kinematics/mano\_v1\_2/models} directory, else
-under the data root, or take \texttt{--mano-dir}.
+\paragraph{Software.} Python 3.12; \texttt{pip install -e ".[dev,train]"} plus \texttt{plotly} and
+\texttt{matplotlib} (this installs \texttt{chumpy}, which the official MANO files need). A CUDA GPU is recommended but not
+required. Point the scripts to MANO with the environment variable \texttt{VICON2MANO\_MANO\_DIR}; otherwise they look in
+a sibling \texttt{clean\_kinematics/mano\_v1\_2/models} directory, then under the data root.
 
 \paragraph{Start here: filling-and-fitting smoke test (synthetic data).}
 \texttt{scripts/soma/quickstart\_synth.py} generates a participant from MANO alone and runs gap filling and the movement
@@ -164,7 +165,10 @@ every 10th frame is fitted with the learned fill; all results are compared with 
 The check passes when the generated markers match the frozen fingerprint, every gap is filled with a learned-fill
 median of at most 10\,mm, and the median local joint-rotation error is at most 10\textdegree. Repeated runs differ
 slightly (the learned Ring3 median was 3.12--3.34\,mm over three runs), so results are compared against tolerances, not
-exact values.
+exact values. \emph{Clean-environment check:} a fresh clone installed with only the steps above (CPU-only PyTorch, MANO
+given by \texttt{VICON2MANO\_MANO\_DIR}) passed the test in 145\,s. The fingerprint matched, the rigid fill and the
+local joint-rotation error (median 5.15\textdegree, 95th percentile 13.77\textdegree) agreed with the reference, and the
+learned-fill medians were 1.2--2.7\,mm. The first such run failed because \texttt{chumpy} was not declared; it now is.
 \paragraph{Real-data example.} P3, a selected successful case: its accepted static meets the 5\,mm target, and its
 labeller scored 98.8\% (HOI) and 99.3\% (Hands only) on the reviewed frames, against 94.2\% and 96.7\% for Vicon. An
 excerpt is prepared locally (\texttt{make\_fixture.py}: a 30\,s HOI excerpt with two reviewed frames, a training
