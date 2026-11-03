@@ -21,6 +21,7 @@ from vicon2mano.strategies.soma.calibrate import static_cloud
 ap = argparse.ArgumentParser()
 ap.add_argument("--participant", default="P4")
 ap.add_argument("--static", required=True, help="params.npz of static_final_fit.py")
+ap.add_argument("--static-csv", default=None, help="static recording (default: the participant's, via static_pose_check.sources)")
 ap.add_argument("--csv", required=True, help="labelled trial CSV")
 ap.add_argument("--out", required=True)
 ap.add_argument("--chunk", type=int, default=4096)
@@ -75,7 +76,7 @@ def fwd(go, hp, tr):
 
 
 # static: rest wrist and the palm markers it was fitted to, for the rigid start of every frame
-Xs, ns = load_csv(str(spc.sources(p)[p][0]))[:2]
+Xs, ns = load_csv(a.static_csv or str(spc.sources(p)[p][0]))[:2]
 cloud = dict(zip([n.split(":")[-1] for n in ns], static_cloud(Xs, 30)[0]))
 go_s, hp_s, tr_s = (z[k][0] for k in ("global_orient", "hand_pose", "transl"))
 with torch.no_grad():

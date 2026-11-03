@@ -112,13 +112,13 @@ def main():
     ap.add_argument("--mano-dir", default=None, help="only needed if the reference stores PCA poses")
     args = ap.parse_args()
 
-    from vicon2mano.core.dataset import DATA_ROOT
+    from vicon2mano.core.dataset import MANO_DIR
     from vicon2mano.core.loader import load_csv
     raw, rn = load_csv(args.raw)[:2]
     man, mn = load_csv(args.manual)[:2]
     rn, mn = [n.split(":")[-1] for n in rn], [n.split(":")[-1] for n in mn]
     cls = finger_frame_class(raw, man, rn, mn)
-    ref, rfr = load_pose(args.reference, args.mano_dir or str(DATA_ROOT / "mano_v1_2" / "models"))
+    ref, rfr = load_pose(args.reference, args.mano_dir or str(MANO_DIR))
     print("finger-frames by Vicon's labels (right / wrong / other): " + ", ".join(
         f"{f} {int((cls[f] == 'right').sum())}/{int((cls[f] == 'wrong').sum())}/{int((cls[f] == 'other').sum())}"
         for f in FINGERS))
@@ -126,7 +126,7 @@ def main():
     for spec in args.fit:
         name, rest = spec.split("=", 1)
         path, _, log = rest.partition(",")
-        hp, fr = load_pose(path, args.mano_dir or str(DATA_ROOT / "mano_v1_2" / "models"))
+        hp, fr = load_pose(path, args.mano_dir or str(MANO_DIR))
         common = np.intersect1d(fr, rfr)
         e = geodesic_deg(hp[np.searchsorted(fr, common)], ref[np.searchsorted(rfr, common)])    # (n, 15)
         for split in ("right", "wrong", "all"):

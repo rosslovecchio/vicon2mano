@@ -14,7 +14,7 @@ sys.path[:0] = [str(REPO), str(REPO / "scripts/mano")]
 import smplx
 from animate_mesh import forward_vertices, resolve_model_path
 from vicon2mano.core.loader import load_csv
-from vicon2mano.core.dataset import DATA_ROOT
+from vicon2mano.core.dataset import MANO_DIR
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--fit", required=True)
@@ -26,7 +26,7 @@ ap.add_argument("--flags", default=None, help="diag.py's flags.json: flagged fra
 a = ap.parse_args()
 
 fit = np.load(a.fit)
-model = smplx.create(str(resolve_model_path(str(DATA_ROOT / "mano_v1_2" / "models"), "right")), model_type="mano", is_rhand=True, use_pca=False,
+model = smplx.create(str(resolve_model_path(str(MANO_DIR), "right")), model_type="mano", is_rhand=True, use_pca=False,
                      flat_hand_mean=True, batch_size=1)
 V = forward_vertices(model, fit["global_orient"], fit["hand_pose"], fit["transl"], fit["betas"],
                      float(fit["scale"]) if "scale" in fit else 1.0) * 1000.0           # (T, 778, 3) mm

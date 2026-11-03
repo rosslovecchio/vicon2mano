@@ -142,8 +142,31 @@ relabelled in full.
 GPU is recommended. Scripts look for MANO in a sibling \texttt{clean\_kinematics/mano\_v1\_2/models} directory, else
 under the data root, or take \texttt{--mano-dir}.
 
-\paragraph{Start here.} \tbd{a small shareable test fixture (one participant, a few thousand frames, with consent) so
-that the whole workflow can be run without the private data set; MANO weights obtained separately}
+\paragraph{Start here: synthetic quick-start.} \texttt{scripts/soma/quickstart\_synth.py} makes a participant
+from MANO alone and runs Steps 3--5 on it. This is \emph{synthetic data, not a recording}: it checks the installation,
+file formats and commands, and that the steps recover a known answer, but says nothing about accuracy on real Vicon
+data. It uses MANO's mean shape with markers on the released pins (3\,mm out along the normal), 2000 frames (10\,s) of
+smooth random finger poses inside the joint limits with a slow wrist motion, 0.5\,mm noise, and four fixed gaps:
+Middle2 8 frames, Thumb3 150, Index3 500 and Ring3 400. MANO is not included; it is read from the user's own copy. The
+check fills the gaps with the rigid fill and with a filler trained on the synthetic trial, fits every 10th frame with the
+learned fill, and compares everything with the truth. Reference run (seed 0, 67\,s on one RTX 5090):
+\begin{itemize}[nosep]
+  \item rigid fill: median error 1.8--2.7\,mm on the three shorter gaps, but 26.0\,mm on the 2\,s Ring3 gap, which is
+  the intended failure: rigid filling degrades on long finger gaps;
+  \item learned fill: median 1.0--3.1\,mm on all four gaps;
+  \item movement fit: 99\% of fitted frames with every marker within 5\,mm of its attachment;
+  \item joint angles: median error 5.2\textdegree{} (95th percentile 13.8\textdegree), although the hand shape is known
+  exactly; sparse markers leave the angles partly undetermined.
+\end{itemize}
+The check passes when every gap is filled with a learned-fill median of at most 10\,mm and the median joint-angle error
+is at most 10\textdegree. Labelling is not part of the quick-start, because training the labeller needs a participant
+library.
+\paragraph{Real-data example.} P3, a selected successful case: its accepted static meets the 5\,mm target, and its
+labeller scored 98.8\% (HOI) and 99.3\% (Hands only) on the reviewed frames, against 94.2\% and 96.7\% for Vicon. An
+excerpt is prepared locally (\texttt{make\_fixture.py}: a 30\,s HOI excerpt with two reviewed frames, a training
+excerpt from another trial, the accepted static, reviewed labels and fixed gap cuts, with hashes) but is not released.
+\tbd{release decision for P3's data: public, controlled access or none}. P16 is the troubleshooting example
+(Section~\ref{sec:example}).
 
 % ---------------------------------------------------------------------------------------------------------------
 \section{Step-by-step workflow}\label{sec:workflow}
@@ -186,23 +209,48 @@ python scripts/soma/static_passes.py --participant P --start palm_manual_r8 --ou
 #   up to 7 static_final_fit.py passes (--radius 15 --along); OUT/passes.json records each pass
 \end{lstlisting}
 \field{Pass rule} Each pass starts from the best pass so far: no marker off the dorsal side or inside the skin,
-then no pose past the limits, then the smallest maximum marker-to-attachment distance. Passes stop when the 5\,mm goal
-is met or after seven. \texttt{passes.json} records, per pass, its start, arguments, input and output hashes, scores
-and whether the goal was met. The rule only proposes a pass; the accepted static is chosen by reviewing the views.
-\field{Provenance of the reported statics} The pin file is \texttt{configs/surface\_fit/P4\_palm\_pins.json}: the
-input pins that \texttt{static\_search.py} wrote with each run match it for all seven palm markers, in every
-participant checked. The historical passes were run before this driver existed. Their recorded starts follow the rule
-above for 11 of the 13 participants that were run; P6 and P13 deviate (their passes were restarted by hand). Only
-P3 met the 5\,mm goal (after four passes). The accepted static was the rule's pick for every accepted participant
-fitted this way (all but P4, whose static is the earlier hand-tuned fit) except P6, where pass 1 was accepted over pass 4 after review. The driver reproduces the operations, not the review
-decisions. Static fits are not bit-identical between runs: rerunning P3's first two passes with the driver gave a
-largest distance of 5.01 and 4.91\,mm (fitted scale 0.889 and 0.884), against 5.00 and 4.95\,mm (0.891 and 0.889)
-historically. \tbd{rerun the cohort statics with the driver and compare with the accepted statics}
+then no pose past the limits, then the smallest maximum marker-to-attachment distance. Passes stop when a pass meets
+the goal (below) or after seven. \texttt{passes.json} records, per pass, its start, arguments, input and output
+hashes, scores and whether the goal was met. The rule only proposes a pass.
 \field{Expected output} \texttt{params.npz} (shape, scale, pose, attachments), \texttt{summary.json} and
 \texttt{diag.json} (per-marker distance to its attached vertex, dorsal check), and \texttt{static.html} (3-D view).
-\field{Acceptance checks} Every marker close to its attached vertex (the target was 5\,mm), all attachments dorsal,
-none inside the skin, pose within the anatomical limits, and a visual review of the mesh by a person.
+\field{Acceptance checks} Three separate things:
+\begin{itemize}[nosep]
+  \item \emph{Numerical target:} largest marker-to-attachment distance below 5\,mm. It is a target, not a
+  requirement: most accepted statics exceed it (Table~\ref{tab:static-accept}).
+  \item \emph{Automatic checks:} all attachments dorsal, no marker inside the skin, pose within the anatomical limits.
+  The script's goal also asks for a natural pose (at most 0.5\textdegree{} from the pose-recovery check) together with
+  the 5\,mm target.
+  \item \emph{Human acceptance:} a documented visual review of the mesh and markers. A static can be accepted without
+  meeting the target, and the reviewer can choose a different pass from the script's pick.
+\end{itemize}
 \tbd{review criteria and how many fits needed refits}
+\begin{table}[h]\centering\small
+\caption{Accepted statics (historical runs). Automatic checks: dorsal, not inside the skin, pose within limits.
+Natural: deviation from the pose-recovery check (goal: $\leq$0.5\textdegree{}).}\label{tab:static-accept}
+\begin{tabular}{llccccl}\toprule
+P & Selected & Max (mm) & $<$5\,mm & Automatic checks & Natural (\textdegree) & Manual override \\\midrule
+P3 & pass 3 & 4.92 & yes & pass & 0.1 & no \\
+P4 & hand-tuned fit & 4.41 & yes & pass & 0.0 & -- (earlier recipe) \\
+P6 & pass 1 & 7.44 & no & pass & 0.0 & yes (rule: pass 4) \\
+P11 & pass 1 & 5.90 & no & pass & 0.0 & no \\
+P12 & pass 2 & 5.49 & no & pass & 0.0 & no \\
+P14 & pass 0 & 6.52 & no & pass & 0.1 & no \\
+P15 & pass 2 & 8.60 & no & pass & 0.5 & no \\
+P16 & pass 1 & 5.87 & no & pass & 0.0 & no \\
+P17 & pass 4 & 4.54 & yes & pass & 1.3 & no \\\bottomrule
+\end{tabular}
+\end{table}
+Three accepted statics meet the 5\,mm target (P3, P4, P17); only P3's also meets the script's full goal. For P6, the
+reviewer accepted pass 1 over the rule's pick, pass 4; pass 1 has the more natural pose (0.0\textdegree{} against
+2.5\textdegree) but a larger maximum distance. \tbd{override reason as recorded by the reviewer}
+\field{Provenance of the reported statics} The pin file is \texttt{configs/surface\_fit/P4\_palm\_pins.json}: the
+input pins that \texttt{static\_search.py} wrote with each run match it for all seven palm markers, in every
+participant checked. The historical passes were run before the pass script existed. Their recorded starts follow the
+rule above for 11 of the 13 participants that were run; P6 and P13 deviate (their passes were restarted by hand). The
+script reproduces the operations, not the review decisions. The historical accepted statics, which all reported
+results use, are kept separately from statics selected by the script (\texttt{results/soma/static\_passes}); no
+reported result was recomputed with the latter. \tbd{comparison of script-selected and historical statics}
 \field{Common failures} A static can be mislabelled; P9's static is mislabelled in the palm. Screen every static per
 segment against a verified movement trial first. Automatic photo matching succeeded for P4, P6, P8 and P9; P3 and
 P11--P17 need the dots marked by hand, P1 and P2 cannot be matched (no Palm3), and P5, P7 and P10 have no photo.
@@ -301,7 +349,10 @@ by more than 45\textdegree{} between them (consecutive fitted frames are 10 fram
 viewer shows markers (observed / filled / empty), mesh and flags for every fit.
 \field{Expected output} \texttt{flags.json} per batch and the viewer HTML.
 \field{Acceptance checks} Flagged-frame rate per trial; inspect the flagged frames in the viewer.
-\field{Provenance} Training is seeded; two repeated trainings gave bit-identical weights on the same GPU. Each fitted
+\field{Provenance} Training is seeded; two repeated labeller trainings gave bit-identical weights on the same GPU.
+Static optimisation is not bit-identical: rerunning P3's first two passes gave a largest distance of 5.01 and 4.91\,mm
+(fitted scale 0.889 and 0.884), against 5.00 and 4.95\,mm (0.891 and 0.889) historically. Calibration outputs are
+therefore compared within stated tolerances, not by hash; hashes identify the inputs and outputs of each run. Each fitted
 trial writes a provenance record with the code commit, uncommitted changes, hashes of the code that ran and hashes of
 every input (labels, static, filler).
 
@@ -314,7 +365,8 @@ no hand model.
 
 % ---------------------------------------------------------------------------------------------------------------
 \section{Worked example: one participant}\label{sec:example}
-P16 is followed from raw data to MANO motion. For each item, the figure and the command that reproduces it are given.
+\note{The review suggests P3 as the introductory example and P16 for troubleshooting; switch once P3's release is
+decided.} P16 is followed from raw data to MANO motion. For each item, the figure and the command that reproduces it are given.
 \begin{enumerate}[nosep]
   \item \textbf{Original data.} Raw Vicon labels on P16's reviewed frames: 87.7\% correct. \tbd{figure}
   \item \textbf{Accepted static fit.} Started from P4's pins; of seven passes along the segment, pass 1 was accepted (largest marker-to-attachment

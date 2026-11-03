@@ -949,6 +949,13 @@ Blank the gap-filled values of a labelled export: keep a value only where the ra
 Live 3-D player (three.js) for a movement fit: rotatable mesh + markers, played in real time.
 
 
+### `scripts/soma/make_fixture.py`
+
+Cut a small real-data example out of one participant's recordings, for the tutorial. NOT FOR RELEASE by itself: the folder is local, and sharing it needs release authorisation for that participant's data.
+
+- `excerpt(trial: str, p: str, first: int, n: int, out: Path) -> dict` â€” Write frames [first, first + n) of ``p``'s raw ``trial`` to ``out``; return its source record.
+- `main()` â€” (no docstring)
+
 ### `scripts/soma/make_meshes.py`
 
 Render the fitted-MANO mesh animation for every trial that run_fullset.py has finished fitting: results/soma/mesh/<P>/<P>_<trial>.html (the same naming and viewer as the earlier P10/P12 meshes; scripts/mano/animate_mesh.py does the rendering).
@@ -1028,6 +1035,15 @@ Record which version of the fit code a fit started with.
 - `write(path: Path, snap: dict) -> None` â€” (no docstring)
 - `watch(out: Path, participants: list[str], poll: float=15.0, give_up_min: float=600.0)` â€” (no docstring)
 - `reconstruct(out: Path, participants: list[str])` â€” Provenance for fits that started before anyone recorded it, from file times + git history.
+- `main()` â€” (no docstring)
+
+### `scripts/soma/quickstart_synth.py`
+
+Synthetic quick-start: a made-up participant generated from MANO alone, then gap-filled and fitted.
+
+- `markers(J, att: torch.Tensor, go, hp, tr, standoff=3.0) -> np.ndarray` â€” Marker positions (T, M, 3) mm: attached vertices of the mean-shape MANO, ``standoff`` mm along the normal.
+- `poses(J, T: int, rng, every: int=250, frac: float=0.4) -> np.ndarray` â€” Smooth random hand poses (T, 45): keyframes inside ``frac`` of the joint limits, no twist or PIP/DIP abduction.
+- `run(args: list, log: Path)` â€” Run a repo script with this interpreter, output to ``log``; raise if it fails.
 - `main()` â€” (no docstring)
 
 ### `scripts/soma/run_fullset.py`

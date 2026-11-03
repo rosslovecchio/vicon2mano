@@ -118,9 +118,9 @@ def fit_cmd(p: str, static: Path, c: dict, rdir: Path) -> list[str]:
         args += ["--init-static", str(c["init_static"])]
     if c.get("save_static"):
         args += ["--save-static", str(rdir / "static_params.npz")]
-    from vicon2mano.core.dataset import DATA_ROOT
+    from vicon2mano.core.dataset import MANO_DIR
     return [sys.executable, "-W", "ignore", "scripts/mano/fit_surface_markers.py",
-            "--mano-dir", str(DATA_ROOT / "mano_v1_2" / "models"), "--static", str(static),
+            "--mano-dir", str(MANO_DIR), "--static", str(static),
             "--out", str(rdir / "static.html")] + args
 
 
@@ -174,11 +174,11 @@ class Judge:
     def __init__(self):
         import torch
         import fit_surface_markers as fsm
-        from vicon2mano.core.dataset import DATA_ROOT
+        from vicon2mano.core.dataset import MANO_DIR
         from vicon2mano.core.fitter import FitConfig, MANOFitter, mano_output_to_joints21
         self.torch, self.fsm, self.j21 = torch, fsm, mano_output_to_joints21
         self.dev = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = MANOFitter(FitConfig(mano_model_path=str(DATA_ROOT / "mano_v1_2" / "models"),
+        self.model = MANOFitter(FitConfig(mano_model_path=str(MANO_DIR),
                                           hand_side="right", use_pca=False))._model.to(self.dev)
         self.B = fsm.joint_axis_basis(self.model, self.dev, 45)
         self.lo, self.hi = (np.degrees(a) for a in fsm.basis_limit_bounds(False, False))

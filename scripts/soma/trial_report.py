@@ -85,9 +85,9 @@ def main():
 
     import pandas as pd
     import torch
-    from vicon2mano.core.dataset import DATA_ROOT
+    from vicon2mano.core.dataset import MANO_DIR
     from vicon2mano.core.fitter import FitConfig, MANOFitter
-    mano = args.mano_dir or str(DATA_ROOT / "mano_v1_2" / "models")
+    mano = args.mano_dir or str(MANO_DIR)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     model = MANOFitter(FitConfig(mano_model_path=mano, hand_side="right", use_pca=False))._model.to(dev)
 

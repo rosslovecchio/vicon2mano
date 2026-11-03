@@ -171,8 +171,8 @@ def main():
         return table()
     if a.compare:
         return compare(Path(a.out_dir))
-    from vicon2mano.core.dataset import DATA_ROOT
-    mano = a.mano_dir or str(DATA_ROOT / "mano_v1_2" / "models")
+    from vicon2mano.core.dataset import MANO_DIR
+    mano = a.mano_dir or str(MANO_DIR)
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     for p in [x for x in a.participants.split(",") if x]:
