@@ -1,4 +1,4 @@
-"""Regression tests for the real-data tutorial fixture (scripts/soma/make_fixture.py).
+"""Regression tests for the real-data tutorial fixture (scripts/soma_all/make_fixture.py).
 
 The fixture is participant data and is not in the repository: every test skips unless results/soma/fixture_P3 exists
 (tests that compare with the source recording also need the data root).
@@ -16,7 +16,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 FIX = REPO / "results/soma/fixture_P3"
 pytestmark = pytest.mark.skipif(not (FIX / "MANIFEST.json").exists(), reason="local fixture not built")
-sys.path[:0] = [str(REPO), str(REPO / "scripts/soma")]
+sys.path[:0] = [str(REPO), str(REPO / "scripts/soma_all")]
 
 
 @pytest.fixture(scope="module")

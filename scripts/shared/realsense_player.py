@@ -233,7 +233,7 @@ def build(rs_dir: Path, out: Path | None = None, vicon: Path | None = None, offs
                 w.writerow(row)
 
     panes = list(cams)
-    for f in sorted(out.glob("mesh*_frames.csv")) if sync else []:  # Vicon-clock videos, e.g. scripts/soma/mesh_video.py
+    for f in sorted(out.glob("mesh*_frames.csv")) if sync else []:  # Vicon-clock videos, e.g. scripts/soma_all/mesh_video.py
         with open(f) as fh:
             recs = list(csv.DictReader(fh))
         rows = [(int(r["vicon_frame"]), sync["vicon_start_ms"] + 1000 * ((int(r["vicon_frame"]) - 1) / sync["vicon_rate"]

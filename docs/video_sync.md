@@ -187,8 +187,8 @@ manifest counts them as usable. Rebuild after editing:
 ### Mesh pane (SOMA/MANO fit beside the cameras)
 
 ```bash
-.viconvenv/Scripts/python.exe scripts/soma/mesh_video.py results/video/P16/Trial2_HOI --n 10000   # 10k frames at 200 Hz
-.viconvenv/Scripts/python.exe scripts/soma/mesh_video.py results/video/P10/Trial1_HOI --step 4    # whole trial at 50 Hz
+.viconvenv/Scripts/python.exe scripts/soma_all/mesh_video.py results/video/P16/Trial2_HOI --n 10000   # 10k frames at 200 Hz
+.viconvenv/Scripts/python.exe scripts/soma_all/mesh_video.py results/video/P10/Trial1_HOI --step 4    # whole trial at 50 Hz
 ```
 
 **All fitted trials** (2026-10-29) were rendered as the whole trial at `--step 4` (50 Hz:
@@ -197,7 +197,7 @@ rendered at every frame for the whole trial (200 Hz, 42,292 frames, 5 min, 77 MB
 spell `Trial 1` as `Trial_1`. Trials without a SOMA fit (P1, P2, P5, P13 except
 Trial1 Hands_only, P17 except Trial1 Hands_only) get no mesh pane but do get the markers pane.
 
-[`scripts/soma/mesh_video.py`](../scripts/soma/mesh_video.py):
+[`scripts/soma_all/mesh_video.py`](../scripts/soma_all/mesh_video.py):
 
 - **What it renders:** consecutive Vicon frames of the fitted mesh plus the
   SOMA-labelled markers, using the same rendering as `scripts/mano/animate_mesh.py`
@@ -247,7 +247,7 @@ the hand out of view. Yellow in HOI is mostly thumb1 abduction a few degrees pas
 missing is whole frames with the hand out of view (every marker gone at once): 52–2350
 frames per trial, most in Trial1 Hands only.
 
-**Labellings player** (`scripts/soma/labels_player.py <video dir> [--mesh]`). Built on 2026-11-03 for the
+**Labellings player** (`scripts/soma_all/labels_player.py <video dir> [--mesh]`). Built on 2026-11-03 for the
 51 trials that have a SOMA fit and/or a learned-fill fit (33 have both, 17 only the SOMA fit, P17
 Trial1 HOI only the learned fill); the 16 with neither (P1, P2, P5, and all of P13 and P17 except
 the trials above) get no page, since the raw markers are already in the standard player. A pane

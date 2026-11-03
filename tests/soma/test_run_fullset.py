@@ -1,4 +1,4 @@
-"""Tests for the decision logic in scripts/soma/run_fullset.py: which file is a
+"""Tests for the decision logic in scripts/soma_all/run_fullset.py: which file is a
 participant's static, how the surface-fit command is built from a config, how a
 bad static is recognised, and participant selection."""
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPTS_SOMA = Path(__file__).resolve().parents[2] / "scripts" / "soma"
+SCRIPTS_SOMA = Path(__file__).resolve().parents[2] / "scripts" / "soma_all"
 if str(SCRIPTS_SOMA) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_SOMA))
 

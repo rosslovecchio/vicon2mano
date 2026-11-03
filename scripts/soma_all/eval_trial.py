@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Label a whole raw trial with the trained SOMA labeller and score it.
+
+Per frame: the unlabelled cloud -> one-to-one labels. Per piece (raw column
+cut at gaps / >5mm jumps): summed-confidence vote, clashes resolved.
+
+Label-free metrics are always printed (how decisive the piece votes are,
+what is left unlabelled, where SOMA and Vicon disagree). With ``--truth`` the
+labels are also compared to a labelled export; ``--truth-name`` says how much
+to trust it -- a partly trusted file prints as "agreement", not "correct".
+
+    python scripts/soma_all/eval_trial.py --model results/soma/models/labeler_P10.pt
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+
+from vicon2mano.core.dataset import DATA_ROOT, find_trial_csv
+from vicon2mano.core.loader import load_csv
+from vicon2mano.strategies.soma.infer import label_trial, load_model
+from vicon2mano.strategies.soma.realdata import raw_identities, relabelled_markers, write_wide_csv
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default=str(REPO / "results/soma/models/labeler_P10.pt"))
+    ap.add_argument("--participant", default=None)
+    ap.add_argument("--session", default=None,
+                    help="manual_frames.csv session of --participant, e.g. 'Trial 1 Hands only'; "
+                         "resolves the raw file (preferred over --raw)")
+    ap.add_argument("--raw", default=None,
+                    help="raw CSV path, only for a file manual_frames.csv does not map (default: P10 Trial2 "
+                         "Hands only)")
+    ap.add_argument("--truth", default=None,
+                    help="labelled export to compare with; '' for none. Default: P10 Trial2's verified "
+                         "relabel when scoring that trial, otherwise none")
+    ap.add_argument("--truth-name", default="manual",
+                    help="how to call the truth; anything but 'manual' reports agreement, not correctness")
+    ap.add_argument("--out", default=None, help="npz of per-frame and voted labels per raw slot")
+    ap.add_argument("--csv-out", default=None, help="relabelled trial as a wide CSV (voted labels)")
+    args = ap.parse_args()
+
+    if args.session:
+        if args.raw or not args.participant:
+            raise SystemExit("--session needs --participant and replaces --raw")
+        trial_path, *_ = find_trial_csv(args.participant, args.session)
+        if trial_path is None:
+            raise SystemExit(f"manual_frames.csv maps no file to {args.participant}/{args.session}")
+        args.raw = str(trial_path)
+        print(f"{args.participant}/{args.session} -> {trial_path.name} (manual_frames.csv)")
+    elif args.raw is None:
+        args.raw = str(Path(DATA_ROOT) / "P10/Trial2_handsonly.csv")
+        if args.truth is None:
+            args.truth = str(Path(DATA_ROOT) / "P10/Trial2_handsonly_manuallylabelled_filled.csv")
+    if args.truth is None:
+        args.truth = ""
+
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    net, labels, N = load_model(args.model, dev)
+    M = len(labels)
+
+    raw, nr = load_csv(args.raw)[:2]
+    nr = [n.split(":")[-1] for n in nr]
+    # only the markers this model knows: a reduced-set model (P1/P2's 19) must
+    # not see Forearm3/4 or Palm3 even where a file has them (P10 does)
+    keep = [i for i, n in enumerate(nr) if n in labels]
+    raw, nr = raw[:, keep], [nr[i] for i in keep]
+    T, C = raw.shape[:2]
+    if args.truth:
+        man, nm = load_csv(args.truth)[:2]
+        nm = [n.split(":")[-1] for n in nm]
+        ident = raw_identities(raw, man[:, [nm.index(l) for l in labels]])
+    else:
+        ident = np.where(np.isfinite(raw).all(-1), -1, -2)
+    n_pres = np.isfinite(raw).all(-1).sum(1)
+    lab, conf, voted, pid = label_trial(net, raw, N, dev)
+
+    vicon = np.where(np.isfinite(raw).all(-1), np.array([labels.index(n) if n in labels else -1 for n in nr])[None], -1)
+    pres = np.isfinite(raw).all(-1)
+    few = (C - n_pres) <= 4
+    print(f"{Path(args.raw).name}: {T} frames, {int(pres.sum())} points; "
+          f"{100*few.mean():.1f}% of frames have <=4 markers missing; model {Path(args.model).name}")
+
+    # ---- label-free: how decisive are the piece votes, what is left over
+    P = pid.max() + 1
+    m = pid >= 0
+    votes = np.zeros((P, M + 1))
+    np.add.at(votes, (pid[m], np.where(lab[m] >= 0, lab[m], M)), conf[m])
+    share = votes.max(1) / np.maximum(votes.sum(1), 1e-12)
+    sl = share[pid[m]]                                   # per slot, its piece's vote share
+    print(f"  piece vote share (per point): >=0.9 {100*(sl >= .9).mean():5.2f}% | 0.5-0.9 "
+          f"{100*((sl >= .5) & (sl < .9)).mean():5.2f}% | <0.5 {100*(sl < .5).mean():5.2f}%")
+    print(f"  unlabelled after vote: {100*(voted[pres] == -1).mean():.2f}% of points")
+    dv = pres & (voted != vicon) & (voted >= 0)
+    print(f"  SOMA label differs from Vicon's: {100*dv.sum()/pres.sum():.2f}% of points; by Vicon column: " +
+          ", ".join(f"{nr[c]} {100*dv[:, c].sum()/max(pres[:, c].sum(), 1):.1f}%"
+                    for c in np.argsort(-dv.sum(0))[:6] if dv[:, c].any()))
+
+    # ---- label-free: finger segments must keep their length under correct
+    # labels; another finger's marker in a slot stretches or shrinks them.
+    # Share of frames within +-6mm of that labelling's own median length.
+    sets = [("Vicon", relabelled_markers(raw, vicon, M)), ("SOMA", relabelled_markers(raw, voted, M))]
+    if args.truth:
+        sets.insert(1, (args.truth_name, relabelled_markers(raw, np.where(ident >= 0, ident, -1), M)))
+    print("  segment consistency (% of frames within 6mm of own median): " +
+          " | ".join(k for k, _ in sets))
+    for f in ("Thumb", "Index", "Middle", "Ring", "Pinky"):
+        for a, b in ((1, 2), (2, 3)):
+            ia, ib = labels.index(f"{f}{a}"), labels.index(f"{f}{b}")
+            row = f"    {f}{a}-{f}{b}:".ljust(22)
+            for k, X in sets:
+                d = np.linalg.norm(X[:, ia] - X[:, ib], axis=-1); d = d[np.isfinite(d)]
+                row += f" {100*(np.abs(d - np.median(d)) < 6).mean():6.1f}%" if len(d) else "      -"
+            print(row)
+
+    # ---- label-free: side-to-side finger order. Along the Index1->Pinky1
+    # axis, index markers lie before middle, middle before ring, ring before
+    # pinky; fingers do not cross. Verified P10 labels are in order in
+    # 98-100% of frames at every level. Unlike segment consistency this
+    # catches a whole-chain swap between neighbouring fingers.
+    print("  finger order (% of frames Index<Middle|Middle<Ring|Ring<Pinky, levels 1/2/3): " +
+          " | ".join(k for k, _ in sets))
+    for lvl in "123":
+        row = f"    level {lvl}:".ljust(22)
+        for k, X in sets:
+            i1 = X[:, labels.index("Index1")]
+            u = X[:, labels.index("Pinky1")] - i1
+            u = u / np.linalg.norm(u, axis=-1, keepdims=True)
+            lat = [((X[:, labels.index(f + lvl)] - i1) * u).sum(-1) for f in ("Index", "Middle", "Ring", "Pinky")]
+            fr = []
+            for a, b in zip(lat[:-1], lat[1:]):
+                ok = np.isfinite(a) & np.isfinite(b)
+                fr.append(f"{100*(a[ok] < b[ok]).mean():5.1f}" if ok.any() else "    -")
+            row += " " + "|".join(fr) + " "
+        print(row)
+
+    # ---- against a labelled export, if given
+    if args.truth:
+        judge = ident >= 0
+        word = "correct" if args.truth_name == "manual" else f"agree w/ {args.truth_name}"
+        print(f"  vs {Path(args.truth).name}: {int(judge.sum())} judgeable points "
+              f"({100*judge.sum()/pres.sum():.1f}% of raw points match a {args.truth_name} position)")
+        for name, L in (("raw Vicon labels", vicon), ("SOMA per frame", lab), ("SOMA + piece vote", voted)):
+            row = f"    {name:18s}"
+            for sub, msk in (("all", judge), ("<=4 missing", judge & few[:, None])):
+                row += f" | {sub}: {100*(L == ident)[msk].mean():6.2f}% {word}, {100*(L == -1)[msk].mean():4.2f}% unlabelled"
+            print(row)
+        d = judge & (voted != vicon) & (voted >= 0)
+        print(f"    where SOMA and Vicon differ ({int(d.sum())} points): {args.truth_name} sides with SOMA "
+              f"{100*(voted==ident)[d].mean():.1f}%, with Vicon {100*(vicon==ident)[d].mean():.1f}%")
+    if args.csv_out:
+        X = relabelled_markers(raw, voted, M)
+        write_wide_csv(args.csv_out, X, labels)
+        print(f"saved {args.csv_out}")
+    if args.out:
+        np.savez_compressed(args.out, per_frame=lab, voted=voted, conf=conf, labels=np.array(labels))
+        print(f"saved {args.out}")
+
+
+if __name__ == "__main__":
+    main()

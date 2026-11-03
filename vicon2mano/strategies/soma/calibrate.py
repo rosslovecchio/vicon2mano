@@ -206,7 +206,7 @@ def calibrated_library(lib: MarkerLibrary, betas: np.ndarray, r_s: np.ndarray,
 
 def final_static_library(lib: MarkerLibrary, model, params, cloud_mm: np.ndarray,
                          miss_rate: np.ndarray | None = None, source: str = "") -> MarkerLibrary:
-    """``lib`` re-attached at a final static fit's vertices (``scripts/soma/static_final_fit.py`` params.npz) with
+    """``lib`` re-attached at a final static fit's vertices (``scripts/soma_all/static_final_fit.py`` params.npz) with
     its shape and scale; each attached marker's residuals re-centred on its offset in ``cloud_mm`` (M, 3, lib order)."""
     t = lambda k: torch.as_tensor(np.asarray(params[k], np.float32).reshape(1, -1))
     with torch.no_grad():

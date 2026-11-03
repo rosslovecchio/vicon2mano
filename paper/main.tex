@@ -94,6 +94,11 @@ participants.
 markers with participant calibration; add any found (e.g.\ \citet{han2018online} for dense fixed-shape hand markers) to
 Section~\ref{sec:soma-diff} and the baselines.}
 
+\paragraph{Reproduction.} \texttt{scripts/soma\_paper/reproduce.sh} runs the stages of Section~\ref{sec:workflow} in
+order (smoke test, static search, labelling, evaluation, gap filling and fitting) with the scripts in
+\texttt{scripts/soma\_all}, which holds every script of the project. The accepted statics involved a human review that
+the script does not replace.
+
 \paragraph{Reading guide.} Sections~\ref{sec:soma-diff}--\ref{sec:workflow} define the method and give every step as
 purpose, inputs, command, expected output, acceptance checks and common failures, so that it can be rerun on another
 laboratory's data. Section~\ref{sec:validation} evaluates it.
@@ -191,7 +196,7 @@ required. Point the scripts to MANO with the environment variable \texttt{VICON2
 a sibling \texttt{clean\_kinematics/mano\_v1\_2/models} directory, then under the data root.
 
 \paragraph{Start here: filling-and-fitting smoke test (synthetic data).}
-\texttt{scripts/soma/quickstart\_synth.py} generates a participant from MANO alone and runs gap filling and the movement
+\texttt{scripts/soma\_all/quickstart\_synth.py} generates a participant from MANO alone and runs gap filling and the movement
 fit (Steps 3--4) on it. This is \emph{synthetic data, not a recording, and not a labelling test}: it checks the
 installation, file formats and commands, and that these steps recover a known answer within fixed tolerances. It says
 nothing about accuracy on real Vicon data. The test is frozen in \texttt{configs/quickstart\_synth\_v1.json}: generator
@@ -262,9 +267,9 @@ anatomical limits (finger twist, PIP/DIP abduction, DIP flexion coupled to PIP).
 \end{itemize}
 \field{Command}
 \begin{lstlisting}
-python scripts/soma/static_search.py --participants P --palm-manual configs/surface_fit/P4_palm_pins.json \
+python scripts/soma_all/static_search.py --participants P --palm-manual configs/surface_fit/P4_palm_pins.json \
     --radius 8 --arm palm_manual_r8
-python scripts/soma/static_passes.py --participant P --start palm_manual_r8 --out OUT
+python scripts/soma_all/static_passes.py --participant P --start palm_manual_r8 --out OUT
 #   up to 7 static_final_fit.py passes (--radius 15 --along); OUT/passes.json records each pass
 \end{lstlisting}
 \field{Pass rule} Each pass starts from the best pass so far: no marker off the dorsal side or inside the skin,
@@ -358,8 +363,8 @@ synthetic clouds (AdamW, learning rate $10^{-3}$, seed 0). Whole trials are labe
 continuous trajectories assigns one label per piece.
 \field{Command}
 \begin{lstlisting}
-python scripts/soma/run_fullset.py --participants P      # calibrate, train, label every trial
-python scripts/soma/eval_sample.py --model results/soma/models/labeler_P10.pt \
+python scripts/soma_all/run_fullset.py --participants P      # calibrate, train, label every trial
+python scripts/soma_all/eval_sample.py --model results/soma/models/labeler_P10.pt \
     --model-for P=results/soma/models/labeler_P.pt --participants P --out results/soma/eval/check_P
 \end{lstlisting}
 \field{Expected output} \texttt{results/soma/fullset/P/<trial>/soma\_labelled.csv} and the trained model; the
@@ -393,7 +398,7 @@ frequent; the movement fit uses only the 18 hand markers.
 \end{itemize}
 \field{Command} \texttt{run\_realfill.sh} runs the held-out check, trains the filler on all trials, and runs Steps 3--5:
 \begin{lstlisting}
-bash scripts/soma/run_realfill.sh P
+bash scripts/soma_all/run_realfill.sh P
 #   held-out filler check  -> results/soma/real_fill/P_heldout.log
 #   filler on all trials   -> results/soma/real_fill/filler_P_all.pt
 #   fill + fit + views     -> results/soma/real_fill_w01/movement/P
@@ -519,7 +524,7 @@ On these nine, the calibrated labeller was the most accurate method in both cond
 (P10's model, our implementation, not the original SOMA) in between (Table~\ref{tab:bench-label}). Per participant, it beat Vicon for 7 of 9 participants on Hands only and 6 of 9 on
 HOI, and beat the cross-participant labeller for 5 and 7. Vicon was better on HOI for P14, P15 and P16, and on Hands only for P6
 and P11. P6 Trial 1 HOI was not scored (frame-count mismatch, Step 0).
-\note{Measured 2026-10-29 with scripts/soma/eval\_sample.py (results/soma/eval/bench\_\{generic,calibrated\}\_*).}
+\note{Measured 2026-10-29 with scripts/soma\_all/eval\_sample.py (results/soma/eval/bench\_\{generic,calibrated\}\_*).}
 
 \paragraph{Personalising the labeller on the reviewed static: inconclusive.}\label{sec:res-personalisation}
 P16's labeller was retrained on a library built from the reviewed static instead of the earlier automatic

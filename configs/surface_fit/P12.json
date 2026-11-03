@@ -5,7 +5,7 @@
     "STATIC: P12/Static_trial.csv is the real static (unmapped in manual_frames.csv; still to",
     "0.06 mm/frame), but Vicon's labels on it are wrong almost everywhere (fit errors to 217 mm).",
     "It is used RELABELLED by the SOMA model: results/soma/labels/P12/static/soma_labelled.csv",
-    "(scripts/soma/eval_trial.py --raw <static> --truth '' --csv-out ...).",
+    "(scripts/soma_all/eval_trial.py --raw <static> --truth '' --csv-out ...).",
     "",
     "MOVEMENT: P12's movement trials are named Static_trial01-04 (manual_frames.csv: Trial 1 Hands",
     "only = 01, Trial 1 HOI = 02, Trial2 Hands only = 03, Trial2 HOI = 04). Fit them relabelled by",

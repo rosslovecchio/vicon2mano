@@ -62,7 +62,7 @@ vicon2mano/
     template/    (lives in core/correspondence.py; see docs)
     soma/        library.py, synth.py, model.py, realdata.py, calibrate.py, infer.py   learned labeller (SOMA-style)
   core/emg.py    Novecento+ .otb4 reader + HD-sEMG channel quality (docs/emg.md)
-scripts/   cascade/ · mano/ · gmm/ · deep/ · soma/ · shared/ · emg/
+scripts/   cascade/ · mano/ · gmm/ · deep/ · soma_all/ (every SOMA script) · soma_paper/ (reproduce.sh for the paper) · shared/ · emg/
 tests/     core/ · cascade/ · mano/ · gmm/ · deep/ · soma/
 results/   cascade/ · mano/ · gmm/ · soma/   (gitignored, regenerable)
 docs/      fitting.md · strategies/*.md

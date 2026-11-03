@@ -13,7 +13,7 @@ Self-contained by design: imports `vicon2mano.core` only, never another
 strategy or `scripts/`.
 
 - Code: `vicon2mano/strategies/soma/` (`library.py`, `synth.py`, `model.py`, `realdata.py`, `calibrate.py`, `infer.py`)
-- Scripts: `scripts/soma/` (`build_library.py`, `preview_synth.py`, `train.py`, `eval_trial.py`, `calibrate_static.py`,
+- Scripts: `scripts/soma_all/` (`build_library.py`, `preview_synth.py`, `train.py`, `eval_trial.py`, `calibrate_static.py`,
   `eval_sample.py`, `preview_labels.py`)
 - Tests: `tests/soma/`
 - Output: `results/soma/` (gitignored, regenerable; index in its `README.md`):
@@ -34,7 +34,7 @@ self-consistent (details in `mano.md`, "Tested and rejected"). A network that
 sees the whole cloud at once, and has seen every confusion many times in
 training, does not depend on the current labels at all.
 
-## Marker library (`library.py`, `scripts/soma/build_library.py`)
+## Marker library (`library.py`, `scripts/soma_all/build_library.py`)
 
 From a trusted labelled trial plus its surface fit, each of the 22 markers
 gets an **attachment** (one MANO face + barycentric point) and a per-frame
@@ -92,12 +92,12 @@ steps). It is gone by step 1000 (98.73% vs 98.71%), so no fix was needed.
 
 ## Results (2026-10-15)
 
-`scripts/soma/train.py`: 30k steps, batch 256, AdamW 1e-3 cosine, synthetic
+`scripts/soma_all/train.py`: 30k steps, batch 256, AdamW 1e-3 cosine, synthetic
 only, 44 min on the RTX A2000 laptop GPU. Real-data monitor (2,000 raw
 Trial2 frames, never trained on, never used for checkpoint choice): 98.73%
 at step 1k, 99.94% at 3k, flat at 99.95% thereafter.
 
-`scripts/soma/eval_trial.py` on the whole raw P10/Trial2 (874,091 judgeable
+`scripts/soma_all/eval_trial.py` on the whole raw P10/Trial2 (874,091 judgeable
 slots, truth = manual labels; 34 s):
 
 | labels | all frames | <=4 missing (96% of frames) |
@@ -347,7 +347,7 @@ attachments and skin-slide slopes on P12's larger hand, not the labels.
 2. Generalisation: P10 Trial1 / HOI trials, then other participants (no
    manual labels -- judge by fit residuals, implausible angles, spot checks).
 
-## Running the whole dataset (`scripts/soma/run_fullset.py`)
+## Running the whole dataset (`scripts/soma_all/run_fullset.py`)
 
 One driver for static -> calibrate -> train -> label -> surface fit -> flags,
 per participant and trial, resumable (finished outputs are skipped; files are
@@ -357,10 +357,10 @@ written under `.part` names and renamed on success). Outputs go to
 and `angles.csv` (per-frame joint angles with the flag columns merged in).
 
 ```
-python scripts/soma/run_fullset.py --dry-run          # what would run; nothing executed
-python scripts/soma/run_fullset.py                    # everything (P1,P2 skipped by default)
-python scripts/soma/run_fullset.py --shard 0/2        # second process / machine: --shard 1/2
-python scripts/soma/run_fullset.py --participants P12 --trials "Trial 1 Hands only" --max-frames 2000   # smoke test
+python scripts/soma_all/run_fullset.py --dry-run          # what would run; nothing executed
+python scripts/soma_all/run_fullset.py                    # everything (P1,P2 skipped by default)
+python scripts/soma_all/run_fullset.py --shard 0/2        # second process / machine: --shard 1/2
+python scripts/soma_all/run_fullset.py --participants P12 --trials "Trial 1 Hands only" --max-frames 2000   # smoke test
 ```
 
 Trial identity comes from `manual_frames.csv` (so only P1-P17 are known; Px/Pxh
@@ -387,7 +387,7 @@ non-blocking `WARN` (`status.jsonl`, `fullset/warnings.csv`). P13 (no Thumb2,
 Ring2) and P17 (no Palm1, Thumb1) were the first cases: they crashed before
 this, and the fingers those markers sit on are constrained by fewer markers.
 
-**Meshes.** `python scripts/soma/make_meshes.py [--watch]` renders the fitted-MANO
+**Meshes.** `python scripts/soma_all/make_meshes.py [--watch]` renders the fitted-MANO
 mesh animation (`animate_mesh.py`: mesh + the SOMA-relabelled markers, 1,500
 sampled frames, playback rate from the raw CSV's `Trajectories` header, else
 200 Hz assumed) to `results/soma/mesh/<P>/<P>_<trial>.html` (~82 MB, ~110 s each)
@@ -412,7 +412,7 @@ Ring1 / Ring3 (expected ~47 / ~38) and P17's "Palm1" is 49.7 / 39.2 mm from
 Palm2 / Palm3 (expected ~33 / ~52; SOMA says it is Thumb1).
 
 A still, flat stretch of the participant's Trial 1 Hands only does hold every
-hand marker. `scripts/soma/pick_window.py` picks it (stillest + flattest 200
+hand marker. `scripts/soma_all/pick_window.py` picks it (stillest + flattest 200
 frames, every hand marker present in >= 95% of frames) and checks Vicon's labels
 in it against a SOMA model, counting only points SOMA labelled (in every window
 tried Vicon never conflicts; SOMA only abstains). `run_fullset.py
@@ -425,7 +425,7 @@ vs 4.3-5.3 for real statics). On this route P3 calibrates 18/18 hand markers
 and P13 17/22 with Palm1 suspect at 20 mm (38725:38925, gate 4.5 mm), the case
 `--offset-only Palm1` is for.
 
-`scripts/soma/trial_report.py` prints, per trial, frames with any finger joint
+`scripts/soma_all/trial_report.py` prints, per trial, frames with any finger joint
 above 120 deg (bone-to-bone, the repo's earlier definition, and the axis-angle
 magnitude in `angles.csv`), finger/overall fit residual, and which flag signals
 fire.

@@ -107,7 +107,7 @@ Gaussian/Savitzky-Golay smoother changes angles by <0.13 deg mean: the fit is
 already smooth (jitter 0.033 deg/frame^2); the only large steps were the chunk
 boundaries.
 
-**Frame flags.** `scripts/soma/flag_frames.py` grades every fitted frame
+**Frame flags.** `scripts/soma_all/flag_frames.py` grades every fitted frame
 0 (no signal) / 1 (review) / 2 (unreliable) from three independent signals:
 label doubt (low confidence, per-frame label != piece vote), fit residual (a
 marker far above its own robust median), and implausible angles. On P10 only

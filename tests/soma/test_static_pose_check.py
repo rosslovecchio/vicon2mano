@@ -1,4 +1,4 @@
-"""scripts/soma/static_pose_check.py: the anatomical-limit penalty used to constrain a static fit."""
+"""scripts/soma_all/static_pose_check.py: the anatomical-limit penalty used to constrain a static fit."""
 
 import sys
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "soma"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "soma_all"))
 import static_pose_check as spc  # noqa: E402
 
 

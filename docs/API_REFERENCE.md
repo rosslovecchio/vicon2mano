@@ -65,6 +65,22 @@ Bone-length self-consistency: a model-free way to score whether a frame's marker
 - `consensus_bone_lengths(markers: np.ndarray, bones: list[tuple[int, int]], *, tol_mm: float=4.0, n_hypotheses: int=400, n_compare: int=3000, seed: int=0, min_...)` â€” Reference lengths from the largest mutually-consistent set of frames.
 - `bone_error(markers: np.ndarray, bones: list[tuple[int, int]], ref: np.ndarray) -> np.ndarray` â€” (T, n_bones) absolute deviation from each bone's reference length.
 
+### `vicon2mano/core/camera_calib.py`
+
+Camera -> Vicon extrinsics for the RealSense cameras (docs/camera_calibration.md).
+
+- `detect_dots(rgb: np.ndarray, th: float=40, size: int=9, amin: int=2, amax: int=80, sat_max: float=60) -> np.ndarray` â€” (n, 2) pixel centres of small near-white spots brighter than their surroundings (top-hat filter).
+- `depth_at(depth_m: np.ndarray, uv: np.ndarray, r: int=2) -> np.ndarray` â€” Median valid depth (m) in a (2r+1)^2 patch around each pixel; NaN where fewer than 3 are valid.
+- `deproject(uv: np.ndarray, z: np.ndarray, intr: dict) -> np.ndarray` â€” Pixels + depth (m) -> camera-frame points, as rs2_deproject_pixel_to_point (inverse Brown-Conrady).
+- `project(p: np.ndarray, X: np.ndarray, intr: dict) -> np.ndarray` â€” Vicon-frame points (..., 3) -> pixels (..., 2): the inverse of ``deproject`` (fixed-point undistortion).
+- `kabsch(A: np.ndarray, B: np.ndarray) -> tuple[np.ndarray, np.ndarray]` â€” (R, t) minimising |R A_i + t - B_i| over rows.
+- `solve_2d(p: np.ndarray, X: np.ndarray, uv: np.ndarray, intr: dict, f_scale: float=5.0) -> np.ndarray` â€” Pose minimising robust (soft-L1) reprojection error of points X onto pixels uv, from p.
+- `pose_from_landmarks(lm: np.ndarray, depth_m: np.ndarray, J: np.ndarray, intr: dict) -> tuple[np.ndarray, float] | None` â€” (pose, median landmark px) of one frame: landmarks lifted by depth -> Kabsch onto joints J, then 2-D refined.
+- `refine_on_dots(p: np.ndarray, frames: list[tuple[np.ndarray, np.ndarray]], intr: dict, gates=(15, 10, 8, 6, 6), min_pairs: int=4) -> tuple[np.ndarray, np.nda...)` â€” Refine a pose on marker dots: each round pairs every projected Vicon marker with its nearest dot inside the gate and re-solves. frames = [(markers (N,3) m, dots (n,2) px)], pooled. Returns (pose, final residuals px).
+- `is_moving(grey: np.ndarray, frac: float=0.05) -> bool` â€” True if the view shifts: more than frac of the frames are displaced > 1 px from the temporal median image (phase correlation). P16/Trial2/HOI: head-mounted cam1 0.22, tripod cam2 0.00. Per-frame hand poses cannot decide this: one hand pins the camera centre only to ~10 cm.
+- `to_matrix(p: np.ndarray) -> np.ndarray` â€” 4x4 T_vicon_from_cam (metres) of a Vicon -> camera pose vector.
+- `pooled_landmark_pose(p: np.ndarray, hands: list[list[np.ndarray]], J: list[np.ndarray], intr: dict, gates=(80, 40, 20, 12, 12)) -> tuple[np.ndarray, np.ndarray]` â€” Static camera: refine one pose on every frame's landmarks. Per frame the detected hand closest to the prediction is used, and landmarks further than 2x the gate are dropped. Returns (pose, residuals px).
+
 ### `vicon2mano/core/cli.py`
 
 Command-line entry point: vicon2mano <input> <output> [options]
@@ -356,7 +372,7 @@ Calibrate the marker library to a new participant from their static.
 - `static_cloud(markers: np.ndarray, n: int=200) -> tuple[np.ndarray, dict]` â€” (M, 3) median marker positions over the stillest, most complete ``n``-frame window of a static recording (NaN = never present there).
 - `fit_static(model, lib: MarkerLibrary, cloud_mm: np.ndarray, *, device: str='cpu', iters_root: int=300, iters: int=1500, w_beta: float=2.0, w_pose: float=20.0...)` â€” Fit MANO shape and pose to one static cloud (mm). See module docstring.
 - `calibrated_library(lib: MarkerLibrary, betas: np.ndarray, r_s: np.ndarray, miss_rate: np.ndarray | None=None, source: str='') -> MarkerLibrary` â€” Base library with the participant's shape and, for every marker with a finite static offset ``r_s``, residuals re-centred on it: ``residual[n, m] - median_n(residual[:, m]) + r_s[m]``.
-- `final_static_library(lib: MarkerLibrary, model, params, cloud_mm: np.ndarray, miss_rate: np.ndarray | None=None, source: str='') -> MarkerLibrary` â€” ``lib`` re-attached at a final static fit's vertices (``scripts/soma/static_final_fit.py`` params.npz) with its shape and scale; each attached marker's residuals re-centred on its offset in ``cloud_mm`` (M, 3, lib order).
+- `final_static_library(lib: MarkerLibrary, model, params, cloud_mm: np.ndarray, miss_rate: np.ndarray | None=None, source: str='') -> MarkerLibrary` â€” ``lib`` re-attached at a final static fit's vertices (``scripts/soma_all/static_final_fit.py`` params.npz) with its shape and scale; each attached marker's residuals re-centred on its offset in ``cloud_mm`` (M, 3, lib order).
 
 ### `vicon2mano/strategies/soma/fill.py`
 
@@ -740,6 +756,16 @@ Build the final 4 outputs of the manual-validation plan from the 500-frame sampl
 - `run(annotations_csv: Path, out_dir: Path) -> None` â€” (no docstring)
 - `main(argv=None)` â€” (no docstring)
 
+### `scripts/shared/calibrate_cameras.py`
+
+Camera -> Vicon calibration and aligned-depth export for one trial's RealSense cameras.
+
+- `landmarker()` â€” MediaPipe HandLandmarker (image mode, up to 2 hands).
+- `hands_in(det, rgb: np.ndarray) -> list[np.ndarray]` â€” Every detected hand's 21 landmarks in pixels.
+- `overlay(tiles: list[tuple[np.ndarray, np.ndarray, np.ndarray]], bones, colors, intr: dict, out: Path)` â€” Montage (3 per row) of (rgb, pose, Vicon markers m): markers and bones projected with each tile's pose.
+- `calibrate_camera(name: str, bag: Path, vdir: Path, X: np.ndarray, labels, J: dict, det) -> dict` â€” Depth export + pose(s) for one camera; returns its calib.json entry.
+- `main()` â€” (no docstring)
+
 ### `scripts/shared/compare_relabel_csvs.py`
 
 Compare a raw Vicon export against manually-relabelled version(s) of it.
@@ -888,15 +914,15 @@ Collect every results/video/*/*/sync.json into results/video/sync_summary.csv.
 
 - `main()` â€” (no docstring)
 
-## Scripts: scripts/soma
+## Scripts: scripts/soma_all
 
-### `scripts/soma/build_library.py`
+### `scripts/soma_all/build_library.py`
 
 Build the strategySOMA marker library from a trusted labelled trial.
 
 - `main()` â€” (no docstring)
 
-### `scripts/soma/calibrate_static.py`
+### `scripts/soma_all/calibrate_static.py`
 
 Calibrate the SOMA marker library to a participant from their static.
 
@@ -904,37 +930,37 @@ Calibrate the SOMA marker library to a participant from their static.
 - `write_static_html(model, lib: MarkerLibrary, cloud: np.ndarray, out: dict, path, title: str) -> None` â€” Plotly page of a static fit: the fitted mesh, the static markers, and a line from each marker to its model point.
 - `main()` â€” (no docstring)
 
-### `scripts/soma/compare_labels.py`
+### `scripts/soma_all/compare_labels.py`
 
 Label a participant's movement trials with another SOMA model and compare with existing labels, slot by slot.
 
 
-### `scripts/soma/compare_statics.py`
+### `scripts/soma_all/compare_statics.py`
 
 Compare each participant's historical accepted static with the static_passes.py pick, without changing either.
 
 - `row(d: Path) -> dict` â€” Scores of one static_final_fit.py output folder.
 - `main()` â€” (no docstring)
 
-### `scripts/soma/eval_sample.py`
+### `scripts/soma_all/eval_sample.py`
 
 Score SOMA on the manually reviewed 500-frame sample (all participants).
 
 - `main()` â€” (no docstring)
 
-### `scripts/soma/eval_trial.py`
+### `scripts/soma_all/eval_trial.py`
 
 Label a whole raw trial with the trained SOMA labeller and score it.
 
 - `main()` â€” (no docstring)
 
-### `scripts/soma/fit_trials.py`
+### `scripts/soma_all/fit_trials.py`
 
 Gap-fill each SOMA-labelled trial of a participant, then fit, diagnose and render all of it in 10k-frame batches.
 
 - `sh(args, log)` â€” (no docstring)
 
-### `scripts/soma/flag_frames.py`
+### `scripts/soma_all/flag_frames.py`
 
 Per-frame quality flags for a SOMA-labelled, surface-fitted trial.
 
@@ -943,12 +969,12 @@ Per-frame quality flags for a SOMA-labelled, surface-fitted trial.
 - `grade(low_conf, disagree, excess, max_joint_deg, step_deg, n_present, min_present, args)` â€” (no docstring)
 - `main()` â€” (no docstring)
 
-### `scripts/soma/frame_diagnostics.py`
+### `scripts/soma_all/frame_diagnostics.py`
 
 Per-frame diagnostics of a fit: frames whose pose is not natural or changes too fast.
 
 
-### `scripts/soma/gap_fill.py`
+### `scripts/soma_all/gap_fill.py`
 
 Gap filling for a labelled marker CSV: spline for short gaps, rigid-body (pattern) fill for longer ones.
 
@@ -956,17 +982,17 @@ Gap filling for a labelled marker CSV: spline for short gaps, rigid-body (patter
 - `frame(P)` â€” Origin and orthonormal axes from three points (None if they are nearly collinear).
 - `reference(m, tri, start, step, limit)` â€” Nearest frame from ``start`` going ``step`` where the marker and the triplet were all seen: (frame, coords).
 
-### `scripts/soma/gap_fill_check.py`
+### `scripts/soma_all/gap_fill_check.py`
 
 Gap-fill accuracy: cut artificial gaps where gap_fill.py's output has observed markers, fill them again, compare.
 
 
-### `scripts/soma/keep_observed.py`
+### `scripts/soma_all/keep_observed.py`
 
 Blank the gap-filled values of a labelled export: keep a value only where the raw Vicon export has a point there.
 
 
-### `scripts/soma/labels_player.py`
+### `scripts/soma_all/labels_player.py`
 
 Player comparing one trial's labellings beside cam1: Vicon labels, SOMA labels (no fill), learned gap fill.
 
@@ -975,12 +1001,12 @@ Player comparing one trial's labellings beside cam1: Vicon labels, SOMA labels (
 - `fill_pane(fill: Path, rate: float, mesh: bool)` â€” (marker pane, fit, rows) of the learned-fill trial; graded by the fit's flags.json (fitted every 10th frame).
 - `main()` â€” (no docstring)
 
-### `scripts/soma/live_viewer.py`
+### `scripts/soma_all/live_viewer.py`
 
 Live 3-D player (three.js) for a movement fit: rotatable mesh + markers, played in real time.
 
 
-### `scripts/soma/make_fixture.py`
+### `scripts/soma_all/make_fixture.py`
 
 Cut a small real-data example out of one participant's recordings, for the tutorial. NOT FOR RELEASE by itself: the folder is local, and sharing it needs release authorisation for that participant's data.
 
@@ -988,7 +1014,7 @@ Cut a small real-data example out of one participant's recordings, for the tutor
 - `rigid_check(fixture: Path, work: Path) -> dict` â€” Cut the gap mask out of movement.csv, refill with gap_fill.py's rigid fill, and score against the cut values.
 - `main()` â€” (no docstring)
 
-### `scripts/soma/make_meshes.py`
+### `scripts/soma_all/make_meshes.py`
 
 Render the fitted-MANO mesh animation for every trial that run_fullset.py has finished fitting: results/soma/mesh/<P>/<P>_<trial>.html (the same naming and viewer as the earlier P10/P12 meshes; scripts/mano/animate_mesh.py does the rendering).
 
@@ -998,26 +1024,26 @@ Render the fitted-MANO mesh animation for every trial that run_fullset.py has fi
 - `render(p, sg, raw, tdir, mesh_dir, args) -> bool` â€” (no docstring)
 - `main()` â€” (no docstring)
 
-### `scripts/soma/mesh_video.py`
+### `scripts/soma_all/mesh_video.py`
 
 Render a window of a trial's fitted MANO mesh to MP4 and add it to that trial's RealSense player.
 
 - `load_fit(fit_dir: Path)` â€” (fit arrays, fitted CSV rows, markers (F, N, 3), labels, status (F, N), grade (F,), note (F,)) per fitted frame.
 - `main()` â€” (no docstring)
 
-### `scripts/soma/movement_fit.py`
+### `scripts/soma_all/movement_fit.py`
 
 Fit a movement trial with a final static (static_final_fit.py): shape, scale and attachments held, per-frame pose.
 
 - `fwd(go, hp, tr)` â€” (no docstring)
 
-### `scripts/soma/palm1_pin_test.py`
+### `scripts/soma_all/palm1_pin_test.py`
 
 Does P10's pinned Palm1 vertex hurt? Refit P10 Trial2 hands only three ways, identical settings (P10 config, --cuda-graph --mv-chunk 3000 --mv-overlap 150):
 
 - `main()` â€” (no docstring)
 
-### `scripts/soma/photo_overlay.py`
+### `scripts/soma_all/photo_overlay.py`
 
 Overlay a participant's fitted static (mesh + markers) on their photo of the marked hand.
 
@@ -1036,7 +1062,7 @@ Overlay a participant's fitted static (mesh + markers) on their photo of the mar
 - `draw(im, project, p, mean, view, P3, px, rigid, rigid_rms)` â€” (no docstring)
 - `main()` â€” (no docstring)
 
-### `scripts/soma/pick_window.py`
+### `scripts/soma_all/pick_window.py`
 
 Pick the stillest, flattest 200 frames of a mapped trial to stand in for a missing static (what was done for P1/P2: ``calibrate_static.py --session ... --window a:b``).
 
@@ -1045,21 +1071,21 @@ Pick the stillest, flattest 200 frames of a mapped trial to stand in for a missi
 - `label_agreement(raw_window: np.ndarray, names: list[str], model_path: str, device: str)` â€” (agreement among labelled points, share left unlabelled) of Vicon's column labels vs SOMA's.
 - `main()` â€” (no docstring)
 
-### `scripts/soma/preview_labels.py`
+### `scripts/soma_all/preview_labels.py`
 
 Side-by-side 3-D animation: Vicon's labels vs SOMA's, no fit needed.
 
 - `chains(X, L)` â€” Line segments per finger + palm + forearm, as (name, colour, (k,3) with NaN breaks).
 - `main()` â€” (no docstring)
 
-### `scripts/soma/preview_synth.py`
+### `scripts/soma_all/preview_synth.py`
 
 Does the synthetic data look like the real data? Numbers + a visual preview.
 
 - `colour(name)` â€” (no docstring)
 - `main()` â€” (no docstring)
 
-### `scripts/soma/provenance.py`
+### `scripts/soma_all/provenance.py`
 
 Record which version of the fit code a fit started with.
 
@@ -1069,7 +1095,7 @@ Record which version of the fit code a fit started with.
 - `reconstruct(out: Path, participants: list[str])` â€” Provenance for fits that started before anyone recorded it, from file times + git history.
 - `main()` â€” (no docstring)
 
-### `scripts/soma/quickstart_synth.py`
+### `scripts/soma_all/quickstart_synth.py`
 
 Filling-and-fitting smoke test on SYNTHETIC data (a made-up participant generated from MANO alone).
 
@@ -1080,7 +1106,7 @@ Filling-and-fitting smoke test on SYNTHETIC data (a made-up participant generate
 - `run(args: list, log: Path)` â€” Run a repo script with this interpreter, output to ``log``; raise if it fails.
 - `main()` â€” (no docstring)
 
-### `scripts/soma/run_fullset.py`
+### `scripts/soma_all/run_fullset.py`
 
 Run the SOMA pipeline for many participants: static -> calibrate -> train -> label every trial -> surface fit -> frame flags -> angles CSV.
 
@@ -1108,12 +1134,12 @@ Run the SOMA pipeline for many participants: static -> calibrate -> train -> lab
 - `dry_run(args, ps, sessions_all)` â€” (no docstring)
 - `main()` â€” (no docstring)
 
-### `scripts/soma/score_observed.py`
+### `scripts/soma_all/score_observed.py`
 
 Score fit_trials.py runs on the markers that were really observed, so runs with different gap fills compare fairly.
 
 
-### `scripts/soma/static_final_fit.py`
+### `scripts/soma_all/static_final_fit.py`
 
 Final static fit: every marker within 5 mm of its attached vertex, the pose natural.
 
@@ -1121,7 +1147,7 @@ Final static fit: every marker within 5 mm of its attached vertex, the pose natu
 - `write_view(path, V, F, M, names, Pk, J21, title)` â€” static.html in fit_surface_markers' layout, so static_search.read_view / Judge.judge read it.
 - `main()` â€” (no docstring)
 
-### `scripts/soma/static_passes.py`
+### `scripts/soma_all/static_passes.py`
 
 Repeated static_final_fit.py passes for one participant, each starting from the best pass so far.
 
@@ -1130,7 +1156,7 @@ Repeated static_final_fit.py passes for one participant, each starting from the 
 - `rank(s: dict) -> tuple` â€” Sort key: valid placement first, then a pose within the limits, then the smallest max distance.
 - `main()` â€” (no docstring)
 
-### `scripts/soma/static_pose_check.py`
+### `scripts/soma_all/static_pose_check.py`
 
 Is a fitted static pose natural? Joint angles of the static fit against the repo's limits.
 
@@ -1141,7 +1167,7 @@ Is a fitted static pose natural? Joint angles of the static fit against the repo
 - `compare(d: Path)` â€” Fit error with vs without the limit penalty, by finger: does constraining the pose cost the pinky/thumb markers more than the rest (a layout difference the pose was absorbing) or nothing (it was only the pose)?
 - `main()` â€” (no docstring)
 
-### `scripts/soma/static_search.py`
+### `scripts/soma_all/static_search.py`
 
 Search the static surface fit's settings for the best static per participant.
 
@@ -1167,19 +1193,19 @@ Search the static surface fit's settings for the best static per participant.
 - `report(onedrive: Path | None)` â€” (no docstring)
 - `main()` â€” (no docstring)
 
-### `scripts/soma/train.py`
+### `scripts/soma_all/train.py`
 
 Train the strategySOMA labeller on synthetic clouds only.
 
 - `accuracy(net, pts, valid, label, bs=512)` â€” (hard one-to-one acc, best-label argmax acc) over real points (label >= 0).
 - `main()` â€” (no docstring)
 
-### `scripts/soma/train_filler.py`
+### `scripts/soma_all/train_filler.py`
 
 Train the learned marker filler (``strategies/soma/fill.py``) on synthetic clouds, real labelled recordings, or both.
 
 
-### `scripts/soma/trial_report.py`
+### `scripts/soma_all/trial_report.py`
 
 Per-trial summary of a run_fullset.py output: how extreme the fitted angles are, how well the fingers were fitted, and which flag signals fired.
 

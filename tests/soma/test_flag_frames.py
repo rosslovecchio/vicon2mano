@@ -1,4 +1,4 @@
-"""Tests for scripts/soma/flag_frames.py: label signals per fitted marker,
+"""Tests for scripts/soma_all/flag_frames.py: label signals per fitted marker,
 the robust fit-residual excess, and the 0/1/2 grading."""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-SCRIPTS_SOMA = Path(__file__).resolve().parents[2] / "scripts" / "soma"
+SCRIPTS_SOMA = Path(__file__).resolve().parents[2] / "scripts" / "soma_all"
 if str(SCRIPTS_SOMA) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_SOMA))
 

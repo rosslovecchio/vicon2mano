@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-SCRIPTS_SOMA = Path(__file__).resolve().parents[2] / "scripts" / "soma"
+SCRIPTS_SOMA = Path(__file__).resolve().parents[2] / "scripts" / "soma_all"
 if str(SCRIPTS_SOMA) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_SOMA))
 

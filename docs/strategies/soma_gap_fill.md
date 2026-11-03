@@ -154,9 +154,9 @@ Until then the old labels (`results/soma/fullset/P16`) remain the ones in use.
 
 ## 2. Gap-filling methods
 
-The movement fit (`scripts/soma/movement_fit.py`) fits each frame to the
+The movement fit (`scripts/soma_all/movement_fit.py`) fits each frame to the
 labelled markers it has, and a missing marker leaves its part of the hand
-unconstrained. `scripts/soma/gap_fill.py` fills the gaps first.
+unconstrained. `scripts/soma_all/gap_fill.py` fills the gaps first.
 
 Every method starts the same way:
 - Labelled positions that jump more than `--jump` mm (8) are dropped as label
@@ -206,7 +206,7 @@ left empty, 4 learned.
 
 ## 3. Fill accuracy
 
-**How it is measured** (`scripts/soma/gap_fill_check.py`):
+**How it is measured** (`scripts/soma_all/gap_fill_check.py`):
 - It cuts artificial gaps into stretches where a marker *was* observed. The
   markers cut are Palm1, Index3, Middle3, Ring2, Ring3, Pinky1, Pinky3 and
   Thumb3, with up to 6 cuts per marker and length.
@@ -356,7 +356,7 @@ included.
 
 ## 5. Cohort: all nine participants with a final static (2026-10-29)
 
-**What was run:** `bash scripts/soma/run_realfill.sh P3 P4 P6 P11 P12 P14 P15 P17`
+**What was run:** `bash scripts/soma_all/run_realfill.sh P3 P4 P6 P11 P12 P14 P15 P17`
 (commit `573cad3`, with the `gap_fill_check.py` fix `c96c536`), then the same
 weighted fit for P16's missing tail. Per participant:
 - a held-out check: a filler trained without one HOI trial, tested on it;
@@ -509,63 +509,63 @@ PY=.viconvenv/Scripts/python.exe; D="C:/Users/RL000009/OneDrive - Vrije Universi
 L=results/soma/fullset/P16                       # old SOMA labels: <trial>/soma_labelled.csv
 
 # 1. Labeller retrained on the final static
-$PY scripts/soma/calibrate_static.py --participant P16 --static $L/static/soma_labelled.csv \
+$PY scripts/soma_all/calibrate_static.py --participant P16 --static $L/static/soma_labelled.csv \
     --final "$D/soma_transfer/static_final/P16/P16_static_final_params.npz" \
     --mano-dir "$D/mano_v1_2/models" --out results/soma/libraries/library_P16_final.npz
-$PY scripts/soma/train.py --library results/soma/libraries/library_P16_final.npz --mano-dir "$D/mano_v1_2/models" \
+$PY scripts/soma_all/train.py --library results/soma/libraries/library_P16_final.npz --mano-dir "$D/mano_v1_2/models" \
     --steps 10000 --out results/soma/models/labeler_P16_final.pt --monitor-raw "$D/P16/trial1_handsonly.csv" \
     --monitor-truth "$D/P16/trial1_handsonly_manuallylabelled.csv" --monitor-name MANUAL
-$PY scripts/soma/compare_labels.py P16 --model results/soma/models/labeler_P16_final.pt --new results/soma/retrain_final
-$PY scripts/soma/fit_trials.py P16 --labels results/soma/retrain_final --work results/soma/retrain_final/movement \
+$PY scripts/soma_all/compare_labels.py P16 --model results/soma/models/labeler_P16_final.pt --new results/soma/retrain_final
+$PY scripts/soma_all/fit_trials.py P16 --labels results/soma/retrain_final --work results/soma/retrain_final/movement \
     --name {p}_retrained --note "labeller retrained on the final static"
 
 # 2. Rigid baseline
-$PY scripts/soma/fit_trials.py P16                # -> results/soma/movement, OneDrive results/soma/P16
+$PY scripts/soma_all/fit_trials.py P16                # -> results/soma/movement, OneDrive results/soma/P16
 
 # 3. Synthetic filler, accuracy against the rigid fill
-$PY scripts/soma/train_filler.py --library results/soma/libraries/library_P16.npz --steps 30000 \
+$PY scripts/soma_all/train_filler.py --library results/soma/libraries/library_P16.npz --steps 30000 \
     --out results/soma/models/filler_P16.pt
 for t in Trial_1_Hands_only Trial_1_HOI Trial2_Hands_only Trial2_HOI; do
-  $PY scripts/soma/gap_fill_check.py --filled results/soma/movement/P16/$t/soma_labelled_filled.csv \
+  $PY scripts/soma_all/gap_fill_check.py --filled results/soma/movement/P16/$t/soma_labelled_filled.csv \
       --lengths 50,200,1000,2000,5000 --max-gap 100000                                      # rigid
-  $PY scripts/soma/gap_fill_check.py --filled results/soma/movement/P16/$t/soma_labelled_filled.csv \
+  $PY scripts/soma_all/gap_fill_check.py --filled results/soma/movement/P16/$t/soma_labelled_filled.csv \
       --lengths 50,200,1000,2000,5000 --max-gap 100000 --filler results/soma/models/filler_P16.pt
 done
-$PY scripts/soma/fit_trials.py P16 --filler results/soma/models/filler_P16.pt --max-gap 100000 \
+$PY scripts/soma_all/fit_trials.py P16 --filler results/soma/models/filler_P16.pt --max-gap 100000 \
     --work results/soma/learned_fill/movement --name {p}_learnedfill --note "learned gap fill"
 
 # 4. Real-data fillers, held out by trial
 R=results/soma/real_fill; P10=$R/P10_trial2_manual_observed.csv
-$PY scripts/soma/keep_observed.py --labelled "$D/P10/Trial2_handsonly_manuallylabelled_filled.csv" \
+$PY scripts/soma_all/keep_observed.py --labelled "$D/P10/Trial2_handsonly_manuallylabelled_filled.csv" \
     --raw "$D/P10/Trial2_handsonly.csv" --out $P10
-$PY scripts/soma/train_filler.py --csv $P10 --out $R/filler_P10.pt
+$PY scripts/soma_all/train_filler.py --csv $P10 --out $R/filler_P10.pt
 all="Trial2_HOI Trial2_Hands_only Trial_1_HOI Trial_1_Hands_only"
 for test in Trial2_HOI Trial_1_HOI; do
   rest=$(for t in $all; do [ $t != $test ] && echo $L/$t/soma_labelled.csv; done)
-  $PY scripts/soma/train_filler.py --csv $rest --out $R/filler_P16_no_$test.pt
-  $PY scripts/soma/train_filler.py --csv $rest $P10 --out $R/filler_P16P10_no_$test.pt
-  $PY scripts/soma/train_filler.py --library results/soma/libraries/library_P16_final.npz --csv $rest \
+  $PY scripts/soma_all/train_filler.py --csv $rest --out $R/filler_P16_no_$test.pt
+  $PY scripts/soma_all/train_filler.py --csv $rest $P10 --out $R/filler_P16P10_no_$test.pt
+  $PY scripts/soma_all/train_filler.py --library results/soma/libraries/library_P16_final.npz --csv $rest \
       --out $R/filler_synP16_no_$test.pt
   for f in results/soma/models/filler_P16 $R/filler_P10 $R/filler_P16_no_$test $R/filler_P16P10_no_$test $R/filler_synP16_no_$test; do
-    $PY scripts/soma/gap_fill_check.py --filled results/soma/movement/P16/$test/soma_labelled_filled.csv \
+    $PY scripts/soma_all/gap_fill_check.py --filled results/soma/movement/P16/$test/soma_labelled_filled.csv \
         --lengths 200,1000,2000,5000 --filler $f.pt --max-gap 100000
   done
 done
 
 # 5. Real-data filler on all four trials, fits, and fits with filled values weighted 0.1
-$PY scripts/soma/train_filler.py --csv $(for t in $all; do echo $L/$t/soma_labelled.csv; done) --out $R/filler_P16_all.pt
-$PY scripts/soma/fit_trials.py P16 --filler $R/filler_{p}_all.pt --max-gap 100000 --work $R/movement \
+$PY scripts/soma_all/train_filler.py --csv $(for t in $all; do echo $L/$t/soma_labelled.csv; done) --out $R/filler_P16_all.pt
+$PY scripts/soma_all/fit_trials.py P16 --filler $R/filler_{p}_all.pt --max-gap 100000 --work $R/movement \
     --name {p}_realfill --note "gap fill learned from real frames"
 mkdir -p results/soma/real_fill_w01/movement/P16
 for t in $all; do mkdir -p results/soma/real_fill_w01/movement/P16/$t
   cp $R/movement/P16/$t/soma_labelled_filled.* results/soma/real_fill_w01/movement/P16/$t/; done   # reuse the fill
-$PY scripts/soma/fit_trials.py P16 --w-filled 0.1 --work results/soma/real_fill_w01/movement \
+$PY scripts/soma_all/fit_trials.py P16 --w-filled 0.1 --work results/soma/real_fill_w01/movement \
     --name {p}_realfill_w01 --note "gap fill learned from real frames, filled values weighted 0.1"
 
 # 6. Scores
-$PY scripts/soma/score_observed.py P16 rigid=results/soma/movement synthetic=results/soma/learned_fill/movement \
+$PY scripts/soma_all/score_observed.py P16 rigid=results/soma/movement synthetic=results/soma/learned_fill/movement \
     real=$R/movement real_w01=results/soma/real_fill_w01/movement
-$PY scripts/soma/score_observed.py P16 old_labels=results/soma/movement retrained=results/soma/retrain_final/movement
+$PY scripts/soma_all/score_observed.py P16 old_labels=results/soma/movement retrained=results/soma/retrain_final/movement
 ```
 
 ## Checks already made on these outputs

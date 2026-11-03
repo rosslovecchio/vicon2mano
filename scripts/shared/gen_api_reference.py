@@ -1,7 +1,7 @@
 import ast, subprocess, sys, pathlib
 root = pathlib.Path('.')
 files = subprocess.check_output(['git','ls-files','*.py'],text=True).split()
-files += ['scripts/soma/provenance.py']
+files += ['scripts/soma_all/provenance.py']
 files = sorted(set(f for f in files if not f.startswith('tests/')))
 
 def first(doc, n=2):
