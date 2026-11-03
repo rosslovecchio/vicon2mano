@@ -180,12 +180,24 @@ anatomical limits (finger twist, PIP/DIP abduction, DIP flexion coupled to PIP).
 \end{itemize}
 \field{Command}
 \begin{lstlisting}
-python scripts/soma/static_search.py --participants P --palm-manual <pin file> --radius 8 --arm palm_manual_r8
-python scripts/soma/static_final_fit.py --participant P --start palm_manual_r8 --radius 15 --along --out OUT/pass0
-python scripts/soma/static_final_fit.py --participant P --start OUT/pass0 --radius 15 --along --out OUT/pass1
-#   ... repeat until the acceptance checks pass (P16: 7 passes)
+python scripts/soma/static_search.py --participants P --palm-manual configs/surface_fit/P4_palm_pins.json \
+    --radius 8 --arm palm_manual_r8
+python scripts/soma/static_passes.py --participant P --start palm_manual_r8 --out OUT
+#   up to 7 static_final_fit.py passes (--radius 15 --along); OUT/passes.json records each pass
 \end{lstlisting}
-\note{Confirm the pin file passed to \texttt{--palm-manual} for the cohort runs; the pass driver was not kept as a script.}
+\field{Pass rule} Each pass starts from the best pass so far: no marker off the dorsal side or inside the skin,
+then no pose past the limits, then the smallest maximum marker-to-attachment distance. Passes stop when the 5\,mm goal
+is met or after seven. \texttt{passes.json} records, per pass, its start, arguments, input and output hashes, scores
+and whether the goal was met. The rule only proposes a pass; the accepted static is chosen by reviewing the views.
+\field{Provenance of the reported statics} The pin file is \texttt{configs/surface\_fit/P4\_palm\_pins.json}: the
+input pins that \texttt{static\_search.py} wrote with each run match it for all seven palm markers, in every
+participant checked. The historical passes were run before this driver existed. Their recorded starts follow the rule
+above for 11 of the 13 participants that were run; P6 and P13 deviate (their passes were restarted by hand). Only
+P3 met the 5\,mm goal (after four passes). The accepted static was the rule's pick for every accepted participant
+fitted this way (all but P4, whose static is the earlier hand-tuned fit) except P6, where pass 1 was accepted over pass 4 after review. The driver reproduces the operations, not the review
+decisions. Static fits are not bit-identical between runs: rerunning P3's first two passes with the driver gave a
+largest distance of 5.01 and 4.91\,mm (fitted scale 0.889 and 0.884), against 5.00 and 4.95\,mm (0.891 and 0.889)
+historically. \tbd{rerun the cohort statics with the driver and compare with the accepted statics}
 \field{Expected output} \texttt{params.npz} (shape, scale, pose, attachments), \texttt{summary.json} and
 \texttt{diag.json} (per-marker distance to its attached vertex, dorsal check), and \texttt{static.html} (3-D view).
 \field{Acceptance checks} Every marker close to its attached vertex (the target was 5\,mm), all attachments dorsal,
@@ -305,7 +317,8 @@ no hand model.
 P16 is followed from raw data to MANO motion. For each item, the figure and the command that reproduces it are given.
 \begin{enumerate}[nosep]
   \item \textbf{Original data.} Raw Vicon labels on P16's reviewed frames: 87.7\% correct. \tbd{figure}
-  \item \textbf{Accepted static fit.} Started from P4's pins, 7 passes along the segment; fitted scale 1.11.
+  \item \textbf{Accepted static fit.} Started from P4's pins; of seven passes along the segment, pass 1 was accepted (largest marker-to-attachment
+distance 5.87\,mm, at Thumb2; fitted scale 1.05; no marker inside the skin or off the dorsal side).
   \tbd{figure; final per-marker distances}
   \item \textbf{A corrected label swap.} \tbd{figure: Vicon mislabel and SOMA relabel, crossed vs straight finger chains}
   \item \textbf{A reconstructed gap.} On artificial gaps in a held-out HOI trial, the own-data filler had worst errors
@@ -322,14 +335,17 @@ The experiments below are there to justify the recommendations in Section~\ref{s
 
 \paragraph{Ground truth.} (i) The hand-reviewed frames, stratified across participants and weighted toward hard
 cases; only reviewed frames are scored. (ii) The fully relabelled P10 Trial2 Hands only. (iii) \tbd{continuous
-hand-verified HOI grasp windows of 5--10\,s, 2--3 per participant, at least 5 participants}. Gap filling is also tested
+hand-verified HOI grasp windows of 5--10\,s, 2--3 per participant, at least 5 participants}. Grasp windows verify the
+markers that remain visible during a grasp; markers that are genuinely occluded have unknown positions and no ground
+truth. Gap filling is also tested
 on artificial gaps of 1, 5, 10 and 25\,s cut where the marker was observed (8 markers, up to 6 cuts per marker and
 length, fixed seed), with fillers evaluated leave-one-trial-out. Fit error is measured on observed markers only, so that
 methods with different fills are compared on the same markers.
 
 \subsection{Raw label quality}
 Across 17 participants, 0.1--15\% of frames per trial were fully geometrically self-consistent under Vicon's labels;
-HOI trials were 2--10$\times$ worse than hands-only trials.
+HOI trials were 2--10$\times$ worse than hands-only trials. Geometric self-consistency is a screening measure:
+plausible geometry does not prove a label correct, so it is not labelling accuracy (Section~\ref{sec:val-label}).
 
 \subsection{Labelling: participant-calibrated vs cross-participant}\label{sec:val-label}
 \begin{table}[h]\centering\small
@@ -356,13 +372,13 @@ reviewed frames (\%). First number: all points pooled; in brackets: median over 
 \begin{tabular}{lcc}\toprule
 Method & Hands only & HOI \\\midrule
 Vicon raw labels & 92.9 (95.1) & 80.9 (86.4) \\
-Generic SOMA (P10 model) & 97.1 (96.2) & 86.4 (92.3) \\
+Cross-participant labeller (P10 model) & 97.1 (96.2) & 86.4 (92.3) \\
 Participant-calibrated SOMA & 98.2 (98.7) & 90.1 (93.4) \\\bottomrule
 \end{tabular}
 \end{table}
-On these nine, the calibrated labeller was the most accurate method in both conditions, with the generic labeller in
-between (Table~\ref{tab:bench-label}). Per participant, it beat Vicon for 7 of 9 participants on Hands only and 6 of 9 on
-HOI, and beat the generic labeller for 5 and 7. Vicon was better on HOI for P14, P15 and P16, and on Hands only for P6
+On these nine, the calibrated labeller was the most accurate method in both conditions, with the cross-participant labeller
+(P10's model, our implementation, not the original SOMA) in between (Table~\ref{tab:bench-label}). Per participant, it beat Vicon for 7 of 9 participants on Hands only and 6 of 9 on
+HOI, and beat the cross-participant labeller for 5 and 7. Vicon was better on HOI for P14, P15 and P16, and on Hands only for P6
 and P11. P6 Trial 1 HOI was not scored (frame-count mismatch, Step 0).
 \note{Measured 2026-10-29 with scripts/soma/eval\_sample.py (results/soma/eval/bench\_\{generic,calibrated\}\_*).}
 
@@ -493,7 +509,7 @@ Reviewed static & \tbd{} & \tbd{} & \tbd{} \\\bottomrule
   \item \textbf{Real-data test.} Fit the same trials (at least 3 participants) with the MANO mean shape, the earlier
   automatic calibration and the reviewed static; report fit error on observed markers, joint-angle differences and
   flagged-frame rates (Table~\ref{tab:bench-fit}).
-  \item \textbf{Labeller personalisation.} Generic labeller vs labeller from the earlier static vs labeller from the
+  \item \textbf{Labeller personalisation.} Cross-participant labeller vs labeller from the earlier static vs labeller from the
   reviewed static, on reviewed frames, with repeated seeded trainings; test scale-only or limited-shape
   personalisation for synthetic training.
 \end{enumerate}
