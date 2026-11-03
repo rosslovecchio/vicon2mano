@@ -33,10 +33,11 @@ from pathlib import Path
 
 import numpy as np
 
-from vicon2mano.core.dataset import _normalise_name, find_session_file, load_trial_sessions
+from vicon2mano.core.dataset import REPO_ROOT, _normalise_name, find_session_file, load_trial_sessions
 from vicon2mano.core.loader import load_csv
 
 VICON_UTC_SHIFT_MS = 3600_000  # .xcp local time minus UTC
+SYNC_OVERRIDES = REPO_ROOT / "configs" / "sync_overrides.csv"
 XCORR_BIAS_S = 0.016  # motion_lag reads early: median of 35 camera lags vs the trigger pulse (docs/video_sync.md)
 
 
@@ -57,6 +58,18 @@ def trigger_log_ms(rs_dir: Path) -> int | None:
         with open(log) as f:
             return next((_ms(r[0]) for r in csv.reader(f) if len(r) > 2 and r[2] == "true"), None)
     return None
+
+
+def sync_overrides(path: Path = SYNC_OVERRIDES) -> dict[tuple[str, str], dict]:
+    """{(trial, stream): row} of manual sync decisions; trial = "<P>/<Trial>_<cond>", stream = "video" | "emg".
+
+    A row with an offset_s overrides the automatic offset; a row without one records that the automatic
+    offset was checked by eye (checked_by, date).
+    """
+    if not path.exists():
+        return {}
+    with open(path, newline="") as f:
+        return {(r["trial"], r["stream"]): r for r in csv.DictReader(f)}
 
 
 def find_vicon_csv(rs_dir: Path) -> Path | None:

@@ -5,7 +5,8 @@ Per channel: RMS of the CAR 20-450 Hz signal in 50 ms windows (core.emg.rms_enve
 stored as log10 uV quantised to uint8 in emg.json beside the player. EMG is placed
 on the Vicon clock by matching the sync pattern AUX 1 and Vicon ``Sync`` both record
 (core.video_sync.mask_offset). Where the Vicon export has no Sync channel, AUX 1's
-1 s pulse is matched to the RealSense trigger log instead. --emg-offset overrides both.
+1 s pulse is matched to the RealSense trigger log instead. An offset in
+configs/sync_overrides.csv (stream "emg") or --emg-offset overrides both.
 Channels flagged by scripts/emg/emg_quality.py are marked, if its CSV exists.
 
     python scripts/emg/emg_pane.py results/video/P16/Trial2_HOI
@@ -26,7 +27,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(REPO), str(REPO / "scripts" / "shared")]
 
 from vicon2mano.core.emg import GRID_COLS, GRID_ROWS, read_otb4, rms_envelope  # noqa: E402
-from vicon2mano.core.video_sync import find_trigger_pulse, mask_offset, read_sync_channel, sync_mask  # noqa: E402
+from vicon2mano.core.video_sync import find_trigger_pulse, mask_offset, read_sync_channel, sync_mask, sync_overrides  # noqa: E402
 from realsense_player import rebuild, rs_dir_of  # noqa: E402
 
 LOG_MAX = 3.0  # log10 uV mapped to 255 (1000 uV); 0 = 1 uV, same scale as the quality heat map
@@ -50,7 +51,7 @@ def emg_sync(aux: np.ndarray, fs: float, sync: dict) -> dict | None:
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("video_dir", type=Path, help="results/video/<P>/<Trial>_<cond>, already synced")
-    ap.add_argument("--emg-offset", type=float, help="EMG-minus-Vicon time in s (default: from the shared sync events)")
+    ap.add_argument("--emg-offset", type=float, help="EMG-minus-Vicon time in s for a quick try (kept ones go in configs/sync_overrides.csv)")
     ap.add_argument("--win-s", type=float, default=0.05)
     a = ap.parse_args()
     vdir = a.video_dir.resolve()
@@ -58,10 +59,11 @@ def main():
     otb4 = next((rs_dir_of(vdir).parent / "Novecento").glob("*.otb4"))
 
     rec = read_otb4(otb4)
-    if a.emg_offset is not None:
-        es = {"offset_s": a.emg_offset, "method": "manual"}
-    else:
-        es = emg_sync(rec.aux["AUX 1"].astype(float), rec.fs, sync)
+    override = sync_overrides().get((f"{vdir.parent.name}/{vdir.name}", "emg"), {})
+    offset = a.emg_offset if a.emg_offset is not None else (float(override["offset_s"]) if override.get("offset_s") else None)
+    es = {"offset_s": offset, "method": "manual"} if offset is not None else emg_sync(rec.aux["AUX 1"].astype(float), rec.fs, sync)
+    if es is not None:
+        es.update({k: override[k] for k in ("checked_by", "date", "note") if override.get(k)})
     if es is None:
         sys.exit(f"no sync event shared by AUX 1 and Vicon / the RealSense trigger for {otb4} - pass --emg-offset")
 

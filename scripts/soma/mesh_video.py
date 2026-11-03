@@ -32,19 +32,13 @@ sys.path[:0] = [str(REPO), str(REPO / "scripts" / "mano"), str(REPO / "scripts" 
 
 import animate_mesh as am  # noqa: E402
 from realsense_player import rebuild  # noqa: E402
-from vicon2mano.core.dataset import MANO_DIR, _normalise_name  # noqa: E402
+from vicon2mano.core.dataset import MANO_DIR, soma_fit_dir  # noqa: E402
 from vicon2mano.core.loader import load_csv  # noqa: E402
 from vicon2mano.core.viz import marker_bone_pairs  # noqa: E402
 
 
 def _render(args):
     return am.render_mesh_frames(*args)
-
-
-def fit_dir_of(video_dir: Path) -> Path | None:
-    """results/soma/fullset/<P>/<slug> of a video folder (fit slugs spell "Trial 1" as Trial_1)."""
-    root = REPO / "results" / "soma" / "fullset" / video_dir.parent.name
-    return next((d for d in root.glob("*") if _normalise_name(d.name) == _normalise_name(video_dir.name)), None)
 
 
 def main():
@@ -60,7 +54,7 @@ def main():
     a = ap.parse_args()
     vdir = a.video_dir.resolve()
     sync = json.loads((vdir / "sync.json").read_text())
-    fit_dir = a.fit_dir or fit_dir_of(vdir)
+    fit_dir = a.fit_dir or soma_fit_dir(vdir.parent.name, vdir.name)
     if fit_dir is None or not (fit_dir / "fit.npz").exists():
         sys.exit(f"no SOMA fit for {vdir} - pass --fit-dir")
 

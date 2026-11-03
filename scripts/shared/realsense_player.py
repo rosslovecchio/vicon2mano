@@ -7,8 +7,8 @@ keep ~7-20 fps, unevenly), so a constant fps must never be assumed:
 sync on the timestamps.
 
 The Vicon offset comes from the trigger pulse when Vicon caught it, else from
-motion cross-correlation (see vicon2mano.core.video_sync); --offset overrides
-both with a value read off the player.
+motion cross-correlation (see vicon2mano.core.video_sync). An offset in
+configs/sync_overrides.csv (stream "video") overrides both; --offset is for a quick try.
 
     python scripts/shared/realsense_player.py D:/june25_data/P15/Trial1/Hands_only/RealSense
     -> results/video/P15/Trial1_Hands_only/
@@ -29,7 +29,8 @@ import numpy as np
 import pyrealsense2 as rs
 
 from vicon2mano.core.video_sync import (XCORR_BIAS_S, find_trigger_pulse, find_vicon_csv, finger_speed, hand_speed,
-                                        load_trajectories, motion_lag, read_sync_channel, trigger_log_ms, vicon_start_ms)
+                                        load_trajectories, motion_lag, read_sync_channel, sync_overrides,
+                                        trigger_log_ms, vicon_start_ms)
 from vicon2mano.core.viz import marker_bone_pairs, marker_color
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -146,9 +147,9 @@ def rs_dir_of(video_dir: Path) -> Path:
 
 
 def rebuild(video_dir: Path):
-    """Rebuild an existing player (reuses its MP4s and Vicon CSV, keeps a manual offset), e.g. after adding a pane."""
+    """Rebuild an existing player (reuses its MP4s and Vicon CSV; manual offsets come from configs/sync_overrides.csv)."""
     sync = json.loads((video_dir / "sync.json").read_text())
-    build(rs_dir_of(video_dir), video_dir, Path(sync["vicon_csv"]), sync["offset_s"] if sync["method"] == "manual" else None)
+    build(rs_dir_of(video_dir), video_dir, Path(sync["vicon_csv"]))
 
 
 def build(rs_dir: Path, out: Path | None = None, vicon: Path | None = None, offset: float | None = None,
@@ -158,6 +159,9 @@ def build(rs_dir: Path, out: Path | None = None, vicon: Path | None = None, offs
     p, trial, cond = rs_dir.parts[-4:-1]
     out = out or ROOT / "results" / "video" / p / f"{trial}_{cond}"
     out.mkdir(parents=True, exist_ok=True)
+    override = sync_overrides().get((f"{p}/{trial}_{cond}", "video"), {})
+    if offset is None and override.get("offset_s"):
+        offset = float(override["offset_s"])
 
     cams = []
     for i, bag in enumerate(sorted(rs_dir.glob("*.bag")), 1):
@@ -177,6 +181,7 @@ def build(rs_dir: Path, out: Path | None = None, vicon: Path | None = None, offs
     if vicon_csv and vicon_csv.with_suffix(".xcp").exists():
         X, labels, rate = load_trajectories(vicon_csv)
         sync, speed = sync_to_vicon(vicon_csv, rs_dir, cams, offset, X, labels, rate)
+        sync.update({k: override[k] for k in ("checked_by", "date", "note") if override.get(k)})
         markers = markers_pane(X, labels, rate)
         fingers = to_50hz(finger_speed(X, labels, rate), rate)
         (out / "sync.json").write_text(json.dumps(sync, indent=1))
@@ -218,7 +223,8 @@ def main():
     ap.add_argument("rs_dir", type=Path, help="folder containing rsframes*.bag")
     ap.add_argument("--out", type=Path, help="default: results/video/<P>/<Trial>_<cond>")
     ap.add_argument("--vicon", type=Path, help="Vicon trial CSV (default: looked up via manual_frames.csv)")
-    ap.add_argument("--offset", type=float, help="RealSense->Vicon offset in s (overrides pulse/xcorr)")
+    ap.add_argument("--offset", type=float, help="RealSense->Vicon offset in s for a quick try; "
+                                                 "record kept ones in configs/sync_overrides.csv")
     ap.add_argument("--crf", type=int, default=23)
     ap.add_argument("--force", action="store_true", help="re-encode MP4s that already exist")
     a = ap.parse_args()

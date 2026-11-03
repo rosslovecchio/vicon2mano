@@ -107,6 +107,7 @@ Locating recordings on disk: participants, trials, statics, references.
 - `find_manual_csv(vicon_csv: Path) -> Path | None` â€” The manually-labelled export next to ``vicon_csv``, if any.
 - `find_manually_labelled_trials(data_root: Path=DATA_ROOT) -> list[tuple[str, str, Path, Path]]` â€” Every (participant, trial_stem, vicon_csv, manual_csv) pair on disk that has a manually-labelled export, across every participant directory.
 - `auto_reference(markers: np.ndarray, need: int=300) -> np.ndarray` â€” Fallback reference frames: the longest fully-present stretches.
+- `soma_fit_dir(participant: str, trial: str) -> Path | None` â€” results/soma/fullset/<P>/<slug> for a trial named like "Trial1_HOI" (fit slugs spell "Trial 1" as Trial_1).
 
 ### `vicon2mano/core/emg.py`
 
@@ -194,6 +195,7 @@ Map RealSense frame timestamps onto a Vicon trial's clock.
 
 - `vicon_start_ms(vicon_csv: Path) -> int` â€” Epoch ms (UTC) at which the Vicon capture started, from the trial's .xcp.
 - `trigger_log_ms(rs_dir: Path) -> int | None` â€” Epoch ms of the first trigger_sent=true row of rs_dir's triggerlog, or None.
+- `sync_overrides(path: Path=SYNC_OVERRIDES) -> dict[tuple[str, str], dict]` â€” {(trial, stream): row} of manual sync decisions; trial = "<P>/<Trial>_<cond>", stream = "video" | "emg".
 - `find_vicon_csv(rs_dir: Path) -> Path | None` â€” Vicon CSV for <root>/<P>/<Trial>/<cond>/RealSense, via <root>/manual_frames.csv.
 - `read_sync_channel(vicon_csv: Path) -> tuple[np.ndarray, float] | None` â€” The Devices-section ``Sync`` analog channel and its rate (Hz); None for a trajectories-only export.
 - `find_trigger_pulse(sig: np.ndarray, rate: float, width_s: float=1.0, tol: float=0.05) -> float | None` â€” Onset (s) of the first single high plateau lasting width_s +- tol, or None.
@@ -815,7 +817,7 @@ Export RealSense .bag colour streams to MP4, sync them to Vicon, build an HTML p
 - `to_50hz(x: np.ndarray, rate: float) -> np.ndarray` â€” Block-mean a Vicon-rate trace down to 50 Hz for the player.
 - `markers_pane(X: np.ndarray, labels: list[str], rate: float, hz: float=100.0) -> dict` â€” Raw Vicon markers for the player's live 3-D pane: int16 mm at ~hz, -32768 = missing.
 - `rs_dir_of(video_dir: Path) -> Path` â€” The RealSense folder an output folder results/video/<P>/<Trial>_<cond> was built from.
-- `rebuild(video_dir: Path)` â€” Rebuild an existing player (reuses its MP4s and Vicon CSV, keeps a manual offset), e.g. after adding a pane.
+- `rebuild(video_dir: Path)` â€” Rebuild an existing player (reuses its MP4s and Vicon CSV; manual offsets come from configs/sync_overrides.csv).
 - `build(rs_dir: Path, out: Path | None=None, vicon: Path | None=None, offset: float | None=None, crf: int=23, force: bool=False)` â€” Export (or reuse) the cameras, sync to Vicon, and write player.html with any mesh/EMG panes.
 - `main()` â€” (no docstring)
 
@@ -970,7 +972,6 @@ Render the fitted-MANO mesh animation for every trial that run_fullset.py has fi
 
 Render a window of a trial's fitted MANO mesh to MP4 and add it to that trial's RealSense player.
 
-- `fit_dir_of(video_dir: Path) -> Path | None` â€” results/soma/fullset/<P>/<slug> of a video folder (fit slugs spell "Trial 1" as Trial_1).
 - `main()` â€” (no docstring)
 
 ### `scripts/soma/movement_fit.py`

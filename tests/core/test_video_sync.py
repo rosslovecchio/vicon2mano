@@ -56,3 +56,14 @@ def test_sync_mask_keeps_only_the_falling_edge_of_a_segment_high_at_start():
     sig[:4_000] = 1.25                                      # already high when recording starts
     m = vs.sync_mask(sig, 1000.0, 0.1)
     assert m[:3_800].sum() == 0 and m[3_800:4_000].all() and not m[4_000:].any()
+
+
+def test_sync_overrides_reads_offsets_and_confirmations(tmp_path):
+    f = tmp_path / "sync_overrides.csv"
+    f.write_text("trial,stream,offset_s,checked_by,date,note\n"
+                 "P5/Trial1_Hands_only,emg,6.25,RL,2026-11-03,set by eye\n"
+                 "P16/Trial2_HOI,emg,,RL,2026-11-03,auto value confirmed\n")
+    ov = vs.sync_overrides(f)
+    assert float(ov[("P5/Trial1_Hands_only", "emg")]["offset_s"]) == 6.25
+    assert ov[("P16/Trial2_HOI", "emg")]["offset_s"] == "" and ov[("P16/Trial2_HOI", "emg")]["checked_by"] == "RL"
+    assert vs.sync_overrides(tmp_path / "missing.csv") == {}

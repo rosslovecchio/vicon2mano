@@ -140,8 +140,9 @@ Validated against all 18 pulse trials (36 camera lags; details under
   colours (`core.viz.MARKER_BONES`). Drag to rotate, wheel to zoom. The view is centred
   on the hand averaged over ±0.5 s, so a reach still reads as movement. Raw markers are
   the timing ground truth: they don't depend on SOMA or the fit.
-- **Manual refinement:** shift the offset until the peaks line up, then rerun the
-  script with `--offset <s>` so the frame CSVs carry it.
+- **Manual refinement:** shift the offset until the events line up, then record it in
+  `configs/sync_overrides.csv` and rebuild (see below). `--offset` / `--emg-offset` are
+  for quick tries only; they are not kept.
 
 ### Checking a sync by eye
 
@@ -156,12 +157,32 @@ video against the Vicon panes instead.
    the Vicon frame of the same event.
 4. **Read the error:** if the Vicon event falls between the camera's before and after
    frames, the sync is right to one camera frame, which is the video's resolution limit.
-   If it is consistently outside, adjust the offset box and save it with `--offset`.
+   If it is consistently outside, adjust the offset box and record the value in
+   `configs/sync_overrides.csv`.
 5. **Repeat at the start, middle and end.** A constant error is an offset, fixable with
    `--offset`. A growing error is clock drift, which one offset cannot fix: report it.
 
 Calibrate your eye on a pulse trial first (P10 Trial2, P16 Trial2 HOI). Then check
 the camera-disagreement trials listed under the cohort run.
+
+### Recording manual decisions: `configs/sync_overrides.csv`
+
+```
+trial,stream,offset_s,checked_by,date,note
+P5/Trial1_Hands_only,emg,6.25,RL,2026-11-03,set by eye from the EMG strip
+P16/Trial2_HOI,emg,,RL,2026-11-03,auto value confirmed
+```
+
+`trial` is the `results/video` folder (`<P>/<Trial>_<cond>`) and `stream` is `video` or
+`emg`.
+
+- **With `offset_s`:** the row replaces the automatic offset; method becomes `manual`.
+- **Without it:** the row records that the automatic value was checked.
+
+Both kinds land in `sync.json` / `emg.json` as `checked_by`, `date` and `note`, and the
+manifest counts them as usable. Rebuild after editing:
+`realsense_player.py <RealSense dir>` for video, `emg_pane.py <video dir>` for EMG.
+`rebuild()` reads the file and never keeps an offset from an earlier CLI run.
 
 ### Mesh pane (SOMA/MANO fit beside the cameras)
 
