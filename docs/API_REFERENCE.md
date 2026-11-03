@@ -107,7 +107,7 @@ Locating recordings on disk: participants, trials, statics, references.
 - `find_manual_csv(vicon_csv: Path) -> Path | None` â€” The manually-labelled export next to ``vicon_csv``, if any.
 - `find_manually_labelled_trials(data_root: Path=DATA_ROOT) -> list[tuple[str, str, Path, Path]]` â€” Every (participant, trial_stem, vicon_csv, manual_csv) pair on disk that has a manually-labelled export, across every participant directory.
 - `auto_reference(markers: np.ndarray, need: int=300) -> np.ndarray` â€” Fallback reference frames: the longest fully-present stretches.
-- `soma_fit_dir(participant: str, trial: str) -> Path | None` â€” results/soma/fullset/<P>/<slug> for a trial named like "Trial1_HOI" (fit slugs spell "Trial 1" as Trial_1).
+- `soma_fit_dir(participant: str, trial: str, run: str='fullset') -> Path | None` â€” results/soma/<run>/<P>/<slug> for a trial named like "Trial1_HOI" (fit slugs spell "Trial 1" as Trial_1).
 
 ### `vicon2mano/core/emg.py`
 
@@ -558,7 +558,7 @@ HTML animation: fitted MANO mesh surface + Vicon marker overlay, at real elapsed
 - `load_model(mano_dir: str, side: str, pose_dim: int)` â€” smplx MANO matching a fit's pose parameterisation: 45 = raw axis-angle, else PCA.
 - `fit_vertices_mm(model, fit, frame_idx) -> np.ndarray` â€” (n, 778, 3) mesh vertices in mm for these frames of a FitResult npz.
 - `view_box(verts_mm, markers_mm)` â€” (center, half-width) of a fixed cubic view over every vertex and finite marker.
-- `render_mesh_frames(verts_mm, markers_mm, faces, bone_pairs, center, half, frame_numbers, dpi=85) -> list[bytes]` â€” One JPEG per frame: opaque mesh + marker bones + markers; center is (3,) for fixed axes or (n, 3) to follow.
+- `render_mesh_frames(verts_mm, markers_mm, faces, bone_pairs, center, half, frame_numbers, dpi=85, marker_colors=None) -> list[bytes]` â€” One JPEG per frame: opaque mesh + marker bones + markers; center is (3,) for fixed axes or (n, 3) to follow.
 - `main() -> None` â€” (no docstring)
 
 ### `scripts/mano/calibrate_shape_on_static.py`
@@ -825,7 +825,7 @@ Export RealSense .bag colour streams to MP4, sync them to Vicon, build an HTML p
 - `cam_summary(name: str, rows) -> dict` â€” Frame-rate stats plus the arrays the player needs.
 - `sync_to_vicon(vicon_csv: Path, rs_dir: Path, cams: list[dict], offset: float | None, X: np.ndarray, labels: list[str], rate: float) -> tuple[dict, np.ndarray]` â€” Measure the RealSense->Vicon offset; return (sync record, hand-speed trace at 50 Hz).
 - `to_50hz(x: np.ndarray, rate: float) -> np.ndarray` â€” Block-mean a Vicon-rate trace down to 50 Hz for the player.
-- `markers_pane(X: np.ndarray, labels: list[str], rate: float, hz: float=100.0) -> dict` â€” Raw Vicon markers for the player's live 3-D pane: int16 mm at ~hz, -32768 = missing.
+- `markers_pane(X: np.ndarray, labels: list[str], rate: float, hz: float=100.0, title: str='Vicon markers (raw)', status: np.ndarray | None=None, grade: np.ndar...)` â€” Markers for the player's live 3-D pane: int16 mm at ~hz, -32768 = missing.
 - `rs_dir_of(video_dir: Path) -> Path` â€” The RealSense folder an output folder results/video/<P>/<Trial>_<cond> was built from.
 - `rebuild(video_dir: Path)` â€” Rebuild an existing player (reuses its MP4s and Vicon CSV; manual offsets come from configs/sync_overrides.csv).
 - `build(rs_dir: Path, out: Path | None=None, vicon: Path | None=None, offset: float | None=None, crf: int=23, force: bool=False)` â€” Export (or reuse) the cameras, sync to Vicon, and write player.html with any mesh/EMG panes.
@@ -990,6 +990,7 @@ Render the fitted-MANO mesh animation for every trial that run_fullset.py has fi
 
 Render a window of a trial's fitted MANO mesh to MP4 and add it to that trial's RealSense player.
 
+- `load_fit(fit_dir: Path)` â€” (fit arrays, fitted CSV rows, markers (F, N, 3), labels, status (F, N), grade (F,), note (F,)) per fitted frame.
 - `main()` â€” (no docstring)
 
 ### `scripts/soma/movement_fit.py`

@@ -501,7 +501,7 @@ def auto_reference(markers: np.ndarray, need: int = 300) -> np.ndarray:
     return np.array(sorted(idx), dtype=int)
 
 
-def soma_fit_dir(participant: str, trial: str) -> Path | None:
-    """results/soma/fullset/<P>/<slug> for a trial named like "Trial1_HOI" (fit slugs spell "Trial 1" as Trial_1)."""
-    root = REPO_ROOT / "results" / "soma" / "fullset" / participant
+def soma_fit_dir(participant: str, trial: str, run: str = "fullset") -> Path | None:
+    """results/soma/<run>/<P>/<slug> for a trial named like "Trial1_HOI" (fit slugs spell "Trial 1" as Trial_1)."""
+    root = REPO_ROOT / "results" / "soma" / run / participant
     return next((d for d in sorted(root.glob("*")) if _normalise_name(d.name) == _normalise_name(trial)), None)

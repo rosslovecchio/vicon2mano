@@ -223,6 +223,37 @@ Notes:
 - Why not the existing animation format: 10k frames as base64 JPEGs inside the HTML
   would be about 500 MB, while the MP4 is about 17 MB.
 
+### Mesh quality and the learned-fill fit (2026-11-03, P16 so far)
+
+`mesh_video.py` now prefers the learned-gap-fill fit (`results/soma/real_fill_w01/movement`,
+every 10th frame = 20 Hz, filled values weighted 0.1) and falls back to `results/soma/fullset`.
+Each rendered frame gets a grade in `mesh_frames.csv` (`grade`, `note`):
+
+- **Red, not usable:** the hand turned more than 45° in one fitted step, or half or more of
+  the markers are missing or on a flagged finger. For fullset fits: `flag_frames.py` flag 2.
+- **Yellow, partly usable:** a finger past the natural-pose limits (`frame_diagnostics.py`,
+  2° tolerance) or a too-fast joint, or a marker missing. For fullset fits: flag 1.
+
+The player draws a yellow/red border with the reason on the mesh pane, and a clickable
+quality strip for the whole trial under the scrub bar. In the render, markers are dark when
+observed, blue when gap-filled, orange when on a flagged finger.
+
+P16 (learned fill), share of fitted frames ok / yellow / red: Trial1 Hands only 72/22/5.5%,
+Trial1 HOI 56/43/1.1%, Trial2 Hands only 73/25/2.1%, Trial2 HOI 60/40/0.1%. Red is mostly
+the hand out of view. Yellow in HOI is mostly thumb1 abduction a few degrees past its limit.
+
+**Marker coverage after the learned fill (P16, 18 hand markers):** 78–86% observed,
+1–2% spline, 12–21% learned. 95–99.9% of fitted frames have all 18 markers. What stays
+missing is whole frames with the hand out of view (every marker gone at once): 52–2350
+frames per trial, most in Trial1 Hands only.
+
+**Labellings player** (`scripts/soma/labels_player.py <video dir>`, writes `labels_player.html`
+beside the trial's player): cam1 plus three live marker panes on one shared view. The panes
+are the raw Vicon labels, SOMA labels without fill (graded by `flag_frames.py`), and the
+learned fill (graded by the fit's `flags.json`, nearest fitted frame). It uses only existing
+outputs. So far it exists only for P16 Trial2 HOI. The markers pane in `realsense_player`
+now accepts a list of such sets (`markers_pane(..., status, grade, note)`).
+
 ### EMG pane (HD-sEMG heatmaps)
 
 ```bash

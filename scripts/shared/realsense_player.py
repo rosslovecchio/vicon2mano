@@ -129,14 +129,24 @@ def to_50hz(x: np.ndarray, rate: float) -> np.ndarray:
     return np.round(x[: len(x) // step * step].reshape(-1, step).mean(axis=1), 1)
 
 
-def markers_pane(X: np.ndarray, labels: list[str], rate: float, hz: float = 100.0) -> dict:
-    """Raw Vicon markers for the player's live 3-D pane: int16 mm at ~hz, -32768 = missing."""
+def markers_pane(X: np.ndarray, labels: list[str], rate: float, hz: float = 100.0, title: str = "Vicon markers (raw)",
+                 status: np.ndarray | None = None, grade: np.ndarray | None = None, note: list[str] | None = None) -> dict:
+    """Markers for the player's live 3-D pane: int16 mm at ~hz, -32768 = missing.
+
+    Optional per-frame (T, N) status (0 observed, 1 gap-filled, 2 missing, 3 suspect) and (T,) grade/note
+    (1 partly usable, 2 not usable) are subsampled the same way.
+    """
     step = max(1, int(round(rate / hz)))
     Y = X[::step]
     q = np.where(np.isfinite(Y), np.clip(np.round(np.nan_to_num(Y)), -32767, 32767), -32768).astype(np.int16)
-    return {"rate": rate / step, "n": len(Y), "labels": [n.split(":")[-1] for n in labels],
+    pane = {"title": title, "rate": rate / step, "n": len(Y), "labels": [n.split(":")[-1] for n in labels],
             "colors": [marker_color(n) for n in labels], "bones": marker_bone_pairs(labels),
             "data": base64.b64encode(q.tobytes()).decode("ascii")}
+    if status is not None:
+        pane["status"] = base64.b64encode(np.ascontiguousarray(status[::step], np.uint8).tobytes()).decode("ascii")
+    if grade is not None:
+        pane.update(grade=[int(g) for g in grade[::step]], note=list(note[::step]))
+    return pane
 
 
 def rs_dir_of(video_dir: Path) -> Path:
@@ -182,7 +192,7 @@ def build(rs_dir: Path, out: Path | None = None, vicon: Path | None = None, offs
         X, labels, rate = load_trajectories(vicon_csv)
         sync, speed = sync_to_vicon(vicon_csv, rs_dir, cams, offset, X, labels, rate)
         sync.update({k: override[k] for k in ("checked_by", "date", "note") if override.get(k)})
-        markers = markers_pane(X, labels, rate)
+        markers = [markers_pane(X, labels, rate)]
         fingers = to_50hz(finger_speed(X, labels, rate), rate)
         (out / "sync.json").write_text(json.dumps(sync, indent=1))
         print("sync:", {k: v for k, v in sync.items() if k != "vicon_csv"})
@@ -204,9 +214,13 @@ def build(rs_dir: Path, out: Path | None = None, vicon: Path | None = None, offs
     panes = list(cams)
     for f in sorted(out.glob("mesh*_frames.csv")) if sync else []:  # Vicon-clock videos, e.g. scripts/soma/mesh_video.py
         with open(f) as fh:
-            rows = [(int(r["vicon_frame"]), sync["vicon_start_ms"] + 1000 * ((int(r["vicon_frame"]) - 1) / sync["vicon_rate"]
-                     - sync["offset_s"]), int(r["pts_ms"]), 0.0) for r in csv.DictReader(fh)]
+            recs = list(csv.DictReader(fh))
+        rows = [(int(r["vicon_frame"]), sync["vicon_start_ms"] + 1000 * ((int(r["vicon_frame"]) - 1) / sync["vicon_rate"]
+                 - sync["offset_s"]), int(r["pts_ms"]), 0.0) for r in recs]
         panes.append(cam_summary(f.name[: -len("_frames.csv")], rows))
+        panes[-1]["fn_step"] = int(np.median(np.diff(panes[-1]["fn"]))) if len(rows) > 1 else 1  # rendered every n-th frame
+        if recs and "grade" in recs[0]:  # fit quality per frame: 1 partly, 2 not usable
+            panes[-1].update(grade=[int(r["grade"]) for r in recs], note=[r["note"] for r in recs])
 
     emg = json.loads((out / "emg.json").read_text()) if sync and (out / "emg.json").exists() else None  # scripts/emg/emg_pane.py
     meta = {"title": f"{p} {trial} {cond}", "trigger_ms": trigger_log_ms(rs_dir), "cams": panes, "sync": sync, "emg": emg, "markers": markers,

@@ -331,8 +331,12 @@ def view_box(verts_mm, markers_mm):
     return center, np.nanmax(np.linalg.norm(pts - center, axis=-1)) * 1.1
 
 
-def render_mesh_frames(verts_mm, markers_mm, faces, bone_pairs, center, half, frame_numbers, dpi=85) -> list[bytes]:
-    """One JPEG per frame: opaque mesh + marker bones + markers; center is (3,) for fixed axes or (n, 3) to follow."""
+def render_mesh_frames(verts_mm, markers_mm, faces, bone_pairs, center, half, frame_numbers, dpi=85,
+                       marker_colors=None) -> list[bytes]:
+    """One JPEG per frame: opaque mesh + marker bones + markers; center is (3,) for fixed axes or (n, 3) to follow.
+
+    marker_colors: optional (n, N) array of colours per frame and marker (default all dark).
+    """
     center = np.broadcast_to(center, (len(frame_numbers), 3))
     import io
     fig = plt.figure(figsize=(8, 7))
@@ -363,7 +367,8 @@ def render_mesh_frames(verts_mm, markers_mm, faces, bone_pairs, center, half, fr
                 ax.plot([m[ia, 0], m[ib, 0]], [m[ia, 1], m[ib, 1]],
                         [m[ia, 2], m[ib, 2]], c="#16a34a", lw=1.4)
         if finite.any():
-            ax.scatter(*m[finite].T, c="#2c3e50", s=22, depthshade=False)
+            ax.scatter(*m[finite].T, c="#2c3e50" if marker_colors is None else list(marker_colors[k][finite]),
+                       s=22, depthshade=False)
         ax.set_xlim(center[k, 0] - half, center[k, 0] + half)
         ax.set_ylim(center[k, 1] - half, center[k, 1] + half)
         ax.set_zlim(center[k, 2] - half, center[k, 2] + half)
