@@ -1,4 +1,5 @@
-% Draft: technical tutorial on personalised MANO reconstruction from sparse optical hand markers.
+% Draft: method paper -- participant-calibrated SOMA-style labelling and gap filling for sparse optical hand
+% markers, with personalised MANO fitting. Step-by-step reproducibility material is kept as the implementation section.
 % Rule for this draft: only measured numbers appear; everything else is \tbd{}.
 % Build: latexmk -pdf main.tex
 \documentclass[11pt,a4paper]{article}
@@ -19,8 +20,8 @@
 \newcommand{\field}[1]{\par\smallskip\noindent\textbf{#1.}\ }
 \lstset{basicstyle=\ttfamily\small,breaklines=true,columns=fullflexible,frame=single,framesep=4pt}
 
-\title{From sparse optical markers to personalised MANO reconstructions:\\
-a practical tutorial for hand--object interaction capture}
+\title{Participant-calibrated learned labelling and gap filling\\
+for sparse optical hand-marker capture during object interaction}
 \author{\tbd{First author}, \tbd{co-authors}\\ \small \tbd{affiliations}}
 \date{Draft, \today}
 
@@ -30,29 +31,31 @@ a practical tutorial for hand--object interaction capture}
 % ---------------------------------------------------------------------------------------------------------------
 \section*{Title options}
 \begin{enumerate}[nosep]
-  \item From sparse optical markers to personalised MANO reconstructions: a practical tutorial for hand--object interaction capture (current).
-  \item A reproducible tutorial for labelling, gap filling and personalised MANO fitting of sparse hand-marker recordings.
+  \item Participant-calibrated learned labelling and gap filling for sparse optical hand-marker capture during object interaction (current).
+  \item Adapting SOMA to sparse hand markers: calibrated labelling, own-data gap filling and personalised MANO fitting.
 \end{enumerate}
 \note{Avoid ``validated joint angles'' or ``accurate reconstruction'' in the title until there is an independent angle reference.}
 
 % ---------------------------------------------------------------------------------------------------------------
 \begin{abstract}
 \noindent
-This technical tutorial presents a reproducible workflow for processing sparse optical hand-marker recordings
-(22 markers, 200\,Hz) during hand--object interaction (HOI). It explains participant calibration of a MANO hand
-model, learned marker labelling, gap reconstruction, personalised MANO fitting and quality control, through a worked
-example and a multi-participant evaluation. Each step is given as purpose, inputs, command, expected output,
-acceptance checks and common failures. The evaluation is there to justify the recommendations. In 17 recorded
-participants, only 0.1--15\% of frames per trial were geometrically self-consistent under the original labels, and
-HOI trials were 2--10$\times$ worse than hands-only trials. On hand-reviewed frames of the nine participants with an
-accepted static calibration, a participant-calibrated SOMA-style labeller named 90.1\% of HOI marker points
-correctly, against 80.9\% for Vicon's labels. On artificial gaps in a held-out HOI trial, a gap filler trained on the
-participant's own labelled frames had a lower worst-case error than rigid-body filling for seven of eight
-participants. Across 34 trials it left a median 10.2\% of missing values unfilled, against 47.6\%. With filled values
-down-weighted to 0.1, the fit error on observed markers was never worse than with rigid-body filling in hands-only
-trials, but was worse in 7 of 17 HOI trials, by up to 0.7\,mm. The tutorial emphasises failure modes, the distinction
-between measured and reconstructed values, and the computational and manual effort required. Training is seeded, every
-result carries a provenance record, and the code is open.
+Sparse optical hand-marker recordings (here 22 markers, 200\,Hz, three per finger) are hard to label automatically
+during hand--object interaction (HOI): in 17 recorded participants, only 0.1--15\% of frames per trial were
+geometrically self-consistent under the commercial labels, and HOI trials were 2--10$\times$ worse than hands-only
+trials. Learned labellers for optical motion capture, such as SOMA, are trained on synthetic point clouds from a
+statistical body model, but target dense whole-body marker sets and name hand markers as future work. We adapt this
+approach to a sparse single-hand set. Synthetic training clouds are generated from the MANO hand model with a
+participant-specific marker library calibrated on one static trial, and labels are assigned by a transformer with
+optimal-transport (Sinkhorn) assignment and a piece vote along trajectories. We add a gap filler trained on the
+participant's own labelled frames, and a MANO fit that down-weights reconstructed values and is scored on observed
+markers only. On hand-reviewed frames of the nine participants with an accepted static calibration, the calibrated
+labeller named 90.1\% of HOI marker points correctly, against 86.4\% for the same labeller trained without participant
+calibration and 80.9\% for the commercial labels. On artificial gaps in a held-out HOI trial, the own-data filler had a lower worst-case error than
+rigid-body filling for seven of eight participants, and across 34 trials it left a median 10.2\% of missing values
+unfilled, against 47.6\%. With filled values down-weighted to 0.1, the fit error on observed markers was never worse
+than with rigid-body filling in hands-only trials, but was worse in 7 of 17 HOI trials, by up to 0.7\,mm. We report
+failure cases, the distinction between measured and reconstructed values, and the computational and manual effort
+required. Training is seeded, every result carries a provenance record, and the code is open.
 \end{abstract}
 \note{Cohort numbers from Tables~\ref{tab:bench-label}, \ref{tab:gapfill-cohort} and~\ref{tab:fit-cohort} and Section~\ref{sec:val-fill}, measured 2026-10-29.}
 
@@ -67,13 +70,33 @@ not a single algorithm but a chain of decisions, each with its own failure modes
   \item joint angles must be inferred from three markers per finger, through a hand model with participant-specific shape and marker
   attachments.
 \end{itemize}
-This tutorial brings together established techniques (MANO, SOMA-style labelling, learned and rigid-body gap
-filling, marker-based model fitting). It documents the implementation decisions, validation procedures and failure
-modes needed to apply them to sparse optical hand capture. It does not propose a new algorithm.
+SOMA \citep{ghorbani2021soma} showed that a network trained only on synthetic marker clouds can label raw optical
+motion capture without per-subject calibration, but for dense whole-body layouts (38--67 markers) and with hands left as
+future work. A hand with three markers per finger is a different problem: neighbouring fingertips converge and swap
+identity, markers sit on skin that moves over the bone, and grasps occlude markers for long periods. We adapt SOMA to
+this setting and extend it with gap filling and model fitting, evaluated against hand-reviewed labels on 17
+participants.
 
-\paragraph{What the reader will learn.} How to calibrate a personalised MANO model on a static trial, label every
-frame of a movement trial, fill gaps, fit per-frame hand pose, flag implausible frames, and check each step against
-reviewed data, for their own participants.
+\paragraph{Contributions.}
+\begin{enumerate}[nosep]
+  \item \textbf{Sparse-hand labeller.} A SOMA-style labeller whose synthetic clouds come from the MANO hand model and a
+  participant marker library (a fixed surface attachment per marker plus real per-frame residuals measured on a trusted
+  trial), calibrated to each participant from one static trial (Section~\ref{sec:step-label}, Section~\ref{sec:soma-diff}).
+  \item \textbf{Own-data gap filler.} A visibility-masked, rigid-frame-aligned network trained on the participant's own
+  labelled frames, with edge-matched blending across the gap (Section~\ref{sec:step-fill}).
+  \item \textbf{Reconstruction-aware fitting.} A MANO fit that weights reconstructed values below observed ones and is
+  scored on observed markers only, with negative results reported (Section~\ref{sec:val-fit}).
+  \item \textbf{Cohort evaluation.} Label quality, labelling accuracy, gap-filling error and fit error against reviewed
+  frames for 17 participants, with the cases where each step does not help.
+  \item \textbf{Open, reproducible implementation} with a synthetic smoke test and per-run provenance.
+\end{enumerate}
+\tbd{Confirm by literature search that no published SOMA-style or learned labeller exists for sparse hand-only passive
+markers with participant calibration; add any found (e.g.\ \citet{han2018online} for dense fixed-shape hand markers) to
+Section~\ref{sec:soma-diff} and the baselines.}
+
+\paragraph{Reading guide.} Sections~\ref{sec:soma-diff}--\ref{sec:workflow} define the method and give every step as
+purpose, inputs, command, expected output, acceptance checks and common failures, so that it can be rerun on another
+laboratory's data. Section~\ref{sec:validation} evaluates it.
 
 \paragraph{Supported recordings.} One hand, 22 markers (4 forearm, 3 palm, 3 per finger, 3 on the thumb), a static
 trial per participant, and movement trials with and without objects. Reduced configurations (no Palm3, two forearm
@@ -88,8 +111,9 @@ viewer and a provenance record.
 guarantee unique or anatomically correct joint angles. Fit error measures agreement with markers, not angle accuracy.
 Filled values are reconstructions, not measurements, and are kept flagged as such throughout.
 
-\paragraph{Contribution.} A practical, reproducible guide with validation checks and explicit limitations at every
-step. It includes cases where a step does \emph{not} help, so that recommendations are not broader than the evidence.
+\paragraph{Scope of the claims.} Claims are limited to labelling accuracy against reviewed frames, gap-filling error on
+artificial gaps, and agreement of the fit with observed markers. Cases where a step does \emph{not} help are reported,
+so that conclusions are not broader than the evidence.
 
 % ---------------------------------------------------------------------------------------------------------------
 \section{Background}
@@ -97,15 +121,38 @@ step. It includes cases where a step does \emph{not} help, so that recommendatio
   \item \textbf{Hand models.} MANO \citep{romero2017mano}: shape and pose space learned from dense scans.
   \item \textbf{Model fitting to markers.} MoSh \citep{loper2014mosh} and MoSh++/AMASS \citep{mahmood2019amass} fit body
   (and SMPL+H hand) models with marker attachments; GRAB \citep{taheri2020grab} captures whole-body grasps with dense
-  hand markers. The setting here differs: 3 markers per finger, a clinical protocol, per-participant review. A full
-  MoSh++ or SOMA reimplementation on sparse markers is out of scope; both target dense body-and-hand marker sets.
+  hand markers. The setting here differs: 3 markers per finger, a clinical protocol, per-participant review. MoSh++
+  and SOMA both target dense body-and-hand marker sets; here the MANO fit is a post-processing step, not the contribution.
   \item \textbf{Learned labelling.} SOMA \citep{ghorbani2021soma}: self-attention over the point cloud with Sinkhorn
-  assignment \citep{sarlin2020superglue}, trained on synthetic data. Finger-marker labelling with spatial models and
-  tracking \citep{alexanderson2017labeling}.
+  assignment \citep{sarlin2020superglue}, trained on synthetic data (Section~\ref{sec:soma-diff}). Finger-marker
+  labelling with spatial models and tracking \citep{alexanderson2017labeling}; a depth-image network that labels 19
+  hand markers on a fixed-shape hand \citep{han2018online}.
   \item \textbf{Cleaning and gap filling.} Learned denoising of optical data \citep{holden2018robust}; trajectory
   repair with a kinematic reference \citep{perepichka2019robust}; Vicon Nexus pattern, spline and rigid-body filling
   \citep{vicon_nexus}.
 \end{itemize}
+
+% ---------------------------------------------------------------------------------------------------------------
+\section{Relation to SOMA}\label{sec:soma-diff}
+We keep SOMA's core: a self-attention network over the unordered per-frame cloud, a log-space Sinkhorn layer with a
+dustbin that absorbs ghost points and missing labels, training only on synthetic clouds, and a vote of per-frame labels
+along trajectory pieces (SOMA's tracklet labelling). What changes, and why, is in Table~\ref{tab:soma-diff}. The first two
+rows are the claimed technical differences; the rest are consequences of the sparse single-hand setting.
+\begin{table}[h]\centering\small
+\caption{SOMA \citep{ghorbani2021soma} and this work. SOMA entries are taken from its paper.}\label{tab:soma-diff}
+\begin{tabularx}{\linewidth}{@{}p{2.6cm}XX@{}}\toprule
+ & SOMA & This work \\\midrule
+Marker placement in synthetic clouds & A random vertex in the 1-ring of each layout vertex, re-drawn per sample; noise copied from the differences between simulated and real AMASS markers & One fixed surface attachment per marker (a face and a barycentric point) with the \emph{real} per-frame residual of that marker, measured on a trusted trial and re-applied to the synthetic pose \\
+Poses and shapes & AMASS motions on 3664 CAESAR body shapes (SMPL-X) & Real hand poses from a library frame (20\% of clouds mix each finger from its own frame) on the participant's shape from one static trial (MANO) \\
+Calibration & One model per dataset layout, from one labelled frame & One model per participant, from a static trial \\
+Marker set & 38--67 markers, whole body & 22 markers on one hand and forearm; three per finger \\
+Failure mode targeted & Occlusion, ghosts, varying layouts & Converging fingertips, skin-mounted palm markers, long HOI occlusions \\
+Post-processing & MoSh to SMPL-X & Personalised MANO fit, gap filler (Section~\ref{sec:step-fill}) \\\bottomrule
+\end{tabularx}
+\end{table}
+These differences are design choices, not yet shown to matter. Section~\ref{sec:val-ablate} tests each against a
+SOMA-recipe baseline trained on the same data. Until that is done, the claim is limited to ``a SOMA-style labeller
+adapted to sparse hand markers'', not to an improvement over SOMA's recipe.
 
 % ---------------------------------------------------------------------------------------------------------------
 \section{Prerequisites and example data set}\label{sec:prereq}
@@ -181,7 +228,7 @@ that the rigid fill reproduces the recorded reference within 0.01\,mm.
 (Section~\ref{sec:example}).
 
 % ---------------------------------------------------------------------------------------------------------------
-\section{Step-by-step workflow}\label{sec:workflow}
+\section{Method and step-by-step implementation}\label{sec:workflow}
 Every step below has the same format: purpose, inputs, procedure, command, expected output, acceptance checks and
 common failures. Commands are run from the repository root; \texttt{P} is the participant ID.
 
@@ -262,7 +309,35 @@ participant checked. The historical passes were run before the pass script exist
 rule above for 11 of the 13 participants that were run; P6 and P13 deviate (their passes were restarted by hand). The
 script reproduces the operations, not the review decisions. The historical accepted statics, which all reported
 results use, are kept separately from statics selected by the script (\texttt{results/soma/static\_passes}); no
-reported result was recomputed with the latter. \tbd{comparison of script-selected and historical statics}
+reported result was recomputed with the latter.
+\field{Script vs historical statics} All nine participants were rerun with \texttt{static\_passes.py}
+(Table~\ref{tab:static-compare}; \texttt{compare\_statics.py}). The script's pick had a smaller largest distance than
+the accepted static for P3, P6, P11 and P12, the same for P17, and a larger one for P14, P15 and P16 (P16: 8.69 against
+5.87\,mm). Its picks were further from a natural pose in seven of nine participants (up to 8.8\textdegree), because the
+selection rule does not use the natural-pose check, and P15's pick failed the automatic checks. No script pick met the
+full goal; the accepted P3 static did. Scales differed by up to 0.034, and 0--7 attachments changed. The rule therefore
+does not reproduce the reviewers' choices, and the review step remains necessary. Adding the natural-pose check to the
+rule is a candidate change that has not been made.
+\begin{table}[h]\centering\small
+\caption{Script-selected (\texttt{static\_passes.py}, one rerun) vs historical accepted statics: largest
+marker-to-attachment distance (mm), natural-pose deviation (\textdegree), scale, and attachments that differ.}\label{tab:static-compare}
+\begin{tabular}{lcccccc}\toprule
+P & \multicolumn{2}{c}{Max (mm)} & \multicolumn{2}{c}{Natural (\textdegree)} & Scale & Attach. \
+ & script & hist. & script & hist. & script / hist. & changed \\\midrule
+P3 & 4.74 & 4.92 & 5.1 & 0.1 & 0.869 / 0.883 & 0 \\
+P4 & 4.85 & 4.41 & 2.6 & 0.0 & 0.886 / -- & -- \\
+P6 & 6.62 & 7.44 & 2.5 & 0.0 & 0.916 / 0.921 & 7 \\
+P11 & 5.59 & 5.90 & 3.0 & 0.0 & 0.972 / 0.938 & 4 \\
+P12 & 5.46 & 5.49 & 1.3 & 0.0 & 0.933 / 0.958 & 2 \\
+P14 & 6.78 & 6.52 & 0.0 & 0.1 & 0.900 / 0.878 & 1 \\
+P15 & 9.08 & 8.60 & 8.8 & 0.5 & 0.897 / 0.892 & 2 \\
+P16 & 8.69 & 5.87 & 0.0 & 0.0 & 1.077 / 1.049 & 6 \\
+P17 & 4.54 & 4.54 & 2.1 & 1.3 & 0.863 / 0.862 & 0 \\\bottomrule
+\end{tabular}
+\end{table}
+\note{P4's historical static is the earlier hand-tuned fit, so its scale and attachments are not compared. Measured
+2026-11-03 (results/soma/static\_passes/compare.csv). P15--P17 were rerun after two runs had overlapped; the overlapped
+results were discarded.}
 \field{Common failures} A static can be mislabelled; P9's static is mislabelled in the palm. Screen every static per
 segment against a verified movement trial first. Automatic photo matching succeeded for P4, P6, P8 and P9; P3 and
 P11--P17 need the dots marked by hand, P1 and P2 cannot be matched (no Palm3), and P5, P7 and P10 have no photo.
@@ -564,6 +639,48 @@ Reviewed static & \tbd{} & \tbd{} & \tbd{} \\\bottomrule
 \end{tabular}
 \end{table}
 
+\subsection{Baselines and ablations for the method claims}\label{sec:val-ablate}
+These experiments decide whether the labeller and filler are a contribution beyond a re-implementation. None is done
+yet; every cell is open. All use the reviewed frames of the nine participants with an accepted static (Hands only and
+HOI, pooled and median over participants, as Table~\ref{tab:bench-label}), identical frames for every row, and
+\tbd{at least 3 seeded trainings per row, reported as mean $\pm$ sd}.
+\begin{table}[h]\centering\small
+\caption{Labelling baselines and ablations: share of real points named correctly (\%).}\label{tab:ablate-label}
+\begin{tabular}{lcc}\toprule
+Variant & Hands only & HOI \\\midrule
+Vicon raw labels & 92.9 (95.1) & 80.9 (86.4) \\
+SOMA recipe: random 1-ring marker placement, noise model, generic MANO shape, no library residuals & \tbd{} & \tbd{} \\
+Cross-participant labeller (P10 library, no participant calibration) & 97.1 (96.2) & 86.4 (92.3) \\
+Participant-calibrated, full (ours) & 98.2 (98.7) & 90.1 (93.4) \\
+\quad without real residuals (fixed attachment only) & \tbd{} & \tbd{} \\
+\quad without finger-block pose mixing & \tbd{} & \tbd{} \\
+\quad Sinkhorn replaced by log-softmax, no dustbin & \tbd{} & \tbd{} \\
+\quad per-frame labels, no piece vote & \tbd{} & \tbd{} \\
+\quad participant's own labelled frames as library (upper bound) & \tbd{} & \tbd{} \\
+Spatial GMM + Viterbi \citep{alexanderson2017labeling} & \tbd{} & \tbd{} \\
+3-D U-Net voxel labeller & \tbd{} & \tbd{} \\
+Hungarian on mean pose & \tbd{} & \tbd{} \\\bottomrule
+\end{tabular}
+\end{table}
+\begin{itemize}[nosep]
+  \item \textbf{Confusable fingertips.} Report accuracy separately for the confusable markers (Index3, Middle3, Ring3,
+  Pinky3) and for frames where two fingertips are within \tbd{threshold} mm: the case the synthetic generator was built for.
+  \item \textbf{Occlusion robustness.} Accuracy against the number of absent markers (0--5) and added ghost points, as in
+  SOMA's Table~2, so the numbers are comparable to the original.
+  \item \textbf{Layout transfer.} Evaluate the reduced 19-marker configuration (P1, P2) with a participant-calibrated model.
+  \item \textbf{Static quality.} Accuracy against the accepted static's maximum marker-to-attachment distance
+  (Table~\ref{tab:static-accept}), to show how much calibration quality matters, and the P16 personalisation result
+  (Section~\ref{sec:res-personalisation}) repeated over seeds.
+  \item \textbf{Failures.} Explain P9 Trial2 Hands only (52\% against 92\% for Vicon) and the P16 whole-hand mirroring
+  \tbd{cause and, if possible, a fix}; a method paper cannot leave them as open anecdotes.
+  \item \textbf{External data.} Labelling accuracy on a public dense-marker hand dataset subsampled to 22 markers
+  \tbd{dataset, licence, marker mapping}, to show the result does not depend on this laboratory's markers.
+\end{itemize}
+Gap filling needs the same treatment: Table~\ref{tab:bench-fill} is to be completed with the Nexus baselines and the
+synthetic-trained filler on identical cuts, plus \tbd{ablations: without Kabsch alignment, without the visibility
+mask, without edge-matched blending, MLP width and depth, and a spline-then-learned hybrid for short gaps}. Also
+\tbd{statistical tests (paired, per participant) for every comparison claimed in the abstract}.
+
 \subsection{Calibration alternatives}\label{sec:val-calib}
 \tbd{all three tests}
 \begin{enumerate}[label=(\alph*),nosep]
@@ -592,10 +709,9 @@ Diagnostics and viewer & \tbd{} & \tbd{} & -- & \tbd{} \\\bottomrule
 \end{tabular}
 \end{table}
 
-\paragraph{Optional extensions.} Not needed for the tutorial, and included only if they answer a practical question:
-the repository's spatial GMM labeller with Viterbi tracking \citep{alexanderson2017labeling} and a 3-D U-Net labeller as
-further labelling comparators; an external benchmark on a public dense-marker hand--object data set such as GRAB
-\citep{taheri2020grab}, subsampled to the 22-marker layout, as an angle reference without new recordings
+\paragraph{External benchmark.} The GMM and U-Net labellers are the comparators of Table~\ref{tab:ablate-label}. A public
+dense-marker hand--object data set such as GRAB \citep{taheri2020grab}, subsampled to the 22-marker layout, would give
+both a labelling benchmark and an angle reference without new recordings
 \tbd{licence; marker-layout mapping; task similarity}.
 
 % ---------------------------------------------------------------------------------------------------------------
@@ -643,6 +759,11 @@ Many flagged frames & Joint-limit violations & Flagged frames in the viewer; sta
 
 \paragraph{Limitations.}
 \begin{itemize}[nosep]
+  \item The labeller is an adaptation of SOMA; whether its differences (Table~\ref{tab:soma-diff}) improve on SOMA's own
+  recipe is open until Table~\ref{tab:ablate-label} is complete.
+  \item The calibrated labeller was worse than Vicon on HOI for three of nine participants, and one Hands-only trial (P9
+  Trial2) is unexplained.
+  \item The 99.89\% result on P10 is a best case, because its library comes from the same trial.
   \item Occluded markers have no direct ground truth; artificial gaps are cut where markers are visible, mostly in
   easier poses, so they are optimistic for real grasp occlusions. The planned grasp windows address this.
   \item Label quality bounds filler quality: the filler learns from the participant's labels, including their errors.
@@ -671,7 +792,10 @@ Fig.~13 & Joint-angle error vs shape mismatch (synthetic). \tbd{} \\\bottomrule
 \section*{Expected reviewer objections}
 \begin{tabularx}{\linewidth}{@{}XX@{}}\toprule
 Objection & Answer / planned validation \\\midrule
-``Nothing here is new.'' & Positioned as a tutorial: the contribution is the documented, validated workflow, including where a step does not help. \\
+``This is SOMA with a different dataset.'' & Table~\ref{tab:soma-diff} lists the changes (real-residual marker library, participant calibration, MANO, sparse layout). Table~\ref{tab:ablate-label} tests each against a SOMA-recipe baseline. \tbd{Results; if no difference, retreat to a resource paper.} \\
+``Why not Han et al.\ or other hand labellers?'' & Compare on the same frames or explain the incompatible input (depth images, fixed shape). \tbd{} \\
+``One laboratory, one marker set.'' & 17 participants, but one system; add the public-data benchmark and the 19-marker layout. \tbd{} \\
+``Labels for training come from the labeller's own errors.'' & The calibrated labeller needs a static trial, not labelled movement; the filler does use the participant's labels (Limitations). \\
 ``No ground truth for occluded markers.'' & Verified HOI grasp windows (planned). \\
 ``Why not Vicon/Nexus gap filling?'' & Nexus spline, pattern and rigid-body filling as baselines on identical cuts (Table~\ref{tab:bench-fill}). \tbd{} \\
 ``Fit error is not angle accuracy.'' & Claims are limited to marker reconstruction and model-fitting agreement; optional external angle reference. \\
