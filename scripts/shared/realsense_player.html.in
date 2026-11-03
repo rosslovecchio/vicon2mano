@@ -19,6 +19,7 @@
   .mono{font-family:ui-monospace,monospace}
   #clock span{margin-right:16px} #clock b{color:#8cf;font-weight:normal}
   .hint{color:#888;padding:0 14px 10px}
+  .nosync .offs,.nosync .striphint{display:none}
 </style></head><body>
 <header><h1 id="title"></h1><div id="clock" class="mono"></div></header>
 <div class="grid" id="grid"></div>
@@ -32,9 +33,9 @@
 <div class="bar" id="qrow"><span>mesh quality</span><canvas id="qbar"></canvas>
   <span style="color:#888">yellow = partly usable, red = not usable (click to jump)</span></div>
 <div class="bar" id="syncbar">
-  RealSense→Vicon offset <input id="voff" type="number" step="0.005" style="width:80px"> s
-  <button id="vreset">reset</button> <span id="vmethod" style="color:#888"></span>
-  · go to Vicon frame <input id="vgo" type="number" style="width:90px">
+  <span id="syncparts">RealSense→Vicon offset <input id="voff" type="number" step="0.005" style="width:80px"> s
+  <button id="vreset">reset</button> <span id="vmethod" style="color:#888"></span> · </span>
+  go to Vicon frame <input id="vgo" type="number" style="width:90px">
 </div>
 <canvas id="strip" height="90" style="width:calc(100% - 28px);margin:0 14px;display:block;background:#0e0f12"></canvas>
 <div class="bar" id="emgbar" style="display:none">
@@ -49,18 +50,20 @@
 <canvas id="emgmap" style="width:calc(100% - 28px);margin:0 14px;display:none;background:#000;image-rendering:pixelated"></canvas>
 <div class="hint">Space play/pause · ←/→ step one frame of the chosen camera (Shift ×10) · per-camera offset (ms) shifts that camera on the common clock.
 Times are each camera's global timestamps (epoch ms, UTC); frame# is the sensor counter, gaps = frames the recorder dropped.
-Strip: ±3 s around the cursor — <span style="color:#fff">white</span> = Vicon hand-marker speed, colours = per-camera image motion. Adjust the offset until the peaks line up, then rerun with <code>--offset</code> to write it to the frame CSVs.</div>
+Strip: ±3 s around the cursor — <span class="striphint"><span style="color:#fff">white</span> = Vicon hand-marker speed, colours = per-camera image motion. Adjust the offset until the peaks line up, then rerun with <code>--offset</code> to write it to the frame CSVs.</span></div>
 <script>
 const META = /*META*/null;
 const $ = id => document.getElementById(id);
 $('title').textContent = META.title;
+if (META.hide_sync) document.body.classList.add('nosync');     // no sync strip / offset controls (curated players)
+if (META.cols) $('grid').style.gridTemplateColumns = `repeat(${META.cols}, 1fr)`;
 const cams = META.cams.map(c => {
   const el = document.createElement('div'); el.className = 'cam';
   el.innerHTML = `<video src="${c.file}" muted preload="auto" playsinline></video>
-    <div class="lbl">${c.name} · ${c.fps_recorded} fps rec · offset <input type="number" value="0"> ms<br><span></span></div>`;
+    <div class="lbl">${c.name} · ${c.fps_recorded} fps rec<span class="offs"> · offset <input type="number" value="0"> ms</span><br><span class="info"></span></div>`;
   $('grid').append(el);
   $('stepcam').add(new Option(c.name, c.name));
-  return {...c, el, v: el.querySelector('video'), info: el.querySelector('span'),
+  return {...c, el, v: el.querySelector('video'), info: el.querySelector('.info'),
           off: el.querySelector('input'), end: c.t0 + c.ts[c.ts.length - 1]};
 });
 const T0 = Math.min(...cams.map(c => c.t0)), T1 = Math.max(...cams.map(c => c.end));
@@ -116,7 +119,7 @@ function render() {
     (S ? `<span>Vicon <b>${vt.toFixed(3)} s · frame ${Math.floor(vt * S.vicon_rate) + 1}</b></span>` : '');
   $('scrub').value = Math.round(1000 * (T - T0) / (T1 - T0));
   $('play').textContent = playing ? '❚❚' : '▶';
-  if (S) drawStrip();
+  if (S && !META.hide_sync) drawStrip();
   if (E) drawEmg();
   if (Q) drawQbar();
   if (mks.length) drawMarkers();
@@ -138,6 +141,7 @@ if (S) {
   const h = /vf=(\d+)/.exec(location.hash); if (h) goVicon(+h[1]);  // player.html#vf=4000 opens at Vicon frame 4000
   speedN = norm(META.speed50); motionN = cams.map(c => norm(c.motion));
   cams.forEach((c, k) => c.el.querySelector('.lbl').style.borderLeft = `4px solid ${COLS[k % COLS.length]}`);
+  if (META.hide_sync) { $('strip').style.display = $('syncparts').style.display = 'none'; }
 } else $('syncbar').style.display = $('strip').style.display = 'none';
 
 // ---- live 3-D marker panes (raw Vicon, or several labellings side by side) ----
@@ -148,10 +152,11 @@ const mkView = {yaw: -0.8, pitch: 0.35, zoom: 1, key: ''};
 const dec16 = b => new Int16Array(Uint8Array.from(atob(b), c => c.charCodeAt(0)).buffer);
 const mks = MS.map(M => {
   const el = document.createElement('div'); el.className = 'cam';
-  el.innerHTML = `<canvas style="width:100%;aspect-ratio:16/10;display:block;background:#fff;cursor:grab;touch-action:none"></canvas>
-    <div class="lbl">${M.title} · ${M.rate} Hz · drag rotate, wheel zoom<br><span></span></div>`;
+  el.innerHTML = `<canvas style="width:100%;aspect-ratio:${META.cols ? '848/480' : '16/10'};display:block;background:#fff;cursor:grab;touch-action:none"></canvas>
+    <div class="lbl">${M.title} · markers ${M.rate} Hz${M.mesh ? `, mesh ${Math.round(S.vicon_rate / (M.mesh.frames[1] - M.mesh.frames[0]))} Hz` : ''} · drag rotate, wheel zoom<br><span class="info"></span></div>`;
   $('grid').append(el);
-  const mk = {M, el, cv: el.querySelector('canvas'), info: el.querySelector('span'), data: dec16(M.data),
+  const mk = {M, el, cv: el.querySelector('canvas'), info: el.querySelector('.info'), data: dec16(M.data),
+              mesh: M.mesh ? {frames: M.mesh.frames, verts: dec16(M.mesh.verts)} : null,
               status: M.status ? Uint8Array.from(atob(M.status), c => c.charCodeAt(0)) : null,
               hand: M.labels.map((l, j) => l.toLowerCase().startsWith('forearm') ? -1 : j).filter(j => j >= 0)};
   let drag = null;
@@ -173,6 +178,29 @@ function mkCentre(mk, i) {  // hand centroid averaged over ±0.5 s: a reach stil
   }
   return n ? c.map(v => v / n) : null;
 }
+const FACES = META.faces ? new Uint16Array(Uint8Array.from(atob(META.faces), c => c.charCodeAt(0)).buffer) : null;
+// Mesh of the fit for the frame at or before `row` (Vicon row), same projection as the markers; painter's algorithm
+// (far faces first), shaded by how squarely a face faces the viewer. Screen depth: larger = farther.
+function drawMesh(g, mk, row, W, H, s, cy, sy, cp, sp, c) {
+  const F = mk.mesh.frames; let lo = 0, hi = F.length - 1;
+  if (row < F[0] || row > F[hi] + (F[1] - F[0])) return;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; F[m] <= row ? lo = m : hi = m - 1; }
+  const NV = 778, o = lo * NV * 3, V = mk.mesh.verts, X = new Float32Array(NV * 3);
+  for (let v = 0; v < NV; v++) {
+    const dx = V[o + 3 * v] - c[0], dy = V[o + 3 * v + 1] - c[1], dz = V[o + 3 * v + 2] - c[2], w = sy * dx + cy * dy;
+    X[3 * v] = W / 2 + (cy * dx - sy * dy) * s; X[3 * v + 1] = H / 2 - (dz * cp - w * sp) * s; X[3 * v + 2] = dz * sp + w * cp;
+  }
+  const nf = FACES.length / 3, depth = new Float32Array(nf), idx = Array.from({length: nf}, (_, i) => i);
+  for (let f = 0; f < nf; f++) depth[f] = X[3 * FACES[3 * f] + 2] + X[3 * FACES[3 * f + 1] + 2] + X[3 * FACES[3 * f + 2] + 2];
+  idx.sort((a, b) => depth[b] - depth[a]);
+  for (const f of idx) {
+    const a = 3 * FACES[3 * f], b = 3 * FACES[3 * f + 1], d = 3 * FACES[3 * f + 2];
+    const ux = X[b] - X[a], uy = X[b + 1] - X[a + 1], uz = X[b + 2] - X[a + 2], vx = X[d] - X[a], vy = X[d + 1] - X[a + 1], vz = X[d + 2] - X[a + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx, k = .4 + .6 * Math.abs(nz) / (Math.hypot(nx, ny, nz) || 1);
+    g.fillStyle = g.strokeStyle = `rgb(${232 * k | 0},${160 * k | 0},${160 * k | 0})`; g.lineWidth = .6;
+    g.beginPath(); g.moveTo(X[a], X[a + 1]); g.lineTo(X[b], X[b + 1]); g.lineTo(X[d], X[d + 1]); g.closePath(); g.fill(); g.stroke();
+  }
+}
 function drawMarkers() {
   const vt = viconT(T), M0 = mks[0].M, i0 = Math.floor(vt * M0.rate);
   const key = [vt.toFixed(4), mkView.yaw, mkView.pitch, mkView.zoom, mks[0].cv.clientWidth].join();
@@ -191,6 +219,7 @@ function drawMarkers() {
       const dx = p[0] - c[0], dy = p[1] - c[1], dz = p[2] - c[2], u = cy * dx - sy * dy, w = sy * dx + cy * dy;
       return [W / 2 + u * s, H / 2 - (dz * cp - w * sp) * s];
     });
+    if (mk.mesh) drawMesh(g, mk, vt * S.vicon_rate, W, H, s, cy, sy, cp, sp, c);
     g.strokeStyle = '#16a34a'; g.lineWidth = 2;
     for (const [a, b] of M.bones) if (P[a] && P[b]) { g.beginPath(); g.moveTo(...P[a]); g.lineTo(...P[b]); g.stroke(); }
     let filled = 0, suspect = 0;

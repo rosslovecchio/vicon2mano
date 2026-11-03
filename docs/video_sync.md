@@ -248,11 +248,24 @@ missing is whole frames with the hand out of view (every marker gone at once): 5
 frames per trial, most in Trial1 Hands only.
 
 **Labellings player** (`scripts/soma/labels_player.py <video dir>`, writes `labels_player.html`
-beside the trial's player): cam1 plus three live marker panes on one shared view. The panes
-are the raw Vicon labels, SOMA labels without fill (graded by `flag_frames.py`), and the
-learned fill (graded by the fit's `flags.json`, nearest fitted frame). It uses only existing
-outputs. So far it exists only for P16 Trial2 HOI. The markers pane in `realsense_player`
-now accepts a list of such sets (`markers_pane(..., status, grade, note)`).
+beside the trial's player; so far only P16 Trial2 HOI, 66 MB, so keep `cam1.mp4` and `sync.json`
+next to it). A 2×2 grid, with no sync strip or offset controls:
+
+| | |
+|---|---|
+| cam1 | Vicon labels (raw markers) |
+| SOMA labels, no fill, + fitted mesh | learned gap fill + fitted mesh |
+
+- The three marker panes share one view (drag to rotate, wheel to zoom). The meshes are drawn
+  live in the page from the fits' vertices (int16 mm, painter's algorithm), so they rotate
+  with the markers. Mesh frames are every 10th Vicon frame (20 Hz), the learned-fill fit's frames;
+  the SOMA mesh takes the same frames from its every-frame fit. Markers are drawn at 100 Hz.
+- Grades and flags are as above: the SOMA pane is graded by `flag_frames.py`, the learned-fill
+  pane by the fit's `flags.json` (nearest fitted frame). Filled markers are hollow, markers on a
+  flagged finger get an orange ring.
+- It uses only existing outputs: nothing is re-fitted or re-encoded. The player template
+  takes `hide_sync`, `cols` and `faces` in its metadata for this layout, and a marker set may
+  carry a `mesh` (`frames` as Vicon rows, int16 `verts`).
 
 ### EMG pane (HD-sEMG heatmaps)
 

@@ -554,9 +554,11 @@ Ground-truth validation of strategyGMM: inject a known swap into clean real mark
 HTML animation: fitted MANO mesh surface + Vicon marker overlay, at real elapsed-time playback speed.
 
 - `resolve_model_path(mano_dir: str, side: str) -> Path` â€” (no docstring)
-- `forward_vertices(model, global_orient, hand_pose, transl, betas, scale=1.0, thickness=1.0, seglen=None) -> np.ndarray` â€” No-grad forward pass -> (n, 778, 3) mesh vertices in metres, with the fit's global ``scale``, palm ``thickness`` and per-segment finger lengths ``seglen`` (fit_surface_markers --fit-scale / --fit-thickness / --fit-segments).
+- `forward_mano(model, global_orient, hand_pose, transl, betas, scale=1.0, thickness=1.0, seglen=None)` â€” No-grad smplx forward pass (metres) with the fit's global ``scale``, palm ``thickness`` and per-segment finger lengths ``seglen`` (fit_surface_markers --fit-scale / --fit-thickness / --fit-segments).
+- `forward_vertices(model, global_orient, hand_pose, transl, betas, scale=1.0, thickness=1.0, seglen=None) -> np.ndarray` â€” (n, 778, 3) mesh vertices in metres (see forward_mano).
 - `load_model(mano_dir: str, side: str, pose_dim: int)` â€” smplx MANO matching a fit's pose parameterisation: 45 = raw axis-angle, else PCA.
 - `fit_vertices_mm(model, fit, frame_idx) -> np.ndarray` â€” (n, 778, 3) mesh vertices in mm for these frames of a FitResult npz.
+- `fit_joints21_m(model, fit, frame_idx) -> np.ndarray` â€” (n, 21, 3) joints in metres, repo 21-joint order (= MediaPipe Hands' landmark order), for these fit frames.
 - `view_box(verts_mm, markers_mm)` â€” (center, half-width) of a fixed cubic view over every vertex and finite marker.
 - `render_mesh_frames(verts_mm, markers_mm, faces, bone_pairs, center, half, frame_numbers, dpi=85, marker_colors=None) -> list[bytes]` â€” One JPEG per frame: opaque mesh + marker bones + markers; center is (3,) for fixed axes or (n, 3) to follow.
 - `main() -> None` â€” (no docstring)
@@ -962,6 +964,13 @@ Gap-fill accuracy: cut artificial gaps where gap_fill.py's output has observed m
 
 Blank the gap-filled values of a labelled export: keep a value only where the raw Vicon export has a point there.
 
+
+### `scripts/soma/labels_player.py`
+
+Player comparing one trial's labellings beside cam1: Vicon labels, SOMA labels (no fill), learned gap fill.
+
+- `mesh_pane(model, fit: dict, rows: np.ndarray, keep: np.ndarray) -> dict` â€” Mesh vertices (int16 mm, (n, 778, 3)) of the fit's frames `keep`, with their Vicon rows, for the player.
+- `main()` â€” (no docstring)
 
 ### `scripts/soma/live_viewer.py`
 
