@@ -822,7 +822,8 @@ Geometric self-consistency report: does a trial's own bone-length geometry hang 
 
 Export RealSense .bag colour streams to MP4, sync them to Vicon, build an HTML player.
 
-- `read_color_frames(bag: Path)` â€” Yield (frame_number, global_timestamp_ms, rgb array) once per recorded colour frame.
+- `read_color_frames(bag: Path, depth: bool=False)` â€” Yield (frame_number, global_timestamp_ms, rgb array, depth in m aligned to colour or None), once per recorded colour frame.
+- `bag_intrinsics(bag: Path) -> tuple[dict, float]` â€” (colour intrinsics as fx, fy, ppx, ppy, width, height, model, coeffs; depth scale in m per unit) of a bag.
 - `export_bag(bag: Path, mp4: Path, crf: int=23) -> list[tuple]` â€” Write one bag's colour stream to a VFR MP4; return (frame_number, ts_ms, pts_ms, motion) rows.
 - `cam_summary(name: str, rows) -> dict` â€” Frame-rate stats plus the arrays the player needs.
 - `sync_to_vicon(vicon_csv: Path, rs_dir: Path, cams: list[dict], offset: float | None, X: np.ndarray, labels: list[str], rate: float) -> tuple[dict, np.ndarray]` â€” Measure the RealSense->Vicon offset; return (sync record, hand-speed trace at 50 Hz).

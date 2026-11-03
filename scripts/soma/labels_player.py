@@ -8,14 +8,17 @@ Uses only existing outputs (nothing is re-fitted or re-encoded):
   learned fill  results/soma/real_fill_w01/movement/<P>/<slug>/soma_labelled_filled.csv (+ .npz fill status),
                 flags from the fit's flags.json (frame_diagnostics.py; fitted every 10th frame, each frame
                 takes the grade of the nearest fitted one)
-2x2 grid: cam1, Vicon labels, SOMA labels with their fitted mesh, learned fill with its fitted mesh.
-The marker panes share one view (drag to rotate) and the meshes are drawn live from the fits' vertices,
-at the fits' frames (every 10th Vicon frame, 20 Hz). Filled markers are hollow, markers on a flagged
+The marker panes share one view (drag to rotate). Filled markers are hollow, markers on a flagged
 finger get an orange ring, and a yellow/red border means partly/not usable (grades as in
-scripts/soma/mesh_video.py). The sync strip and offset controls are left out.
+scripts/soma/mesh_video.py).
 
     python scripts/soma/labels_player.py results/video/P16/Trial2_HOI
-    -> results/video/P16/Trial2_HOI/labels_player.html
+    -> labels_player.html: cam1 + the three marker panes, with the sync strip and offset controls
+
+    python scripts/soma/labels_player.py results/video/P16/Trial2_HOI --mesh
+    -> labels_player_mesh.html: 2x2 grid (cam1, Vicon labels, SOMA + its fitted mesh, learned fill + its
+       fitted mesh), no sync controls. The meshes are drawn live from the fits' vertices at the fits'
+       frames (every 10th Vicon frame, 20 Hz), so the page is ~66 MB.
 """
 from __future__ import annotations
 
@@ -48,6 +51,7 @@ def mesh_pane(model, fit: dict, rows: np.ndarray, keep: np.ndarray) -> dict:
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("video_dir", type=Path, help="results/video/<P>/<Trial>_<cond>, already synced")
+    ap.add_argument("--mesh", action="store_true", help="2x2 page with the fitted meshes, without sync controls")
     a = ap.parse_args()
     vdir = a.video_dir.resolve()
     p, trial = vdir.parent.name, vdir.name
@@ -61,14 +65,15 @@ def main():
 
     soma = soma_fit_dir(p, trial)
     soma_fit, rows, _, _, _, grade, note = load_fit(soma)  # fullset: every frame, flag_frames.py grades
-    model = am.load_model(str(MANO_DIR), "right", int(soma_fit["hand_pose"].shape[1]))
+    model = am.load_model(str(MANO_DIR), "right", int(soma_fit["hand_pose"].shape[1])) if a.mesh else None
     Xs, ls = load_csv(str(soma / "soma_labelled.csv"))
     g, n = np.zeros(len(Xs), int), [""] * len(Xs)
     for r, gg, nn in zip(rows, grade, note):
         g[r], n[r] = gg, nn
-    panes.append(markers_pane(Xs, ls, rate, title="SOMA labels, no fill + fitted mesh",
+    panes.append(markers_pane(Xs, ls, rate, title="SOMA labels, no fill" + (" + fitted mesh" if a.mesh else ""),
                               status=np.where(np.isfinite(Xs).all(-1), 0, 2), grade=g, note=n))
-    panes[-1]["mesh"] = mesh_pane(model, soma_fit, rows, np.arange(0, len(rows), 10))  # 20 Hz, like the learned-fill fit
+    if a.mesh:
+        panes[-1]["mesh"] = mesh_pane(model, soma_fit, rows, np.arange(0, len(rows), 10))  # 20 Hz, like the learned-fill fit
 
     fill = soma_fit_dir(p, trial, "real_fill_w01/movement")
     fill_fit, rows, _, names, st_fit, grade, note = load_fit(fill)  # fitted every 10th frame
@@ -80,19 +85,22 @@ def main():
     near = np.clip(np.searchsorted(rows, np.arange(len(Xf)) - 5), 0, len(rows) - 1)  # nearest fitted frame
     cols = [lf.index(x) for x in names]
     status[:, cols] = np.where(st_fit[near] == 3, 3, status[:, cols])
-    panes.append(markers_pane(Xf, lf, rate, title="Learned gap fill + fitted mesh", status=status,
-                              grade=grade[near], note=[note[k] for k in near]))
-    panes[-1]["mesh"] = mesh_pane(model, fill_fit, rows, np.arange(len(rows)))
+    panes.append(markers_pane(Xf, lf, rate, title="Learned gap fill" + (" + fitted mesh" if a.mesh else " (fit flags)"),
+                              status=status, grade=grade[near], note=[note[k] for k in near]))
+    if a.mesh:
+        panes[-1]["mesh"] = mesh_pane(model, fill_fit, rows, np.arange(len(rows)))
 
     t, speed = hand_speed(X, labels, rate)
     step = int(round(rate / 50))
     meta = {"title": f"{p} {trial.replace('_', ' ')} - labellings", "trigger_ms": sync.get("trigger_ms"), "cams": [cam],
             "sync": sync, "emg": None, "markers": panes,
-            "hide_sync": True, "cols": 2, "faces": base64.b64encode(np.asarray(model.faces, np.uint16).tobytes()).decode("ascii"),
+            **({"hide_sync": True, "cols": 2, "faces": base64.b64encode(np.asarray(model.faces, np.uint16).tobytes()).decode("ascii")}
+               if a.mesh else {}),
             "speed50": np.round(speed[: len(speed) // step * step].reshape(-1, step).mean(axis=1), 1).tolist()}
     html = (REPO / "scripts/shared/realsense_player.html.in").read_text(encoding="utf-8").replace("/*META*/null", json.dumps(meta))
-    (vdir / "labels_player.html").write_text(html, encoding="utf-8")
-    print("->", vdir / "labels_player.html")
+    out = vdir / ("labels_player_mesh.html" if a.mesh else "labels_player.html")
+    out.write_text(html, encoding="utf-8")
+    print("->", out)
 
 
 if __name__ == "__main__":
