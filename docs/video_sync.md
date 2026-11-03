@@ -247,12 +247,17 @@ the hand out of view. Yellow in HOI is mostly thumb1 abduction a few degrees pas
 missing is whole frames with the hand out of view (every marker gone at once): 52–2350
 frames per trial, most in Trial1 Hands only.
 
-**Labellings player** (`scripts/soma/labels_player.py <video dir> [--mesh]`; so far only P16 Trial2
-HOI). Both pages sit beside the trial's player and need its `cam1.mp4` and `sync.json`:
+**Labellings player** (`scripts/soma/labels_player.py <video dir> [--mesh]`). Built on 2026-11-03 for the
+51 trials that have a SOMA fit and/or a learned-fill fit (33 have both, 17 only the SOMA fit, P17
+Trial1 HOI only the learned fill); the 16 with neither (P1, P2, P5, and all of P13 and P17 except
+the trials above) get no page, since the raw markers are already in the standard player. A pane
+whose fit is missing is simply left out. Both pages sit beside the trial's player and need its
+`cam1.mp4` and `sync.json`:
 
-- `labels_player.html` (13 MB): cam1 and three live marker panes in a row (raw Vicon labels, SOMA
+- `labels_player.html` (about 10–15 MB): cam1 and the marker panes in a row (raw Vicon labels, SOMA
   labels without fill, learned fill), with the sync strip and offset controls.
-- `labels_player_mesh.html` (`--mesh`, 66 MB): a 2×2 grid, with no sync strip or offset controls.
+- `labels_player_mesh.html` (`--mesh`, 30–100 MB, 2.9 GB for all): a 2×2 grid, with no sync strip
+  or offset controls. With both fits it is:
 
   | | |
   |---|---|
@@ -351,5 +356,6 @@ by up to 1.1 s. That looks like the RealSense PC's clock being re-synced between
 with its MP4s, frame CSVs and `sync.json` beside it, plus `sync_summary.csv`. Every synced
 trial has the markers pane, and fitted trials also have the whole-trial 50 Hz mesh.
 P16 Trial2 HOI instead has the whole-trial mesh at every frame (200 Hz). 58 trials
-also have the HD-sEMG panes (see emg.md). To refresh it, copy
-`results/video/.` over it again.
+also have the HD-sEMG panes (see emg.md). The 51 trials with a SOMA and/or learned-fill fit also
+have `labels_player.html` and `labels_player_mesh.html` next to `player.html` (3.5 GB together).
+To refresh it, copy `results/video/.` over it again.

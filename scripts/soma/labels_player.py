@@ -48,6 +48,34 @@ def mesh_pane(model, fit: dict, rows: np.ndarray, keep: np.ndarray) -> dict:
     return {"frames": rows[keep].tolist(), "verts": base64.b64encode(v.tobytes()).decode("ascii")}
 
 
+def soma_pane(soma: Path, rate: float, mesh: bool):
+    """(marker pane, fit, rows) of the SOMA-labelled, unfilled trial; graded by flag_frames.py, one fit row per frame."""
+    fit, rows, _, _, _, grade, note = load_fit(soma)
+    X, ls = load_csv(str(soma / "soma_labelled.csv"))
+    g, n = np.zeros(len(X), int), [""] * len(X)
+    for r, gg, nn in zip(rows, grade, note):
+        g[r], n[r] = gg, nn
+    pane = markers_pane(X, ls, rate, title="SOMA labels, no fill" + (" + fitted mesh" if mesh else ""),
+                        status=np.where(np.isfinite(X).all(-1), 0, 2), grade=g, note=n)
+    return pane, fit, rows
+
+
+def fill_pane(fill: Path, rate: float, mesh: bool):
+    """(marker pane, fit, rows) of the learned-fill trial; graded by the fit's flags.json (fitted every 10th frame)."""
+    fit, rows, _, names, st_fit, grade, note = load_fit(fill)
+    X, ls = load_csv(str(fill / "soma_labelled_filled.csv"))
+    ls = [x.split(":")[-1] for x in ls]
+    how = np.load(fill / "soma_labelled_filled.npz")
+    how = how["how"][:, [list(how["names"]).index(x) for x in ls]]
+    status = np.where(np.isfinite(X).all(-1), np.where(how == 0, 0, 1), 2).astype(np.uint8)
+    near = np.clip(np.searchsorted(rows, np.arange(len(X)) - 5), 0, len(rows) - 1)  # nearest fitted frame
+    cols = [ls.index(x) for x in names]
+    status[:, cols] = np.where(st_fit[near] == 3, 3, status[:, cols])
+    pane = markers_pane(X, ls, rate, title="Learned gap fill" + (" + fitted mesh" if mesh else " (fit flags)"),
+                        status=status, grade=grade[near], note=[note[k] for k in near])
+    return pane, fit, rows
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("video_dir", type=Path, help="results/video/<P>/<Trial>_<cond>, already synced")
@@ -55,40 +83,25 @@ def main():
     a = ap.parse_args()
     vdir = a.video_dir.resolve()
     p, trial = vdir.parent.name, vdir.name
+    soma, fill = soma_fit_dir(p, trial), soma_fit_dir(p, trial, "real_fill_w01/movement")
+    soma = soma if soma and (soma / "fit.npz").exists() else None
+    if not (soma or fill):
+        sys.exit(f"no SOMA fit for {vdir}")
     sync = json.loads((vdir / "sync.json").read_text())
     with open(vdir / "cam1_frames.csv") as f:
         cam = cam_summary("cam1", [(int(r["frame_number"]), float(r["timestamp_ms"]), int(r["pts_ms"]), float(r["motion"]))
                                    for r in csv.DictReader(f)])
 
     X, labels, rate = load_trajectories(Path(sync["vicon_csv"]))
-    panes = [markers_pane(X, labels, rate, title="Vicon labels")]
-
-    soma = soma_fit_dir(p, trial)
-    soma_fit, rows, _, _, _, grade, note = load_fit(soma)  # fullset: every frame, flag_frames.py grades
-    model = am.load_model(str(MANO_DIR), "right", int(soma_fit["hand_pose"].shape[1])) if a.mesh else None
-    Xs, ls = load_csv(str(soma / "soma_labelled.csv"))
-    g, n = np.zeros(len(Xs), int), [""] * len(Xs)
-    for r, gg, nn in zip(rows, grade, note):
-        g[r], n[r] = gg, nn
-    panes.append(markers_pane(Xs, ls, rate, title="SOMA labels, no fill" + (" + fitted mesh" if a.mesh else ""),
-                              status=np.where(np.isfinite(Xs).all(-1), 0, 2), grade=g, note=n))
-    if a.mesh:
-        panes[-1]["mesh"] = mesh_pane(model, soma_fit, rows, np.arange(0, len(rows), 10))  # 20 Hz, like the learned-fill fit
-
-    fill = soma_fit_dir(p, trial, "real_fill_w01/movement")
-    fill_fit, rows, _, names, st_fit, grade, note = load_fit(fill)  # fitted every 10th frame
-    Xf, lf = load_csv(str(fill / "soma_labelled_filled.csv"))
-    lf = [x.split(":")[-1] for x in lf]
-    how = np.load(fill / "soma_labelled_filled.npz")
-    how = how["how"][:, [list(how["names"]).index(x) for x in lf]]
-    status = np.where(np.isfinite(Xf).all(-1), np.where(how == 0, 0, 1), 2).astype(np.uint8)
-    near = np.clip(np.searchsorted(rows, np.arange(len(Xf)) - 5), 0, len(rows) - 1)  # nearest fitted frame
-    cols = [lf.index(x) for x in names]
-    status[:, cols] = np.where(st_fit[near] == 3, 3, status[:, cols])
-    panes.append(markers_pane(Xf, lf, rate, title="Learned gap fill" + (" + fitted mesh" if a.mesh else " (fit flags)"),
-                              status=status, grade=grade[near], note=[note[k] for k in near]))
-    if a.mesh:
-        panes[-1]["mesh"] = mesh_pane(model, fill_fit, rows, np.arange(len(rows)))
+    panes, model = [markers_pane(X, labels, rate, title="Vicon labels")], None
+    for fit_dir, build, stride in ((soma, soma_pane, 10), (fill, fill_pane, 1)):  # SOMA mesh: 20 Hz, like the fill fit
+        if not fit_dir:
+            continue
+        pane, fit, rows = build(fit_dir, rate, a.mesh)
+        if a.mesh:
+            model = model or am.load_model(str(MANO_DIR), "right", int(fit["hand_pose"].shape[1]))
+            pane["mesh"] = mesh_pane(model, fit, rows, np.arange(0, len(rows), stride))
+        panes.append(pane)
 
     t, speed = hand_speed(X, labels, rate)
     step = int(round(rate / 50))
