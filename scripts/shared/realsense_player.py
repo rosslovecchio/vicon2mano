@@ -28,7 +28,7 @@ import av
 import numpy as np
 import pyrealsense2 as rs
 
-from vicon2mano.core.video_sync import (XCORR_BIAS_S, find_trigger_pulse, find_vicon_csv, hand_speed,
+from vicon2mano.core.video_sync import (XCORR_BIAS_S, find_trigger_pulse, find_vicon_csv, finger_speed, hand_speed,
                                         load_trajectories, motion_lag, read_sync_channel, trigger_log_ms, vicon_start_ms)
 from vicon2mano.core.viz import marker_bone_pairs, marker_color
 
@@ -119,8 +119,13 @@ def sync_to_vicon(vicon_csv: Path, rs_dir: Path, cams: list[dict], offset: float
     sync = {"vicon_csv": str(vicon_csv), "vicon_start_ms": vs, "vicon_rate": rate, "offset_s": round(offset, 4),
             "method": method, "pulse_onset_s": onset, "trigger_ms": trig,
             "xcorr": {k: {"lag_s": round(lag, 3), "r": round(r, 3)} for k, (lag, r) in xcorr.items()}}
+    return sync, to_50hz(speed, rate)
+
+
+def to_50hz(x: np.ndarray, rate: float) -> np.ndarray:
+    """Block-mean a Vicon-rate trace down to 50 Hz for the player."""
     step = int(round(rate / 50))
-    return sync, np.round(speed[: len(speed) // step * step].reshape(-1, step).mean(axis=1), 1)
+    return np.round(x[: len(x) // step * step].reshape(-1, step).mean(axis=1), 1)
 
 
 def markers_pane(X: np.ndarray, labels: list[str], rate: float, hz: float = 100.0) -> dict:
@@ -168,11 +173,12 @@ def build(rs_dir: Path, out: Path | None = None, vicon: Path | None = None, offs
         print({k: v for k, v in cams[-1].items() if k not in ("ts", "fn", "motion")})
 
     vicon_csv = vicon or find_vicon_csv(rs_dir)
-    sync, speed, markers = None, None, None
+    sync, speed, markers, fingers = None, None, None, None
     if vicon_csv and vicon_csv.with_suffix(".xcp").exists():
         X, labels, rate = load_trajectories(vicon_csv)
         sync, speed = sync_to_vicon(vicon_csv, rs_dir, cams, offset, X, labels, rate)
         markers = markers_pane(X, labels, rate)
+        fingers = to_50hz(finger_speed(X, labels, rate), rate)
         (out / "sync.json").write_text(json.dumps(sync, indent=1))
         print("sync:", {k: v for k, v in sync.items() if k != "vicon_csv"})
     else:
@@ -199,7 +205,8 @@ def build(rs_dir: Path, out: Path | None = None, vicon: Path | None = None, offs
 
     emg = json.loads((out / "emg.json").read_text()) if sync and (out / "emg.json").exists() else None  # scripts/emg/emg_pane.py
     meta = {"title": f"{p} {trial} {cond}", "trigger_ms": trigger_log_ms(rs_dir), "cams": panes, "sync": sync, "emg": emg, "markers": markers,
-            "speed50": speed.tolist() if speed is not None else None}
+            "speed50": speed.tolist() if speed is not None else None,
+            "finger50": fingers.tolist() if fingers is not None else None}
     html = (Path(__file__).with_name("realsense_player.html.in").read_text(encoding="utf-8")
             .replace("/*META*/null", json.dumps(meta)))
     (out / "player.html").write_text(html, encoding="utf-8")

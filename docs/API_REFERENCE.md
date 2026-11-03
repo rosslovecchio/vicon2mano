@@ -188,6 +188,22 @@ Independent manual identity validation: compare hand-reviewed marker identities 
 - `palm_triangle_bone_deltas(markers_orig: np.ndarray, labels_orig: list[str], markers_corrected: np.ndarray, labels_corrected: list[str], frame: int, anchor_na...)` â€” |orig bone length - corrected bone length| for each of the 3 pairs within the palm anchor triangle, at one frame -- the same check used in the audit's P7 spot-checks, generalised so it can be run systematically over every ``wrong_label`` judgement rather than by hand.
 - `build_annotations_from_correction(markers_orig: np.ndarray, labels_orig: list[str], markers_corrected: np.ndarray, labels_corrected: list[str], visited_frame...)` â€” ``manual_annotations.csv`` rows for one trial, built by diffing the original Vicon-labelled recording against a hand-corrected export, for exactly the frames in ``visited_frames`` (everything else is unreviewed and must not be scored either way).
 
+### `vicon2mano/core/video_sync.py`
+
+Map RealSense frame timestamps onto a Vicon trial's clock.
+
+- `vicon_start_ms(vicon_csv: Path) -> int` â€” Epoch ms (UTC) at which the Vicon capture started, from the trial's .xcp.
+- `trigger_log_ms(rs_dir: Path) -> int | None` â€” Epoch ms of the first trigger_sent=true row of rs_dir's triggerlog, or None.
+- `find_vicon_csv(rs_dir: Path) -> Path | None` â€” Vicon CSV for <root>/<P>/<Trial>/<cond>/RealSense, via <root>/manual_frames.csv.
+- `read_sync_channel(vicon_csv: Path) -> tuple[np.ndarray, float] | None` â€” The Devices-section ``Sync`` analog channel and its rate (Hz); None for a trajectories-only export.
+- `find_trigger_pulse(sig: np.ndarray, rate: float, width_s: float=1.0, tol: float=0.05) -> float | None` â€” Onset (s) of the first single high plateau lasting width_s +- tol, or None.
+- `load_trajectories(vicon_csv: Path) -> tuple[np.ndarray, list[str], float]` â€” (markers (T, N, 3) mm, labels, Trajectories rate in Hz) of a Vicon trial CSV.
+- `hand_speed(X: np.ndarray, labels: list[str], rate: float) -> tuple[np.ndarray, np.ndarray]` â€” (t [s], median hand-marker speed [mm/s]) between consecutive Vicon frames.
+- `finger_speed(X: np.ndarray, labels: list[str], rate: float) -> np.ndarray` â€” Median finger-marker speed relative to the palm centroid [mm/s], running-median filtered over ~0.1 s.
+- `motion_lag(video_t: np.ndarray, video_motion: np.ndarray, vicon_t: np.ndarray, vicon_speed: np.ndarray, search_s: float=3.0, step_s: float=0.005) -> tuple[fl...)` â€” (lag, r): the shift added to video_t that best correlates log-motion with log-speed.
+- `sync_mask(sig: np.ndarray, fs: float, threshold: float, keep_s: float=0.2) -> np.ndarray` â€” 1 kHz boolean mask of where a sync channel is off its baseline (median) by more than threshold.
+- `mask_offset(a: np.ndarray, v: np.ndarray) -> tuple[float, float, float]` â€” (lag s, IoU, ambiguity) aligning two 1 kHz sync masks so a(t + lag) ~ v(t).
+
 ### `vicon2mano/core/viz.py`
 
 Shared visualisation vocabulary for relabelling animations.
@@ -474,6 +490,13 @@ Train the deep marker labeler (Han et al., SIGGRAPH 2018).
 - `main()` â€” (no docstring)
 
 ## Scripts: scripts/emg
+
+### `scripts/emg/emg_pane.py`
+
+Add a trial's HD-sEMG to its RealSense player: per grid, a 16x6 electrode map and a channel x time heatmap.
+
+- `emg_sync(aux: np.ndarray, fs: float, sync: dict) -> dict | None` â€” EMG-minus-Vicon offset: AUX 1 vs Vicon Sync pattern, else AUX 1's 1 s pulse vs the RealSense trigger log.
+- `main()` â€” (no docstring)
 
 ### `scripts/emg/emg_quality.py`
 
@@ -781,6 +804,21 @@ Geometric self-consistency report: does a trial's own bone-length geometry hang 
 - `run_all(out_dir: Path, thresholds_mm: list[float], jump_mad_multiplier: float, min_deviation_mm: float, make_plots_flag: bool) -> None` â€” (no docstring)
 - `main(argv=None)` â€” (no docstring)
 
+### `scripts/shared/realsense_player.py`
+
+Export RealSense .bag colour streams to MP4, sync them to Vicon, build an HTML player.
+
+- `read_color_frames(bag: Path)` â€” Yield (frame_number, global_timestamp_ms, rgb array) once per recorded colour frame.
+- `export_bag(bag: Path, mp4: Path, crf: int=23) -> list[tuple]` â€” Write one bag's colour stream to a VFR MP4; return (frame_number, ts_ms, pts_ms, motion) rows.
+- `cam_summary(name: str, rows) -> dict` â€” Frame-rate stats plus the arrays the player needs.
+- `sync_to_vicon(vicon_csv: Path, rs_dir: Path, cams: list[dict], offset: float | None, X: np.ndarray, labels: list[str], rate: float) -> tuple[dict, np.ndarray]` â€” Measure the RealSense->Vicon offset; return (sync record, hand-speed trace at 50 Hz).
+- `to_50hz(x: np.ndarray, rate: float) -> np.ndarray` â€” Block-mean a Vicon-rate trace down to 50 Hz for the player.
+- `markers_pane(X: np.ndarray, labels: list[str], rate: float, hz: float=100.0) -> dict` â€” Raw Vicon markers for the player's live 3-D pane: int16 mm at ~hz, -32768 = missing.
+- `rs_dir_of(video_dir: Path) -> Path` â€” The RealSense folder an output folder results/video/<P>/<Trial>_<cond> was built from.
+- `rebuild(video_dir: Path)` â€” Rebuild an existing player (reuses its MP4s and Vicon CSV, keeps a manual offset), e.g. after adding a pane.
+- `build(rs_dir: Path, out: Path | None=None, vicon: Path | None=None, offset: float | None=None, crf: int=23, force: bool=False)` â€” Export (or reuse) the cameras, sync to Vicon, and write player.html with any mesh/EMG panes.
+- `main()` â€” (no docstring)
+
 ### `scripts/shared/relabel_markers.py`
 
 Label an unlabeled (but complete) Vicon marker cloud — positions untouched.
@@ -828,6 +866,12 @@ Fold the direct-Nexus spot-check results (spotcheck_frames.m) into results/share
 - `build_section(manifest: pd.DataFrame, results: pd.DataFrame) -> str` â€” (no docstring)
 - `run(manifest_csv: Path, results_csv: Path, audit_md: Path) -> None` â€” (no docstring)
 - `main(argv=None)` â€” (no docstring)
+
+### `scripts/shared/video_sync_summary.py`
+
+Collect every results/video/*/*/sync.json into results/video/sync_summary.csv.
+
+- `main()` â€” (no docstring)
 
 ## Scripts: scripts/soma
 
@@ -913,6 +957,13 @@ Render the fitted-MANO mesh animation for every trial that run_fullset.py has fi
 - `trial_list(out: Path, participants: list[str])` â€” [(participant, slug, raw_csv, fit_dir)] for every logged trial of these participants.
 - `flagged_participants(status: Path) -> set[str]` â€” (no docstring)
 - `render(p, sg, raw, tdir, mesh_dir, args) -> bool` â€” (no docstring)
+- `main()` â€” (no docstring)
+
+### `scripts/soma/mesh_video.py`
+
+Render a window of a trial's fitted MANO mesh to MP4 and add it to that trial's RealSense player.
+
+- `fit_dir_of(video_dir: Path) -> Path | None` â€” results/soma/fullset/<P>/<slug> of a video folder (fit slugs spell "Trial 1" as Trial_1).
 - `main()` â€” (no docstring)
 
 ### `scripts/soma/movement_fit.py`

@@ -208,9 +208,9 @@ Notes:
 .viconvenv/Scripts/python.exe scripts/emg/emg_pane.py results/video/P16/Trial2_HOI
 ```
 
-The EMG goes on the Vicon clock via the 1 s pulse that both Novecento AUX 1 and
-Vicon `Sync` record (`aux_pulse_offset`), and the player shows per-grid 16×6
-electrode maps plus channel × time heatmaps. Details, the grid layout and the
+The EMG goes on the Vicon clock by matching the sync pattern that both Novecento AUX 1 and
+Vicon `Sync` record (`sync_mask` + `mask_offset`; 58 of 67 trials). The player then shows a
+grid-RMS vs finger-motion strip, per-grid 16×6 electrode maps, and channel × time heatmaps. Details, the grid layout and the
 remaining sync cases are in [emg.md](emg.md).
 
 `realsense_player.py` embeds `emg.json` when it is present. `mesh_video.py` and

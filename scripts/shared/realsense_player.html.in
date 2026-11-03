@@ -39,6 +39,8 @@
   · scale <select id="escale"><option value="row">per channel (p5–p99)</option><option value="abs">absolute</option></select>
   <span id="emethod" style="color:#888"></span>
 </div>
+<canvas id="emgstrip" height="110" style="width:calc(100% - 28px);margin:4px 14px 0;display:none;background:#0e0f12"></canvas>
+<div class="hint" id="emglegend" style="display:none"></div>
 <canvas id="emgspatial" style="margin:4px 14px;display:none"></canvas>
 <canvas id="emgmap" style="width:calc(100% - 28px);margin:0 14px;display:none;background:#000;image-rendering:pixelated"></canvas>
 <div class="hint">Space play/pause · ←/→ step one frame of the chosen camera (Shift ×10) · per-camera offset (ms) shifts that camera on the common clock.
@@ -163,7 +165,11 @@ function drawMarkers() {
 
 // ---- EMG heatmap: channel x time, same ±3 s axis as the strip -------------
 const E = S && META.emg, GAP = 6;
-let emgData, emgLut, emgKey = '', emgLo, emgSpan;
+let emgData, emgLut, emgKey = '', emgLo, emgSpan, emgGridN, fingerN;
+const smooth = (a, k) => Array.from(a, (_, i) => { let s = 0, n = 0; for (let j = Math.max(0, i - k); j <= Math.min(a.length - 1, i + k); j++) { s += a[j]; n++; } return s / n; });
+const normLin = a => { const s = [...a].sort((x, y) => x - y), lo = s[Math.floor(s.length * .05)], hi = s[Math.floor(s.length * .99)] || 1;
+                       return a.map(v => Math.max(0, Math.min(1.1, (v - lo) / (hi - lo || 1)))); };
+const GCOLS = ['#ff8a5c', '#a8e05f', '#4dd0ff', '#d58cff'];
 if (E) {
   emgData = Uint8Array.from(atob(E.data), c => c.charCodeAt(0));
   const nRows = E.grids.length * E.channels;  // per-channel p5/p99 for the "per channel" scale
@@ -179,10 +185,44 @@ if (E) {
     for (let j = 0; j < 3; j++) emgLut[i * 3 + j] = stops[k][j] + (stops[k + 1][j] - stops[k][j]) * r;
   }
   $('eoff').value = E.offset_s;
-  $('emethod').textContent = `auto: ${E.offset_s} s, ${E.method} · ${E.file} · ${E.grids.length} grids × ${E.channels} ch, ` +
+  $('emethod').textContent = `auto: ${E.offset_s} s, ${E.method}${E.iou != null ? ` (IoU ${E.iou}, ambiguity ${E.ambiguity})` : ''} · ${E.file} · ${E.grids.length} grids × ${E.channels} ch, ` +
     `log10 RMS 20-450 Hz CAR (absolute: 1 µV dark to ${Math.round(10 ** E.log_max)} µV light); red tick = flagged channel`;
   $('ereset').onclick = () => { $('eoff').value = E.offset_s; };
-  $('emgbar').style.display = 'flex'; $('emgmap').style.display = $('emgspatial').style.display = 'block';
+  $('emgbar').style.display = 'flex';
+  for (const id of ['emgmap', 'emgspatial', 'emgstrip', 'emglegend']) $(id).style.display = 'block';
+  // per-grid mean RMS (uV) over unflagged, non-dead channels, then the strip's log/p99 normalisation
+  emgGridN = E.grids.map((gr, gi) => {
+    const keep = [...Array(E.channels).keys()].filter(c => !gr.flagged.includes(c + 1));
+    const m = new Float32Array(E.windows);
+    for (let w = 0; w < E.windows; w++) {
+      let s = 0, n = 0;
+      for (const c of keep) { const q = emgData[(gi * E.channels + c) * E.windows + w]; if (q) { s += 10 ** (q / 255 * E.log_max); n++; } }
+      m[w] = n ? s / n : 0;
+    }
+    return normLin(smooth(m, 3));
+  });
+  fingerN = META.finger50 ? normLin(META.finger50) : null;
+  $('emglegend').innerHTML = '<span style="color:#fff">white</span> = finger motion (finger markers vs palm, Vicon) · ' +
+    E.grids.map((g, i) => `<span style="color:${GCOLS[i]}">grid ${i + 1}</span>`).join(' · ') +
+    ' = grid-mean RMS 20-450 Hz CAR (flagged channels excluded, ~150 ms smoothing) · each trace scaled linearly to its own p5–p99';
+}
+// grid-mean EMG envelopes against finger motion, same ±3 s axis as the strips above
+function drawEmgStrip() {
+  const cv = $('emgstrip'), W = cv.width = cv.clientWidth, H = cv.height, g = cv.getContext('2d'), span = 3000;
+  const vt0 = viconT(T), eoff = +$('eoff').value || 0, x = t => (t - T + span) / (2 * span) * W, y = v => H - 4 - v * (H - 10);
+  const line = (pts, col, lw) => { g.strokeStyle = col; g.lineWidth = lw; g.beginPath(); pts.forEach(([t, v], i) => g[i ? 'lineTo' : 'moveTo'](x(t), y(v))); g.stroke(); };
+  g.clearRect(0, 0, W, H);
+  emgGridN.forEach((a, gi) => {
+    const w0 = Math.max(0, Math.floor((vt0 + eoff - span / 1000) / E.win_s)), w1 = Math.min(E.windows, Math.ceil((vt0 + eoff + span / 1000) / E.win_s));
+    const p = []; for (let w = w0; w < w1; w++) p.push([T + ((w + .5) * E.win_s - eoff - vt0) * 1000, a[w]]);
+    line(p, GCOLS[gi % GCOLS.length], 1.2);
+  });
+  if (fingerN) {
+    const i0 = Math.max(0, Math.floor((vt0 - span / 1000) * 50)), i1 = Math.min(fingerN.length, Math.ceil((vt0 + span / 1000) * 50));
+    const p = []; for (let i = i0; i < i1; i++) p.push([T + ((i + .5) / 50 - vt0) * 1000, fingerN[i]]);
+    line(p, '#fff', 2);
+  }
+  g.strokeStyle = '#888'; g.lineWidth = 1; g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.stroke();
 }
 const emgVal = (r, raw, perRow) => perRow ? Math.max(0, Math.min(255, Math.round((raw - emgLo[r]) / emgSpan[r] * 255))) : raw;
 const rgb = v => `rgb(${emgLut[v * 3]},${emgLut[v * 3 + 1]},${emgLut[v * 3 + 2]})`;
@@ -211,6 +251,7 @@ function drawEmg() {
   const perRow = $('escale').value === 'row', key = [T, W, $('voff').value, $('eoff').value, perRow].join();
   if (key === emgKey) return; emgKey = key;
   drawSpatial(viconT(T) + (+$('eoff').value || 0), perRow);
+  drawEmgStrip();
   if (cv.width !== W) { cv.width = W; cv.height = H; cv.style.height = H + 'px'; }
   const g = cv.getContext('2d'), img = g.createImageData(W, H), px = img.data, span = 3000, eoff = +$('eoff').value || 0;
   for (let x = 0; x < W; x++) {

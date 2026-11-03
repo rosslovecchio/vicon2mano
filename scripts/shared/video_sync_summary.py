@@ -1,6 +1,7 @@
 """Collect every results/video/*/*/sync.json into results/video/sync_summary.csv.
 
 xcorr_err_ms (pulse trials only) is each camera's raw xcorr lag minus the pulse offset.
+emg_* come from emg.json (scripts/emg/emg_pane.py) where the trial has EMG panes.
 """
 import csv
 import json
@@ -25,6 +26,9 @@ def main():
         row["cam_spread_ms"] = round(1000 * (max(lags) - min(lags)))
         if s["method"] == "trigger pulse":
             row["xcorr_err_ms"] = "/".join(str(round(1000 * (lag - s["offset_s"]))) for lag in lags)
+        if (d / "emg.json").exists():
+            e = json.loads((d / "emg.json").read_text())
+            row.update({f"emg_{k}": e.get(k) for k in ("offset_s", "method", "iou", "ambiguity")})
         rows.append(row)
     out = ROOT / "results" / "video" / "sync_summary.csv"
     with open(out, "w", newline="") as f:

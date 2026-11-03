@@ -21,9 +21,9 @@ Two ways to measure ``offset``:
    ``XCORR_BIAS_S``), and one locked 3 s off - always the lower-r camera.
    A >50 ms disagreement between the cameras flags a trial to check by eye.
 
-EMG (Novecento+, its own clock from t=0) gets the same sync signal on AUX 1:
-``emg_t = vicon_t + aux_pulse_offset(...)`` when both sides show the 1 s pulse
-(other pulse shapes: docs/emg.md, sync section).
+EMG (Novecento+, its own clock from t=0) records the same sync line on AUX 1 as
+Vicon on ``Sync``: ``emg_t = vicon_t + lag`` from ``mask_offset`` of the two
+``sync_mask``s, whatever the pattern (pulse, bursts, train). See docs/emg.md.
 """
 from __future__ import annotations
 
@@ -114,6 +114,19 @@ def hand_speed(X: np.ndarray, labels: list[str], rate: float) -> tuple[np.ndarra
     return (np.arange(len(sp)) + 0.5) / rate, np.nan_to_num(sp)
 
 
+def finger_speed(X: np.ndarray, labels: list[str], rate: float) -> np.ndarray:
+    """Median finger-marker speed relative to the palm centroid [mm/s], running-median filtered over ~0.1 s.
+
+    The filter removes single-frame spikes from palm-marker dropouts or label swaps, which jerk the centroid.
+    """
+    from scipy.ndimage import median_filter
+    name = [n.split(":")[-1].lower() for n in labels]
+    fingers = [i for i, n in enumerate(name) if n.startswith(("thumb", "index", "middle", "ring", "pinky"))]
+    palm = np.nanmean(X[:, [i for i, n in enumerate(name) if n.startswith("palm")]], axis=1, keepdims=True)
+    sp = np.nan_to_num(np.nanmedian(np.linalg.norm(np.diff(X[:, fingers] - palm, axis=0), axis=2), axis=1) * rate)
+    return median_filter(sp, size=int(rate * 0.1) | 1)
+
+
 def motion_lag(video_t: np.ndarray, video_motion: np.ndarray, vicon_t: np.ndarray, vicon_speed: np.ndarray,
                search_s: float = 3.0, step_s: float = 0.005) -> tuple[float, float]:
     """(lag, r): the shift added to video_t that best correlates log-motion with log-speed."""
@@ -127,9 +140,32 @@ def motion_lag(video_t: np.ndarray, video_motion: np.ndarray, vicon_t: np.ndarra
     return float(lags[r.argmax()]), float(r.max())
 
 
-def aux_pulse_offset(aux: np.ndarray, fs: float, vicon_csv: Path) -> float | None:
-    """EMG-minus-Vicon time (s) of the 1 s sync pulse on Novecento AUX 1 and Vicon ``Sync``, or None."""
-    a = find_trigger_pulse((np.abs(aux - np.median(aux)) > 8000).astype(float), fs)  # AUX is raw counts, +-32768 FS
-    sync = read_sync_channel(vicon_csv)
-    v = find_trigger_pulse(*sync) if sync else None
-    return None if a is None or v is None else a - v
+def sync_mask(sig: np.ndarray, fs: float, threshold: float, keep_s: float = 0.2) -> np.ndarray:
+    """1 kHz boolean mask of where a sync channel is off its baseline (median) by more than threshold.
+
+    A segment already high at the recording start has an unknown onset: only its last
+    keep_s is kept, so its falling edge is what gets matched.
+    """
+    m = np.abs(sig - np.nanmedian(sig)) > threshold
+    k = int(round(fs / 1000))
+    m = m[: len(m) // k * k].reshape(-1, k).any(1)
+    if m.size and m[0]:
+        end = int(np.argmin(m)) if not m.all() else m.size
+        m[: max(0, end - int(keep_s * 1000))] = False
+    return m
+
+
+def mask_offset(a: np.ndarray, v: np.ndarray) -> tuple[float, float, float]:
+    """(lag s, IoU, ambiguity) aligning two 1 kHz sync masks so a(t + lag) ~ v(t).
+
+    Ambiguity = second-highest local maximum of the overlap / the highest (0 = unique).
+    """
+    from scipy.signal import find_peaks
+    n = 1 << int(np.ceil(np.log2(len(a) + len(v))))
+    c = np.fft.irfft(np.fft.rfft(a.astype(float), n) * np.conj(np.fft.rfft(v.astype(float), n)), n)
+    c = np.r_[c[n - len(v) + 1:], c[: len(a)]]          # lags -len(v)+1 .. len(a)-1
+    i = int(np.argmax(c))
+    peaks = np.sort(c[find_peaks(c, distance=200, prominence=0.05 * c.max())[0]])  # prominence: FFT ripple on a ramp is not a peak
+    best = c[i]
+    second = peaks[-2] if len(peaks) > 1 else 0.0
+    return (i - len(v) + 1) / 1000, float(best / max(a.sum() + v.sum() - best, 1)), float(second / best) if best else 1.0

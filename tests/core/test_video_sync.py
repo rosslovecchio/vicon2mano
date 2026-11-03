@@ -39,15 +39,20 @@ def test_motion_lag_recovers_shift():
     assert abs(lag - true) <= 0.01 and r > 0.8
 
 
-def test_aux_pulse_offset_matches_emg_to_vicon(tmp_path):
-    fs_e = 2000.0
-    vicon = np.full(12_000, 0.007)
-    vicon[1_906:2_906] = 1.25                              # Vicon Sync: 1 s pulse at 1.906 s
-    csv_path = tmp_path / "trial.csv"
-    csv_path.write_text("﻿Devices\n1000\n,,Imported Generic Analog #1 - Electric Potential,\nFrame,Sub Frame,Sync\n,,V\n"
-                        + "".join(f"{i // 5 + 1},{i % 5},{v}\n" for i, v in enumerate(vicon)) + "\nTrajectories\n200\n",
-                        encoding="utf-8")
-    aux = np.zeros(30_000)
-    aux[11_676:13_676] = 30_000                            # AUX 1 (raw counts): same pulse at 5.838 s
-    assert abs(vs.aux_pulse_offset(aux, fs_e, csv_path) - 3.932) < 1e-9
-    assert vs.aux_pulse_offset(np.zeros(30_000), fs_e, csv_path) is None
+def test_mask_offset_matches_pattern_with_extra_event():
+    vicon = np.full(60_000, 0.007)                          # Vicon Sync, 1 kHz, volts
+    vicon[12_550:12_770] = 1.25                             # lone pulse
+    vicon[13_690:15_390] = _mains_burst(1_700, 1000.0)      # burst
+    aux = np.zeros(140_000)                                 # AUX 1, 2 kHz, raw counts; EMG starts 9.77 s earlier
+    aux[2 * 22_320:2 * 22_540] = 30_000
+    aux[2 * 23_460:2 * 25_160] = 30_000 * np.sign(_mains_burst(3_400, 2000.0))
+    aux[2 * 60_000:2 * 60_400] = 30_000                     # an event Vicon never saw
+    lag, iou, amb = vs.mask_offset(vs.sync_mask(aux, 2000.0, 8000), vs.sync_mask(vicon, 1000.0, 0.1))
+    assert abs(lag - 9.77) <= 0.002 and iou > 0.7 and amb < 0.5  # the unmatched event lowers IoU
+
+
+def test_sync_mask_keeps_only_the_falling_edge_of_a_segment_high_at_start():
+    sig = np.zeros(10_000)
+    sig[:4_000] = 1.25                                      # already high when recording starts
+    m = vs.sync_mask(sig, 1000.0, 0.1)
+    assert m[:3_800].sum() == 0 and m[3_800:4_000].all() and not m[4_000:].any()

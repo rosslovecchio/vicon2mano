@@ -183,13 +183,51 @@ diagonal 0.34-0.62. The column wrap (16→17, consecutive numbers but not
 adjacent electrodes) gives r ≤ 0.13. The data cannot tell which end of the grid is
 proximal, so the maps show channel 1 top-left.
 
-## Sync with Vicon (1 s pulse case implemented)
+## Sync with Vicon (implemented for any shared pattern)
 
-**Implemented:** `core.video_sync.aux_pulse_offset(aux, fs, vicon_csv)` returns
-`emg_t - vicon_t` when both AUX 1 and Vicon `Sync` show the single 1 s level pulse
-(P16/Trial2/HOI: AUX 5.838 s vs Vicon 1.906 s, so 3.9325 s). The pulse-train and
-burst shapes below still need a matching step; until then pass `--emg-offset` to
-`scripts/emg/emg_pane.py`.
+AUX 1 and Vicon `Sync` record the same sync line: where both have events, their
+total "on" time agrees to a few ms (e.g. P10/Trial1/HOI 1272 vs 1272 ms). So the
+offset comes from matching the whole pattern, not a particular pulse shape:
+
+- `core.video_sync.sync_mask(sig, fs, threshold)` gives a 1 kHz mask of off-baseline
+  samples (AUX 1: 8000 counts; Vicon: 0.1 V). A segment already high when recording
+  starts keeps only its last 200 ms, so its falling edge is what gets matched. That is
+  needed for P3 (all trials) and P6/Trial2, where both sides start high.
+- `mask_offset(a, v)` cross-correlates the masks (FFT) and returns the lag, the IoU
+  at that lag, and an ambiguity score (second prominent overlap peak / best, so 0 =
+  unique). Extra events on one side only lower the IoU.
+
+`scripts/emg/emg_pane.py` uses that first. If the Vicon export has no `Sync` channel
+(trajectories-only exports: the `.c3d` has no analog data either), it falls back to
+AUX 1's 1 s pulse vs the RealSense trigger log, carried to Vicon time by the video
+sync. That route is exact on trials where the RealSense pulse was caught: first AUX
+pulse − trigger = pattern offset on P9, P10 and P13. In the motion-matched sessions
+the shared AUX/Vicon events are *not* the RealSense trigger, so the route is only
+used with a clean 1 s pulse, and those trials are flagged for a manual check.
+`--emg-offset` overrides both.
+
+**Cohort result (2026-11-03, 67 synced trials):**
+
+- **56 matched by pattern.** IoU ≥ 0.97 everywhere except P15/Trial1/Hands_only (0.93,
+  long 50 Hz bursts). Ambiguity ≤ 0.6 except P16/Trial2/HOI (0.67; confirmed
+  independently by the RealSense pulse) and P5/Trial2/HOI (0.64).
+- The known offsets reproduce: P10/Trial2/Hands_only 6.107 s, P15/Trial1/Hands_only 9.770 s,
+  P2/Trial2/Hands_only 9.354 s, P16/Trial2/HOI 3.932 s.
+- **2 via the RealSense trigger log:** P9/Trial1/Hands_only 5.155 s and
+  P12/Trial1/Hands_only 11.183 s. Their accuracy is the video sync's (motion xcorr,
+  about ±30 ms).
+- **9 without an EMG sync:**
+  - **No Vicon `Sync` and no 1 s AUX pulse:** P4/Trial2/HOI, P5/Trial1/Hands_only,
+    P6/Trial1/Hands_only, P7/Trial1/Hands_only, P12/Trial1/HOI. AUX 1 has events, but
+    there is nothing to match them to.
+  - **AUX 1 flat:** P1/Trial1/Hands_only, P12/Trial2/Hands_only, P17/Trial2/HOI.
+  - **No `.otb4` at all:** P1/Trial1/HOI.
+
+  For these, set the EMG offset by eye in the player (EMG strip against finger motion)
+  and rerun `emg_pane.py --emg-offset <s>`.
+
+`emg.json` stores `offset_s`, `method`, `iou` and `ambiguity`, and
+`results/video/sync_summary.csv` collects them as `emg_*` columns.
 
 ### Visualization (`scripts/emg/emg_pane.py`)
 
@@ -198,7 +236,12 @@ as the cameras, the Vicon data and the mesh. It writes `emg.json`: per-channel R
 signal in 50 ms windows (`core.emg.rms_envelope`), as log10 µV quantised to uint8
 (0 = 1 µV, 255 = 1 mV), about 2 MB per trial. The player then shows:
 
-- one 16×6 electrode map per grid at the cursor (mean of ±100 ms), and
+- a strip of the four grid-mean RMS envelopes (flagged channels excluded, ~150 ms
+  smoothing) against finger motion: Vicon finger-marker speed relative to the palm
+  centroid, `core.video_sync.finger_speed`, despiked with a 0.1 s running median. This
+  is the quick visual check of the EMG↔Vicon sync, since bursts should lead finger
+  movement slightly (electromechanical delay);
+- one 16×6 electrode map per grid at the cursor (mean of ±100 ms); and
 - a channel × time heatmap per grid on the strip's ±3 s axis.
 
 Both have a scale toggle: **per channel** (each channel stretched between its own 5th
@@ -251,3 +294,7 @@ Vicon trajectories are 200 Hz with 5 analog subframes per frame.
   `rms_envelope` / `car_bandpass` were factored out of `channel_quality`
   (same numbers). The 1 s pulse sync (`aux_pulse_offset`) and the player panes
   (`scripts/emg/emg_pane.py`) were added. First used on P16/Trial2/HOI.
+- **2026-11-03**: EMG↔Vicon sync generalised from the single 1 s pulse to any shared
+  pattern (`sync_mask` + `mask_offset`, replacing `aux_pulse_offset`), with the
+  RealSense-trigger fallback. EMG panes were built for 58 of 67 synced trials, and the
+  player gained the grid-RMS vs finger-motion strip.
