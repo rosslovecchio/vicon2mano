@@ -1071,6 +1071,15 @@ Final static fit: every marker within 5 mm of its attached vertex, the pose natu
 - `write_view(path, V, F, M, names, Pk, J21, title)` â€” static.html in fit_surface_markers' layout, so static_search.read_view / Judge.judge read it.
 - `main()` â€” (no docstring)
 
+### `scripts/soma/static_passes.py`
+
+Repeated static_final_fit.py passes for one participant, each starting from the best pass so far.
+
+- `sha(path: Path) -> str` â€” sha256 of a file.
+- `params_file(start: str, participant: str) -> Path` â€” The params file static_final_fit.py reads for ``--start`` (an output folder or a static_search arm).
+- `rank(s: dict) -> tuple` â€” Sort key: valid placement first, then a pose within the limits, then the smallest max distance.
+- `main()` â€” (no docstring)
+
 ### `scripts/soma/static_pose_check.py`
 
 Is a fitted static pose natural? Joint angles of the static fit against the repo's limits.
