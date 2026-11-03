@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     "smplx>=0.1.28",      # provides mano model loader
+    "chumpy==0.70",       # the official MANO .pkl files pickle chumpy objects
     "trimesh>=3.20",
     "tqdm>=4.0",
     "c3d>=0.3",           # read .c3d Vicon files
